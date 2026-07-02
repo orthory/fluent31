@@ -345,8 +345,12 @@ impl Shell {
                     0.0
                 };
                 out.push_str(&format!(
-                    "block cache    {} hits / {} misses ({rate:.1}%)",
+                    "block cache    {} hits / {} misses ({rate:.1}%)\n",
                     s.cache_hits, s.cache_misses
+                ));
+                out.push_str(&format!(
+                    "group commit   {} batches in {} groups, {} wal syncs",
+                    s.commit_batches, s.commit_groups, s.wal_syncs
                 ));
                 Ok(out)
             }

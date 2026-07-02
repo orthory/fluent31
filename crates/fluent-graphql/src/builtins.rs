@@ -288,6 +288,12 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
                         ("discardBytes", Value::String(s.discard_bytes.to_string())),
                         ("cacheHits", Value::String(s.cache_hits.to_string())),
                         ("cacheMisses", Value::String(s.cache_misses.to_string())),
+                        ("commitGroups", Value::String(s.commit_groups.to_string())),
+                        (
+                            "commitBatches",
+                            Value::String(s.commit_batches.to_string()),
+                        ),
+                        ("walSyncs", Value::String(s.wal_syncs.to_string())),
                     ]))))
                 })
             })

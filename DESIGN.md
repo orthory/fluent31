@@ -359,8 +359,23 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
   every command prints its latency.
 - Cargo features: `wasm` (default) gates wasmtime; `--no-default-features`
   builds the pure storage engine (used to cross-check the uring backend).
-- Known v1 limits (documented, deliberate): no group commit (the write
-  mutex serializes WAL fsyncs); no block compression (format-versioned for
+- Group commit (LevelDB-style): concurrent batch writers enqueue on a
+  commit queue; the front becomes leader, drains a bounded group (1 MiB
+  cap, or first+128 KiB when the front batch is small), and pays ONE vlog
+  fsync + ONE WAL fsync for the whole group. Each batch keeps its own WAL
+  record, contiguous seqno range, and all-or-nothing atomicity;
+  `DbStats.commit_{groups,batches}` and `wal_syncs` expose the
+  amortization. The queue engages only under `SyncMode::Always` with
+  actual contention — `SyncMode::Never` writers and uncontended writers
+  take a lean direct path (grouping exists to amortize fsyncs; without
+  them a plain mutex handoff is cheaper). Transaction commits and GC
+  relocations keep their own `write_mu` sections (they validate under the
+  mutex) and do not group. Hard IO failures in the write path now degrade
+  the store (`bg_error`) instead of leaving WAL/vlog state ambiguous, and
+  a leader panic can never strand queued writers (unwind guard).
+- Known v1 limits (documented, deliberate): OCC transaction commits don't
+  group (each pays its own fsync; grouping them would need in-group
+  conflict revalidation); no block compression (format-versioned for
   later); discard-stat lag under lazy leveling (no sampling fallback yet);
   GC relocations bump seqnos, so a hot large-value key can cost a user txn
   a retry; fixed `max_levels` (no dynamic depth); bottom merges rewrite the
