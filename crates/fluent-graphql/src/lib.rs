@@ -1,41 +1,44 @@
 //! GraphQL interface for fluent31.
 //!
-//! One schema exposes both the direct engine operations (`get`, `scan`,
-//! `put`, `delete`, `writeBatch`, module/checkpoint/maintenance admin) and
-//! the registered in-database WASM programs: read-only modules run through
-//! `Query.wasm`, transactional executors through `Mutation.wasmExecute`.
+//! One dynamically-built schema exposes three layers:
+//!
+//! 1. **Direct operations** — `get`, `scan`, `put`, `delete`, `writeBatch`,
+//!    module/checkpoint/maintenance admin (see `builtins.rs`).
+//! 2. **Generic WASM access** — `Query.wasm` / `Mutation.wasmExecute` run
+//!    any installed module with raw byte input/output.
+//! 3. **Typed module fields** — a module exporting `describe` (fluentabi v1
+//!    describe, see `descriptor.rs`) becomes its own typed root field:
+//!    `kind: "query"` modules on Query, `kind: "execute"` on Mutation. The
+//!    schema is rebuilt and hot-swapped whenever `installModule` /
+//!    `uninstallModule` changes the module set.
 //!
 //! Consistency model: every GraphQL *query* operation lazily pins one MVCC
 //! [`fluent31::Snapshot`] the first time a read field needs it, and every
-//! read field of that operation (`get`, `scan`, `wasm`, `snapshotSeqno`)
-//! executes against that same snapshot — one request, one point-in-time
-//! view. Mutation fields run serially in document order, each against the
-//! then-current state, per the GraphQL spec.
+//! read field of that operation — direct or WASM-typed — executes against
+//! that same snapshot. Mutation fields run serially in document order.
 //!
 //! All engine calls are synchronous and may block on IO or write stalls, so
 //! resolvers hop onto the blocking thread pool via
 //! [`tokio::task::spawn_blocking`] — gated by [`EnginePermits`] so stalled
 //! writers cannot exhaust the pool and starve reads (or vice versa).
 
+mod builtins;
 mod bytes;
+mod descriptor;
 mod error;
-mod mutation;
-mod query;
-mod types;
+mod modules;
+mod schema;
 
-use std::sync::{Arc, OnceLock};
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
-use async_graphql::{Context, EmptySubscription, Request, Schema, SchemaBuilder};
+use async_graphql::dynamic::Schema;
+use async_graphql::Request;
 use fluent31::{Db, Snapshot};
 use tokio::sync::Semaphore;
 
-pub use bytes::{Bytes, BytesInput};
+pub use descriptor::{parse_descriptor, ModuleSchema};
 pub use error::engine_err;
-pub use mutation::MutationRoot;
-pub use query::QueryRoot;
-pub use types::U64;
-
-pub type FluentSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 
 /// The engine parks stalled writers on 100ms condvar waits when flush or
 /// compaction falls behind (`wait_for_space`), holding their blocking-pool
@@ -44,21 +47,12 @@ pub type FluentSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;
 /// the pool's worst case at READ_PERMITS + WRITE_PERMITS threads, so one
 /// class can never starve the other; excess calls queue on the semaphore.
 pub(crate) struct EnginePermits {
-    read: Semaphore,
-    write: Semaphore,
+    pub(crate) read: Arc<Semaphore>,
+    pub(crate) write: Arc<Semaphore>,
 }
 
 const READ_PERMITS: usize = 128;
 const WRITE_PERMITS: usize = 32;
-
-impl EnginePermits {
-    fn new() -> Self {
-        EnginePermits {
-            read: Semaphore::new(READ_PERMITS),
-            write: Semaphore::new(WRITE_PERMITS),
-        }
-    }
-}
 
 /// Per-request cell holding the query operation's pinned MVCC snapshot.
 /// Created lazily by the first read field, shared by the rest, released
@@ -72,86 +66,97 @@ impl SnapCell {
     }
 }
 
-/// Attach the per-request data every execution needs. All entry points
-/// (the HTTP handler, tests) must route requests through this; read fields
-/// fail loudly if it was skipped.
-pub fn prepare(req: impl Into<Request>) -> Request {
-    req.into().data(SnapCell::default())
+/// A module's schema status as of the last rebuild: a validated typed
+/// declaration, a validation failure (module still reachable via the
+/// generic `wasm`/`wasmExecute` fields), or untyped (no `describe` export).
+#[derive(Clone)]
+pub(crate) enum ModuleStatus {
+    Typed(Arc<ModuleSchema>),
+    Invalid(String),
+    Untyped,
 }
 
-fn builder() -> SchemaBuilder<QueryRoot, MutationRoot, EmptySubscription> {
-    // The permit semaphores are the primary defense against alias
-    // amplification; the limits below just reject absurd documents outright
-    // while leaving room for GraphiQL's introspection query.
-    Schema::build(QueryRoot, MutationRoot, EmptySubscription)
-        .limit_depth(32)
-        .limit_complexity(5_000)
+/// What a module's `describe` export produced, cached by content hash so a
+/// rebuild only re-executes describe for modules whose bytes changed
+/// (rebuilds are otherwise O(modules) untrusted WASM runs).
+#[derive(Clone)]
+pub(crate) enum DescribeOutcome {
+    Described(Arc<ModuleSchema>),
+    DescribeError(String),
+    NoDescribe,
 }
 
-/// Build the schema over an open database handle.
-pub fn build_schema(db: Arc<Db>) -> FluentSchema {
-    builder()
-        .data(db)
-        .data(Arc::new(EnginePermits::new()))
-        .finish()
+/// Owns the database handle and the current dynamically-built schema;
+/// rebuilds and hot-swaps the schema when the module set changes.
+pub struct SchemaManager {
+    pub(crate) db: Arc<Db>,
+    pub(crate) permits: EnginePermits,
+    schema: RwLock<Schema>,
+    pub(crate) statuses: RwLock<BTreeMap<String, ModuleStatus>>,
+    /// Per-module describe results keyed by content hash (see
+    /// [`DescribeOutcome`]); guarded by `rebuild_lock` callers.
+    describe_cache: RwLock<BTreeMap<String, (u128, DescribeOutcome)>>,
+    /// Serializes install/uninstall + rebuild so two concurrent installs
+    /// cannot swap in a schema that misses one of them.
+    pub(crate) rebuild_lock: tokio::sync::Mutex<()>,
+    /// Handed to resolvers via schema data (Weak: the schema itself lives
+    /// inside this manager — a strong Arc would be a reference cycle).
+    weak: Weak<SchemaManager>,
 }
 
-/// Schema SDL, independent of any database.
-pub fn sdl() -> String {
-    builder().finish().sdl()
-}
+impl SchemaManager {
+    /// Open the manager over a database handle: runs every installed
+    /// module's `describe` once and builds the initial schema.
+    pub fn new(db: Arc<Db>) -> Result<Arc<SchemaManager>, fluent31::Error> {
+        let cache = schema::collect_outcomes(&db, &BTreeMap::new())?;
+        let statuses = schema::statuses_from_outcomes(&cache);
+        Ok(Arc::new_cyclic(|weak| SchemaManager {
+            db,
+            permits: EnginePermits {
+                read: Arc::new(Semaphore::new(READ_PERMITS)),
+                write: Arc::new(Semaphore::new(WRITE_PERMITS)),
+            },
+            schema: RwLock::new(schema::build(weak.clone(), &statuses)),
+            statuses: RwLock::new(statuses),
+            describe_cache: RwLock::new(cache),
+            rebuild_lock: tokio::sync::Mutex::new(()),
+            weak: weak.clone(),
+        }))
+    }
 
-pub(crate) fn db(ctx: &Context<'_>) -> async_graphql::Result<Arc<Db>> {
-    Ok(ctx.data::<Arc<Db>>()?.clone())
-}
+    /// The underlying database handle (tests and embedders; GraphQL-side
+    /// installs should go through the mutations so the schema rebuilds).
+    pub fn db_handle(&self) -> &Db {
+        &self.db
+    }
 
-pub(crate) fn snap(ctx: &Context<'_>) -> async_graphql::Result<Arc<Snapshot>> {
-    let db = ctx.data::<Arc<Db>>()?;
-    Ok(ctx.data::<SnapCell>()?.pin(db))
-}
+    /// The current schema (cheap Arc-backed clone).
+    pub fn schema(&self) -> Schema {
+        self.schema.read().unwrap().clone()
+    }
 
-enum Class {
-    Read,
-    Write,
-}
+    /// Re-describe changed modules (cached by content hash) and hot-swap
+    /// the schema. Called under `rebuild_lock`.
+    pub(crate) fn rebuild(&self) -> Result<(), fluent31::Error> {
+        let prev = self.describe_cache.read().unwrap().clone();
+        let cache = schema::collect_outcomes(&self.db, &prev)?;
+        let statuses = schema::statuses_from_outcomes(&cache);
+        let next = schema::build(self.weak.clone(), &statuses);
+        *self.describe_cache.write().unwrap() = cache;
+        *self.statuses.write().unwrap() = statuses;
+        *self.schema.write().unwrap() = next;
+        Ok(())
+    }
 
-async fn blocking<T, F>(ctx: &Context<'_>, class: Class, f: F) -> async_graphql::Result<T>
-where
-    F: FnOnce() -> fluent31::Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    let permits = ctx.data::<Arc<EnginePermits>>()?;
-    let sem = match class {
-        Class::Read => &permits.read,
-        Class::Write => &permits.write,
-    };
-    let _permit = sem
-        .acquire()
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("engine gate closed: {e}")))?;
-    match tokio::task::spawn_blocking(f).await {
-        Ok(r) => r.map_err(engine_err),
-        Err(e) => Err(async_graphql::Error::new(format!(
-            "engine worker failed: {e}"
-        ))),
+    /// Execute a request against the current schema with per-request data
+    /// attached. All entry points (HTTP handler, tests) go through this.
+    pub async fn execute(&self, req: impl Into<Request>) -> async_graphql::Response {
+        let req = req.into().data(SnapCell::default());
+        self.schema().execute(req).await
     }
 }
 
-/// Run a blocking read-path engine call off the async executor.
-pub(crate) async fn blocking_read<T, F>(ctx: &Context<'_>, f: F) -> async_graphql::Result<T>
-where
-    F: FnOnce() -> fluent31::Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    blocking(ctx, Class::Read, f).await
-}
-
-/// Run a blocking write-path engine call (anything that can hit the
-/// engine's write stall or a maintenance lock) off the async executor.
-pub(crate) async fn blocking_write<T, F>(ctx: &Context<'_>, f: F) -> async_graphql::Result<T>
-where
-    F: FnOnce() -> fluent31::Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    blocking(ctx, Class::Write, f).await
+/// Schema SDL for the built-in surface (no database, no modules).
+pub fn base_sdl() -> String {
+    schema::build(Weak::new(), &BTreeMap::new()).sdl()
 }

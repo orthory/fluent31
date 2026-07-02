@@ -1,35 +1,13 @@
-//! Byte-string handling: engine keys and values are raw bytes, GraphQL
-//! speaks text — so input is a oneof over encodings and output is an object
-//! whose fields decode lazily.
+//! Byte-string codecs: engine keys and values are raw bytes, GraphQL
+//! speaks text. `BytesInput` (oneof text/base64/hex) is decoded by
+//! [`decode_bytes_input`]; outputs are `Bytes` objects whose fields decode
+//! lazily in the dynamic schema (see `schema.rs`).
 
-use async_graphql::{Object, OneofObject};
+use async_graphql::dynamic::ObjectAccessor;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 
-/// Raw bytes supplied by the client in exactly one encoding.
-#[derive(OneofObject, Clone, Debug)]
-pub enum BytesInput {
-    /// UTF-8 text, stored as its bytes.
-    Text(String),
-    /// RFC 4648 standard base64.
-    Base64(String),
-    /// Hexadecimal, case-insensitive, no `0x` prefix.
-    Hex(String),
-}
-
-impl BytesInput {
-    pub fn into_bytes(self) -> async_graphql::Result<Vec<u8>> {
-        match self {
-            BytesInput::Text(s) => Ok(s.into_bytes()),
-            BytesInput::Base64(s) => B64
-                .decode(s.as_bytes())
-                .map_err(|e| async_graphql::Error::new(format!("invalid base64: {e}"))),
-            BytesInput::Hex(s) => decode_hex(&s),
-        }
-    }
-}
-
-fn nibble(c: u8) -> Option<u8> {
+pub fn nibble(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
         b'a'..=b'f' => Some(c - b'a' + 10),
@@ -38,7 +16,7 @@ fn nibble(c: u8) -> Option<u8> {
     }
 }
 
-fn decode_hex(s: &str) -> async_graphql::Result<Vec<u8>> {
+pub fn decode_hex(s: &str) -> Result<Vec<u8>, async_graphql::Error> {
     let b = s.as_bytes();
     if b.len() % 2 != 0 {
         return Err(async_graphql::Error::new("invalid hex: odd length"));
@@ -49,7 +27,7 @@ fn decode_hex(s: &str) -> async_graphql::Result<Vec<u8>> {
         .ok_or_else(|| async_graphql::Error::new("invalid hex: non-hex digit"))
 }
 
-fn encode_hex(b: &[u8]) -> String {
+pub fn encode_hex(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);
     for byte in b {
         s.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
@@ -58,30 +36,28 @@ fn encode_hex(b: &[u8]) -> String {
     s
 }
 
-/// Raw bytes returned by the engine; request whichever representations you
-/// need.
-pub struct Bytes(pub Vec<u8>);
+pub fn encode_b64(b: &[u8]) -> String {
+    B64.encode(b)
+}
 
-#[Object]
-impl Bytes {
-    /// The bytes decoded as UTF-8; null when they are not valid UTF-8.
-    async fn text(&self) -> Option<&str> {
-        std::str::from_utf8(&self.0).ok()
-    }
+pub fn decode_b64(s: &str) -> Result<Vec<u8>, async_graphql::Error> {
+    B64.decode(s.as_bytes())
+        .map_err(|e| async_graphql::Error::new(format!("invalid base64: {e}")))
+}
 
-    /// RFC 4648 standard base64.
-    async fn base64(&self) -> String {
-        B64.encode(&self.0)
+/// Decode a `BytesInput` oneof object (exactly one of text/base64/hex; the
+/// oneof constraint itself is enforced by the schema).
+pub fn decode_bytes_input(obj: &ObjectAccessor<'_>) -> Result<Vec<u8>, async_graphql::Error> {
+    if let Some(v) = obj.get("text") {
+        return Ok(v.string()?.as_bytes().to_vec());
     }
-
-    /// Lowercase hexadecimal.
-    async fn hex(&self) -> String {
-        encode_hex(&self.0)
+    if let Some(v) = obj.get("base64") {
+        return decode_b64(v.string()?);
     }
-
-    /// Byte length.
-    async fn len(&self) -> i32 {
-        // values are engine-capped (max_value_size) far below 2^31
-        i32::try_from(self.0.len()).unwrap_or(i32::MAX)
+    if let Some(v) = obj.get("hex") {
+        return decode_hex(v.string()?);
     }
+    Err(async_graphql::Error::new(
+        "BytesInput requires one of text/base64/hex",
+    ))
 }

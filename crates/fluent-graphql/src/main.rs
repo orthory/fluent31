@@ -11,7 +11,7 @@ use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
 use fluent31::{Db, Options, SyncMode};
-use fluent_graphql::{build_schema, prepare, FluentSchema};
+use fluent_graphql::SchemaManager;
 use tower_http::limit::RequestBodyLimitLayer;
 
 const USAGE: &str = "usage: fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync always|never] [--max-body-bytes N]\n       fluent-graphql --print-schema";
@@ -44,7 +44,7 @@ fn main() -> ExitCode {
                 None => return usage(),
             },
             "--print-schema" => {
-                print!("{}", fluent_graphql::sdl());
+                print!("{}", fluent_graphql::base_sdl());
                 return ExitCode::SUCCESS;
             }
             "--help" | "-h" => {
@@ -68,14 +68,22 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    serve(build_schema(db), listen, max_body)
+    // runs every installed module's `describe` and builds the schema
+    let mgr = match SchemaManager::new(db) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("fluent-graphql: schema init failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    serve(mgr, listen, max_body)
 }
 
 async fn graphql_handler(
-    State(schema): State<FluentSchema>,
+    State(mgr): State<Arc<SchemaManager>>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    schema.execute(prepare(req.into_inner())).await.into()
+    mgr.execute(req.into_inner()).await.into()
 }
 
 async fn graphiql() -> Html<String> {
@@ -118,14 +126,14 @@ async fn shutdown_signal() {
 }
 
 #[tokio::main]
-async fn serve(schema: FluentSchema, listen: String, max_body: usize) -> ExitCode {
+async fn serve(mgr: Arc<SchemaManager>, listen: String, max_body: usize) -> ExitCode {
     let app = Router::new()
         .route("/", get(graphiql))
         .route("/graphql", get(graphiql).post(graphql_handler))
         // the async-graphql extractor bypasses axum's DefaultBodyLimit, so
         // cap the body itself
         .layer(RequestBodyLimitLayer::new(max_body))
-        .with_state(schema);
+        .with_state(mgr);
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {

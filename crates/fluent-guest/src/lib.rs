@@ -383,3 +383,18 @@ macro_rules! fluent_main {
         }
     };
 }
+
+/// Export a static JSON schema descriptor as the module's `describe`
+/// entry point. Hosts that understand "fluentabi v1 describe" (e.g. the
+/// GraphQL server) call it at install/schema-build time to generate typed
+/// API surface for the module.
+#[macro_export]
+macro_rules! fluent_describe {
+    ($json:expr) => {
+        #[no_mangle]
+        pub extern "C" fn describe() -> i32 {
+            $crate::output(($json).as_bytes());
+            0
+        }
+    };
+}
