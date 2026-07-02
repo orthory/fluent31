@@ -4,9 +4,14 @@
 //! Lazy leveling: levels 0..last are tiered — when a level accumulates
 //! `tier_width` runs (l0 has its own trigger) ALL of its runs merge into one
 //! run placed at the FRONT (newest position) of the next level. The last
-//! level is leveled: whenever it holds more than one run, everything there
-//! merges into a single run. Inputs are pinned at pick time and installation
-//! removes exactly the pinned runs — flush can concurrently prepend to L0.
+//! level is leveled, maintained INCREMENTALLY: one newer run at a time
+//! merges into the base run, touching only the base tables its key range
+//! overlaps — untouched fragments are spliced through by identity, so job
+//! cost is bounded by the newer run, never the whole bottom. When the
+//! bottom outgrows its byte budget (`level_target_bytes`) the tree deepens:
+//! a new level is created below and the old bottom tier-merges into it.
+//! Inputs are pinned at pick time and installation removes exactly the
+//! pinned runs — flush can concurrently prepend to L0.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -21,7 +26,7 @@ use crate::table::TableBuilder;
 use crate::types::{
     decode_repr, ikey_kind, ikey_seqno, ikey_ukey, ReprRef, SeqNo, ValueKind, MAX_SEQNO,
 };
-use crate::version::Run;
+use crate::version::{Run, TableHandle};
 use crate::vlog::{self, VlogFileHandle};
 
 pub(crate) struct Job {
@@ -32,6 +37,40 @@ pub(crate) struct Job {
     /// existing runs of the target level plus everything deeper. A tombstone
     /// may only be dropped if none of these can contain its key.
     older: Vec<Run>,
+    kind: JobKind,
+}
+
+enum JobKind {
+    /// Tiered merge: output run lands at the FRONT (newest) of the target
+    /// level. Also used for deepening (target == current level count: a new
+    /// bottom level is created on install).
+    Tier,
+    /// Incremental bottom merge: `inputs` are the newest bottom run plus
+    /// ONLY the base run's tables overlapping its key range; the output is
+    /// spliced between the base run's untouched fragments to form the new
+    /// single leveled base run at the BACK of the level.
+    BottomSplice {
+        /// The (old) base run consumed by the splice.
+        base_id: u64,
+        /// Base tables strictly before / after the merged range, key order.
+        keep_left: Vec<Arc<TableHandle>>,
+        keep_right: Vec<Arc<TableHandle>>,
+        new_run_id: u64,
+    },
+}
+
+/// Levels can grow (deepening) but never past this: 16 tiers at any sane
+/// `tier_width` is more data than a single node stores.
+const MAX_DYNAMIC_LEVELS: usize = 16;
+
+/// Per-level byte budget for deepening decisions: the volume of one
+/// L0->L1 merge is the unit; each level down multiplies by `tier_width`.
+fn level_target_bytes(db: &DbInner, level: usize) -> u64 {
+    let unit = (db.opts.memtable_size as u64)
+        .saturating_mul(db.opts.l0_compaction_trigger as u64)
+        .max(1);
+    let width = db.opts.tier_width.max(2) as u64;
+    (0..level).fold(unit, |acc, _| acc.saturating_mul(width))
 }
 
 /// One pass of the maintenance loop; returns whether any work happened.
@@ -85,15 +124,85 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
                 target: i + 1,
                 inputs: v.levels[i].clone(),
                 older,
+                kind: JobKind::Tier,
             });
         }
     }
+    // Deepen before merging in place: a bottom level past its byte budget
+    // gets a NEW level below it — its runs tier-merge down, and the old
+    // budget wall stops being rewritten wholesale forever. Not under
+    // `force` (compact_until_quiet wants convergence, not growth).
+    let bottom_bytes: u64 = v.levels[last].iter().map(|r| r.size()).sum();
+    if !force
+        && v.levels.len() < MAX_DYNAMIC_LEVELS
+        && !v.levels[last].is_empty()
+        && bottom_bytes > level_target_bytes(db, last)
+    {
+        return Some(Job {
+            level: last,
+            target: last + 1,
+            inputs: v.levels[last].clone(),
+            older: Vec::new(),
+            kind: JobKind::Tier,
+        });
+    }
     if v.levels[last].len() >= 2 {
+        // Incremental, not wholesale: merge ONE newer run into the base,
+        // touching only the base tables its key range overlaps. Work per
+        // job is bounded by that run + overlap, never the whole bottom
+        // level. The run merged MUST be the one ADJACENT to the base
+        // (oldest non-base) — never the front: any runs left between the
+        // merged run and the spliced output would be OLDER than data now
+        // positioned behind them, breaking the newest-first order that
+        // point reads resolve by (stale reads), and their old Puts would
+        // outlive tombstones the merge legally dropped (permanent
+        // resurrection). With the adjacent run, everything left above the
+        // splice is strictly newer, and for every key in the merged range
+        // ALL older data is in the inputs — so older=[] stays sound.
+        let n = v.levels[last].len();
+        let upper = v.levels[last][n - 2].clone();
+        let base = v.levels[last][n - 1].clone();
+        let lo = upper
+            .tables
+            .iter()
+            .map(|t| t.table.stats.min_ukey())
+            .min()
+            .expect("runs are non-empty")
+            .to_vec();
+        let hi = upper
+            .tables
+            .iter()
+            .map(|t| t.table.stats.max_ukey())
+            .max()
+            .expect("runs are non-empty")
+            .to_vec();
+        let mut keep_left = Vec::new();
+        let mut overlapped = Vec::new();
+        let mut keep_right = Vec::new();
+        for t in &base.tables {
+            if t.table.stats.max_ukey() < lo.as_slice() {
+                keep_left.push(t.clone());
+            } else if t.table.stats.min_ukey() > hi.as_slice() {
+                keep_right.push(t.clone());
+            } else {
+                overlapped.push(t.clone());
+            }
+        }
+        let overlap_run = Run {
+            id: base.id,
+            tables: overlapped,
+        };
         return Some(Job {
             level: last,
             target: last,
-            inputs: v.levels[last].clone(),
+            inputs: vec![upper, overlap_run],
             older: Vec::new(),
+            kind: JobKind::BottomSplice {
+                base_id: base.id,
+                keep_left,
+                keep_right,
+                new_run_id: db.alloc_file_id(),
+            },
         });
     }
     None
@@ -211,14 +320,44 @@ fn install(
     let mut m = db.manifest.lock();
     let mut data = m.data.clone();
     data.levels[job.level].retain(|r| !input_ids.contains(&r.id));
-    if let Some(run) = &output {
-        data.levels[job.target].insert(
-            0,
-            RunMeta {
-                id: run.id,
-                table_ids: run.tables.iter().map(|t| t.id).collect(),
-            },
-        );
+    match &job.kind {
+        JobKind::Tier => {
+            // deepening: the target level may not exist yet
+            if job.target == data.levels.len() {
+                data.levels.push(Vec::new());
+            }
+            if let Some(run) = &output {
+                data.levels[job.target].insert(
+                    0,
+                    RunMeta {
+                        id: run.id,
+                        table_ids: run.tables.iter().map(|t| t.id).collect(),
+                    },
+                );
+            }
+        }
+        JobKind::BottomSplice {
+            base_id,
+            keep_left,
+            keep_right,
+            new_run_id,
+        } => {
+            // base run is consumed too (its overlapped tables were inputs
+            // under the base id; retain above already removed it)
+            data.levels[job.level].retain(|r| r.id != *base_id);
+            let mut table_ids: Vec<u64> = keep_left.iter().map(|t| t.id).collect();
+            if let Some(run) = &output {
+                table_ids.extend(run.tables.iter().map(|t| t.id));
+            }
+            table_ids.extend(keep_right.iter().map(|t| t.id));
+            if !table_ids.is_empty() {
+                // the leveled base run lives at the BACK (oldest position)
+                data.levels[job.level].push(RunMeta {
+                    id: *new_run_id,
+                    table_ids,
+                });
+            }
+        }
     }
     if !discard.is_empty() {
         // only files still in the resolution map (and not already retired)
@@ -246,8 +385,34 @@ fn install(
     let mut s = db.state.write();
     let mut v = s.version.clone_shape();
     v.levels[job.level].retain(|r| !input_ids.contains(&r.id));
-    if let Some(run) = output {
-        v.levels[job.target].insert(0, run);
+    match job.kind {
+        JobKind::Tier => {
+            if job.target == v.levels.len() {
+                v.levels.push(Vec::new());
+            }
+            if let Some(run) = output {
+                v.levels[job.target].insert(0, run);
+            }
+        }
+        JobKind::BottomSplice {
+            base_id,
+            ref keep_left,
+            ref keep_right,
+            new_run_id,
+        } => {
+            v.levels[job.level].retain(|r| r.id != base_id);
+            let mut tables = keep_left.clone();
+            if let Some(run) = output {
+                tables.extend(run.tables);
+            }
+            tables.extend(keep_right.iter().cloned());
+            if !tables.is_empty() {
+                v.levels[job.level].push(Run {
+                    id: new_run_id,
+                    tables,
+                });
+            }
+        }
     }
     s.version = Arc::new(v);
     drop(s);
@@ -532,4 +697,282 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
         handle,
     });
     Ok(Some(victim_id))
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+    use crate::config::{Options, SyncMode};
+
+    fn tiny_opts() -> Options {
+        Options {
+            sync: SyncMode::Never,
+            memtable_size: 32 << 10,
+            l0_compaction_trigger: 2,
+            tier_width: 2,
+            max_levels: 2,
+            value_threshold: 4096,
+            ..Options::default()
+        }
+    }
+
+    /// Regression (review finding): a 3+-run bottom must read the NEWEST
+    /// value after splicing. The broken version merged the FRONT run into
+    /// the base, leaving middle runs positioned "newer" than newer data.
+    #[test]
+    fn three_run_bottom_reads_newest_after_splices() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = tiny_opts();
+        opts.max_levels = 1; // L0 IS the bottom: flushes build bottom runs
+        let db = crate::Db::open(dir.path(), opts).unwrap();
+
+        // build bottom = [r3(k=v3), r2(k=v2), r1(k=v1)] with the background
+        // compactor held off so all three runs coexist
+        {
+            let _hold = db.inner.compaction_mu.lock();
+            for v in ["v1", "v2", "v3"] {
+                db.put("k", v).unwrap();
+                db.put(format!("pad/{v}"), v).unwrap();
+                db.inner.force_rotate().unwrap();
+                db.inner.wait_flushed().unwrap();
+            }
+            assert!(
+                db.inner.state.read().version.levels[0].len() >= 3,
+                "need a 3-run bottom"
+            );
+        }
+        // splice to quiet
+        for _ in 0..50 {
+            if !maintenance_pass(&db.inner).unwrap() {
+                break;
+            }
+        }
+        assert_eq!(
+            db.get(b"k").unwrap().as_deref(),
+            Some(b"v3".as_ref()),
+            "newest value must win after incremental bottom merges"
+        );
+    }
+
+    /// Regression (review finding): a tombstone in a newer bottom run must
+    /// NOT be dropped while a stranded middle run still holds an older Put
+    /// — the broken version resurrected deleted keys permanently.
+    #[test]
+    fn tombstone_survives_multi_run_bottom_splices() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = tiny_opts();
+        opts.max_levels = 1;
+        let db = crate::Db::open(dir.path(), opts).unwrap();
+
+        {
+            let _hold = db.inner.compaction_mu.lock();
+            db.put("k", "v1").unwrap();
+            db.put("keep/1", "x").unwrap();
+            db.inner.force_rotate().unwrap();
+            db.inner.wait_flushed().unwrap();
+            db.put("k", "v2").unwrap();
+            db.put("keep/2", "x").unwrap();
+            db.inner.force_rotate().unwrap();
+            db.inner.wait_flushed().unwrap();
+            db.delete("k").unwrap();
+            db.put("keep/3", "x").unwrap();
+            db.inner.force_rotate().unwrap();
+            db.inner.wait_flushed().unwrap();
+            assert!(db.inner.state.read().version.levels[0].len() >= 3);
+        }
+        for _ in 0..50 {
+            if !maintenance_pass(&db.inner).unwrap() {
+                break;
+            }
+        }
+        assert_eq!(
+            db.get(b"k").unwrap(),
+            None,
+            "deleted key resurrected through bottom splices"
+        );
+        for i in 1..=3 {
+            assert!(db.get(format!("keep/{i}").as_bytes()).unwrap().is_some());
+        }
+        // and it stays dead across recovery
+        drop(db);
+        let mut opts = tiny_opts();
+        opts.max_levels = 1;
+        let db = crate::Db::open(dir.path(), opts).unwrap();
+        assert_eq!(db.get(b"k").unwrap(), None, "resurrected after reopen");
+    }
+
+    /// A bottom level past its byte budget grows a NEW level instead of
+    /// being rewritten in place forever; the deeper manifest reopens fine
+    /// even though it exceeds Options::max_levels.
+    #[test]
+    fn bottom_overflow_deepens_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path(), tiny_opts()).unwrap();
+        // unit = 32KiB * 2 = 64KiB; level-1 budget = 128KiB. Write ~2MiB.
+        let val = vec![7u8; 1000];
+        for i in 0..2000u32 {
+            db.put(format!("deep/{i:06}"), val.clone()).unwrap();
+        }
+        db.flush().unwrap();
+        // let maintenance chew until quiet
+        for _ in 0..200 {
+            if !maintenance_pass(&db.inner).unwrap() {
+                break;
+            }
+        }
+        let depth = db.inner.state.read().version.levels.len();
+        assert!(depth > 2, "bottom overflow must deepen: depth={depth}");
+
+        for i in (0..2000u32).step_by(97) {
+            assert!(db.get(format!("deep/{i:06}").as_bytes()).unwrap().is_some());
+        }
+        drop(db);
+        // reopen: manifest is deeper than Options::max_levels
+        let db = crate::Db::open(dir.path(), tiny_opts()).unwrap();
+        assert!(db.inner.state.read().version.levels.len() > 2);
+        for i in (0..2000u32).step_by(97) {
+            assert!(db.get(format!("deep/{i:06}").as_bytes()).unwrap().is_some());
+        }
+    }
+
+    /// A newer bottom run disjoint from most of the base must splice: base
+    /// tables outside the overlap survive by identity (no rewrite).
+    #[test]
+    fn bottom_merge_keeps_untouched_base_tables()  {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = tiny_opts();
+        opts.max_levels = 2;
+        opts.target_file_size = 16 << 10; // many small fragments in the base
+        let db = crate::Db::open(dir.path(), opts).unwrap();
+
+        // phase 1: a wide base at the bottom
+        let val = vec![3u8; 500];
+        for i in 0..1500u32 {
+            db.put(format!("a/{i:06}"), val.clone()).unwrap();
+        }
+        db.flush().unwrap();
+        db.compact_all().unwrap();
+        let base_ids: Vec<u64> = {
+            let s = db.inner.state.read();
+            let last = s.version.levels.len() - 1;
+            let base = s.version.levels[last].last().unwrap();
+            assert!(base.tables.len() > 3, "need several base fragments");
+            base.tables.iter().map(|t| t.id).collect()
+        };
+
+        // phase 2: a narrow update touching only the very start of the
+        // keyspace, pushed down to the bottom by the tiered merges
+        for i in 0..40u32 {
+            db.put(format!("a/{i:06}"), vec![9u8; 500]).unwrap();
+        }
+        db.flush().unwrap();
+        for _ in 0..200 {
+            if !maintenance_pass(&db.inner).unwrap() {
+                break;
+            }
+        }
+
+        let survived: usize = {
+            let s = db.inner.state.read();
+            let last = s.version.levels.len() - 1;
+            let bottom_ids: Vec<u64> = s.version.levels[last]
+                .iter()
+                .flat_map(|r| r.tables.iter().map(|t| t.id))
+                .collect();
+            base_ids.iter().filter(|id| bottom_ids.contains(id)).count()
+        };
+        assert!(
+            survived > 0,
+            "an incremental bottom merge must keep base tables outside the \
+             overlap by identity (all {} were rewritten)",
+            base_ids.len()
+        );
+
+        // and the data is right: updated head, untouched tail
+        assert_eq!(
+            db.get(b"a/000000").unwrap().as_deref(),
+            Some(&vec![9u8; 500][..])
+        );
+        assert_eq!(
+            db.get(b"a/001400").unwrap().as_deref(),
+            Some(&vec![3u8; 500][..])
+        );
+    }
+
+    /// VERIFICATION REPRO: a BottomSplice (front + base only, older = [])
+    /// must not drop a front-run tombstone whose key a MIDDLE bottom run
+    /// still shadows. Steps jobs by hand under compaction_mu.
+    #[test]
+    fn bottom_splice_must_not_resurrect_deleted_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path(), tiny_opts()).unwrap();
+        let inner = db.inner.clone();
+
+        // Block the background maintenance thread; we drive jobs manually.
+        let guard = inner.compaction_mu.lock();
+
+        let bottom_len = |inner: &Arc<DbInner>| -> usize {
+            let s = inner.state.read();
+            let last = s.version.levels.len() - 1;
+            s.version.levels[last].len()
+        };
+
+        // Step A: base run B at the bottom (holds put k@v0 among a..z).
+        for i in 0..26u8 {
+            db.put(vec![b'a' + i], vec![0u8; 16]).unwrap();
+        }
+        db.flush().unwrap();
+        db.put("zz", vec![0u8; 16]).unwrap();
+        db.flush().unwrap();
+        let job = pick(&inner, false).expect("tier L0->bottom (B)");
+        run_job(&inner, job).unwrap();
+        assert_eq!(bottom_len(&inner), 1, "bottom = [B]");
+
+        // Step B: middle run M with put k = "resurrected".
+        db.put("k", b"resurrected".to_vec()).unwrap();
+        db.flush().unwrap();
+        db.put("zz", vec![1u8; 16]).unwrap();
+        db.flush().unwrap();
+        let job = pick(&inner, false).expect("tier L0->bottom (M)");
+        run_job(&inner, job).unwrap();
+        assert_eq!(bottom_len(&inner), 2, "bottom = [M, B]");
+
+        // Step C: front run F with delete k. pick() prefers the L0 tier
+        // trigger over the splice, so the bottom reaches 3 runs.
+        db.delete("k").unwrap();
+        db.flush().unwrap();
+        db.put("zz", vec![2u8; 16]).unwrap();
+        db.flush().unwrap();
+        let job = pick(&inner, false).expect("tier L0->bottom (F)");
+        assert!(matches!(job.kind, JobKind::Tier), "L0 tier must win over splice");
+        run_job(&inner, job).unwrap();
+        assert_eq!(bottom_len(&inner), 3, "bottom = [F(del k), M(put k), B]");
+        assert_eq!(db.get(b"k").unwrap(), None, "delete visible pre-splice");
+
+        // Step D: the incremental splice merges F + B's overlap only.
+        let job = pick(&inner, false).expect("bottom splice");
+        assert!(matches!(job.kind, JobKind::BottomSplice { .. }));
+        assert!(job.older.is_empty(), "splice job carries no older runs");
+        run_job(&inner, job).unwrap();
+
+        let after_splice = db.get(b"k").unwrap();
+        drop(guard);
+
+        // Permanence: full compaction, then reopen.
+        db.compact_all().unwrap();
+        let after_full = db.get(b"k").unwrap();
+        // the DbInner clone owns the process lock file — release it too
+        drop(inner);
+        drop(db);
+        let db = crate::Db::open(dir.path(), tiny_opts()).unwrap();
+        let after_reopen = db.get(b"k").unwrap();
+
+        assert!(
+            after_splice.is_none() && after_full.is_none() && after_reopen.is_none(),
+            "deleted key resurrected: after_splice={:?} after_full_compaction={:?} after_reopen={:?}",
+            after_splice.as_deref().map(String::from_utf8_lossy),
+            after_full.as_deref().map(String::from_utf8_lossy),
+            after_reopen.as_deref().map(String::from_utf8_lossy),
+        );
+    }
 }
