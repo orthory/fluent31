@@ -1025,7 +1025,12 @@ impl DbInner {
                 let file = self.io.create_new(&self.paths.table(id))?;
                 builder = Some((
                     id,
-                    TableBuilder::new(file, self.opts.block_size, self.opts.bloom_bits_per_key),
+                    TableBuilder::new(
+                        file,
+                        self.opts.block_size,
+                        self.opts.bloom_bits_per_key,
+                        self.opts.compression,
+                    ),
                 ));
             }
             builder.as_mut().unwrap().1.add(ikey, it.value())?;

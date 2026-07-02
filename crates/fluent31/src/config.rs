@@ -16,6 +16,19 @@ pub enum SyncMode {
     Never,
 }
 
+/// Per-block SST compression codec. Each block records its codec in the
+/// trailer, so reads never depend on this option: a store written with
+/// `Lz4` stays readable after reopening with `None` (and vice versa).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    /// Store blocks raw (compatible with format-1-only readers).
+    None,
+    /// LZ4 block compression for data and index blocks. Blocks that don't
+    /// shrink are stored raw, and a table's format version is bumped only
+    /// when it actually contains a compressed block.
+    Lz4,
+}
+
 /// IO backend selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoBackend {
@@ -42,6 +55,8 @@ pub struct Options {
 
     /// Target uncompressed data-block size in SSTs.
     pub block_size: usize,
+    /// Per-block SST compression codec (applies to newly written tables).
+    pub compression: Compression,
     /// Bloom filter budget per key, in bits.
     pub bloom_bits_per_key: usize,
     /// Shared block cache capacity in bytes.
@@ -104,6 +119,7 @@ impl Default for Options {
             memtable_size: 8 << 20,
             max_immutable_memtables: 2,
             block_size: 8 << 10,
+            compression: Compression::None,
             bloom_bits_per_key: 10,
             block_cache_size: 64 << 20,
             l0_compaction_trigger: 4,

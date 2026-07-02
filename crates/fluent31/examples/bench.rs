@@ -4,8 +4,10 @@ use std::time::Instant;
 
 fn main() {
     let dir = tempfile::tempdir().unwrap();
-    let mut opts = Options::default();
-    opts.sync = SyncMode::Never;
+    let opts = Options {
+        sync: SyncMode::Never,
+        ..Options::default()
+    };
     let db = Db::open(dir.path(), opts).unwrap();
 
     const N: u32 = 200_000;

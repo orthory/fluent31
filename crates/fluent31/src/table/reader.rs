@@ -253,20 +253,21 @@ impl InternalIterator for TableIter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::IoBackend;
+    use crate::config::{Compression, IoBackend};
     use crate::io::backend;
-    use crate::table::TableBuilder;
+    use crate::table::{TableBuilder, FORMAT, FORMAT_COMPRESSED};
     use crate::types::{encode_inline, make_ikey, MAX_SEQNO};
 
-    fn build_table(
+    fn build_table_sized(
         entries: &[(&[u8], u64, ValueKind, &[u8])],
         block_size: usize,
-    ) -> (tempfile::TempDir, Arc<Table>) {
+        compression: Compression,
+    ) -> (tempfile::TempDir, Arc<Table>, u64) {
         let dir = tempfile::tempdir().unwrap();
         let (io, _) = backend(IoBackend::Std).unwrap();
         let path = dir.path().join("t");
         let f = io.create_new(&path).unwrap();
-        let mut b = TableBuilder::new(f, block_size, 10);
+        let mut b = TableBuilder::new(f, block_size, 10, compression);
         for (k, s, kind, v) in entries {
             let repr = if *kind == ValueKind::Put {
                 encode_inline(v)
@@ -275,12 +276,29 @@ mod tests {
             };
             b.add(&make_ikey(k, *s, *kind), &repr).unwrap();
         }
-        let (stats, _) = b.finish().unwrap();
+        let (stats, size) = b.finish().unwrap();
         assert_eq!(stats.entries as usize, entries.len());
         let f = io.open_read(&path).unwrap();
         let cache = Arc::new(BlockCache::new(1 << 20));
         let t = Arc::new(Table::open(f, 1, cache).unwrap());
+        (dir, t, size)
+    }
+
+    fn build_table(
+        entries: &[(&[u8], u64, ValueKind, &[u8])],
+        block_size: usize,
+    ) -> (tempfile::TempDir, Arc<Table>) {
+        let (dir, t, _) = build_table_sized(entries, block_size, Compression::None);
         (dir, t)
+    }
+
+    fn footer_format(t: &Table) -> u32 {
+        let flen = t.file.len().unwrap();
+        let mut fbuf = vec![0u8; FOOTER_LEN];
+        t.file
+            .read_exact_at(flen - FOOTER_LEN as u64, &mut fbuf)
+            .unwrap();
+        Footer::decode(&fbuf).unwrap().format
     }
 
     fn many() -> Vec<(Vec<u8>, u64, ValueKind, Vec<u8>)> {
@@ -381,5 +399,55 @@ mod tests {
         let (_dir, t) = build_table(&refs, 4096);
         assert!(t.may_contain_ukey(b"only"));
         assert!(!t.may_contain_ukey(b"absent")); // outside key range
+    }
+
+    /// Lz4 tables round-trip every read path, shrink the file, and carry the
+    /// bumped format version.
+    #[test]
+    fn lz4_round_trip_and_shrinks() {
+        let data = many();
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = data
+            .iter()
+            .map(|(k, s, kind, v)| (k.as_slice(), *s, *kind, v.as_slice()))
+            .collect();
+        let (_d1, plain, plain_size) = build_table_sized(&refs, 256, Compression::None);
+        let (_d2, lz4, lz4_size) = build_table_sized(&refs, 256, Compression::Lz4);
+        assert!(
+            lz4_size < plain_size,
+            "lz4 table ({lz4_size}) not smaller than raw ({plain_size})"
+        );
+        assert_eq!(footer_format(&plain), FORMAT);
+        assert_eq!(footer_format(&lz4), FORMAT_COMPRESSED);
+
+        for (k, s, kind, v) in &data {
+            let got = lz4.get(k, MAX_SEQNO).unwrap().unwrap();
+            assert_eq!(got.0, *kind);
+            assert_eq!(got.1, *s);
+            if *kind == ValueKind::Put {
+                assert_eq!(got.2, encode_inline(v));
+            }
+        }
+        assert!(lz4.get(b"key99999x", MAX_SEQNO).unwrap().is_none());
+
+        let mut it = lz4.iter();
+        it.seek_to_first().unwrap();
+        let mut n = 0;
+        while it.valid() {
+            n += 1;
+            it.next().unwrap();
+        }
+        assert_eq!(n, 500);
+    }
+
+    /// A table written with compression enabled but where no block shrinks
+    /// stays format 1 — readable by binaries that predate compression.
+    #[test]
+    fn incompressible_lz4_table_stays_format_1() {
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> =
+            vec![(b"only", 1, ValueKind::Put, b"v")];
+        let (_dir, t, _) = build_table_sized(&refs, 4096, Compression::Lz4);
+        assert_eq!(footer_format(&t), FORMAT);
+        let got = t.get(b"only", MAX_SEQNO).unwrap().unwrap();
+        assert_eq!(got.2, encode_inline(b"v"));
     }
 }
