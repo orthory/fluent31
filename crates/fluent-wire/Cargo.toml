@@ -1,0 +1,22 @@
+[package]
+name = "fluent-wire"
+version.workspace = true
+edition.workspace = true
+description = "Binary wire protocol server for fluent31: correlated request/response frames over TCP, out-of-order completion"
+
+[lib]
+name = "fluent_wire"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fluent-wire"
+path = "src/main.rs"
+
+[dependencies]
+fluent31 = { path = "../fluent31" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal"] }
+bytes = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["time"] }
