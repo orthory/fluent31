@@ -22,7 +22,7 @@ use crate::types::{
     decode_repr, ikey_kind, ikey_seqno, ikey_ukey, ReprRef, SeqNo, ValueKind, MAX_SEQNO,
 };
 use crate::version::Run;
-use crate::vlog;
+use crate::vlog::{self, VlogFileHandle};
 
 pub(crate) struct Job {
     level: usize,
@@ -321,6 +321,93 @@ fn auto_gc(db: &Arc<DbInner>) -> Result<bool> {
     Ok(gc_vlog(db)?.is_some())
 }
 
+/// Bytes of each vlog file to sample when estimating liveness.
+const GC_SAMPLE_BYTES: u64 = 1 << 20;
+/// Skip files smaller than this: relocating them wholesale is cheap enough
+/// that sampling adds nothing.
+const GC_SAMPLE_MIN_FILE: u64 = 4 << 20;
+/// Don't resample a below-ratio file until this many new writes have
+/// happened — its dead ratio can only change with writes.
+const GC_RESAMPLE_SEQ_DELTA: u64 = 100_000;
+
+/// Discard-stat fallback: estimate one sealed vlog file's dead ratio by
+/// probing a bounded oldest-first sample of its records against the LSM
+/// (the same liveness test relocation uses). Returns a victim when the
+/// estimate clears the configured GC ratio.
+///
+/// The oldest-first sample biases toward dead data, which makes the probe
+/// eager rather than blind: a false positive costs one relocation pass
+/// whose live records are simply rewritten (relocation itself is ground
+/// truth), while the old behavior — waiting for compaction to happen to
+/// observe the garbage — could defer reclaiming a mostly-dead file
+/// indefinitely under lazy leveling.
+fn sample_victim(db: &Arc<DbInner>) -> Result<Option<(u64, Arc<VlogFileHandle>)>> {
+    let visible = db.visible_seqno.load(std::sync::atomic::Ordering::Acquire);
+
+    // candidates: sealed, not retired, big enough, not on cooldown —
+    // lowest id first (oldest data is the most likely to have died)
+    let candidate = {
+        let m = db.manifest.lock();
+        let s = db.state.read();
+        let head = s.version.vlog_head_id;
+        let sampled = db.gc_sampled_at.lock();
+        let mut ids: Vec<u64> = s
+            .version
+            .vlogs
+            .keys()
+            .copied()
+            .filter(|&id| id != head)
+            .filter(|id| !m.data.vlog_retired.iter().any(|(r, _)| r == id))
+            .filter(|id| {
+                sampled
+                    .get(id)
+                    .map(|&at| visible.saturating_sub(at) >= GC_RESAMPLE_SEQ_DELTA)
+                    .unwrap_or(true)
+            })
+            .collect();
+        ids.sort_unstable();
+        let mut picked = None;
+        for id in ids {
+            let h = s.version.vlogs.get(&id).unwrap();
+            if h.file.len()? >= GC_SAMPLE_MIN_FILE {
+                picked = Some((id, h.clone()));
+                break;
+            }
+        }
+        picked
+    };
+    let Some((id, handle)) = candidate else {
+        return Ok(None);
+    };
+
+    let (records, sampled_len) = vlog::sample_records(handle.file.as_ref(), GC_SAMPLE_BYTES)?;
+    if sampled_len == 0 {
+        db.gc_sampled_at.lock().insert(id, visible);
+        return Ok(None);
+    }
+    let view = db.read_view();
+    let mut dead: u64 = 0;
+    for (off, len, key, _vlen) in &records {
+        let live = match view.get_versioned(key, MAX_SEQNO)? {
+            Some((ValueKind::Put, _, repr)) => match decode_repr(&repr)? {
+                ReprRef::Ptr(p) => p.file == id && p.offset == *off && p.len == *len,
+                ReprRef::Inline(_) => false,
+            },
+            _ => false,
+        };
+        if !live {
+            dead += u64::from(*len);
+        }
+    }
+    let ratio = dead as f64 / sampled_len as f64;
+    if ratio >= db.opts.vlog_gc_ratio {
+        Ok(Some((id, handle)))
+    } else {
+        db.gc_sampled_at.lock().insert(id, visible);
+        Ok(None)
+    }
+}
+
 /// One GC pass: pick the most-garbage sealed vlog file above the configured
 /// ratio, relocate its still-live values through the write path (batched
 /// under the write mutex — atomic against every writer, no OCC needed), and
@@ -354,7 +441,18 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
             }
         }
         match best {
-            None => return Ok(None),
+            None => {
+                drop(s);
+                drop(m);
+                // discard stats only accumulate when compaction happens to
+                // rewrite pointers — under lazy leveling they lag far
+                // behind reality. Fall back to sampling one candidate
+                // file's actual liveness per pass.
+                match sample_victim(db)? {
+                    None => return Ok(None),
+                    Some(v) => v,
+                }
+            }
             Some((id, _)) => (id, s.version.vlogs.get(&id).unwrap().clone()),
         }
     };

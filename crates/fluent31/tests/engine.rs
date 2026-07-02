@@ -870,3 +870,44 @@ fn randomized_model_test() {
         .collect();
     assert_eq!(got, expected);
 }
+
+/// Discard-stat lag fallback: overwritten large values whose garbage was
+/// never observed by compaction (no compact_all — stats stay empty) must
+/// still be reclaimable, via the sampling probe.
+#[test]
+fn vlog_gc_sampling_reclaims_without_discard_stats() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    opts.vlog_gc_ratio = 0.3;
+    // files must clear the sampling floor (4 MiB): ~16 KiB values, few
+    // hundred per file
+    opts.vlog_file_size = 4 << 20;
+    let db = Db::open(dir.path(), opts).unwrap();
+    let big = |i: u32, r: u32| format!("{:0>16000}", format!("{i}-{r}")).into_bytes();
+
+    // several overwrite rounds so older vlog files are mostly garbage; only
+    // flush memtables — never compact, so pointer drops are never observed
+    // and the discard map stays empty for the old files
+    for round in 0..4u32 {
+        for i in 0..400u32 {
+            db.put(k(i), big(i, round)).unwrap();
+        }
+    }
+    db.flush().unwrap();
+
+    let mut retired = 0;
+    while db.gc_vlog().unwrap().is_some() {
+        retired += 1;
+        assert!(retired < 100, "gc runaway");
+    }
+    // the background maintenance thread also runs GC passes with the same
+    // sampling fallback and may win the race — assert the OUTCOME (garbage
+    // reclaimed by someone), not which caller reclaimed it
+    assert!(
+        retired > 0 || db.stats().vlog_retired > 0,
+        "sampling fallback must find garbage that discard stats cannot see"
+    );
+    for i in 0..400u32 {
+        assert_eq!(db.get(&k(i)).unwrap().unwrap(), big(i, 3), "key {i}");
+    }
+}

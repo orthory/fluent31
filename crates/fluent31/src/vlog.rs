@@ -143,12 +143,35 @@ pub(crate) fn read_values_batch(
 /// One scanned record: (offset, record len, key, value len).
 pub(crate) type ScannedRecord = (u64, u32, Vec<u8>, u32);
 
+/// Like [`scan_records`], but reads at most `max_bytes` from the front of
+/// the file — a bounded sample for GC liveness estimation. Records are
+/// oldest-first, which biases the sample toward the most-likely-dead data;
+/// for a "is this file worth collecting" probe that bias is the useful
+/// direction.
+pub(crate) fn sample_records(
+    file: &dyn DbFile,
+    max_bytes: u64,
+) -> Result<(Vec<ScannedRecord>, u64)> {
+    let len = file.len()?.min(max_bytes);
+    let mut buf = vec![0u8; len as usize];
+    if len > 0 {
+        file.read_exact_at(0, &mut buf)?;
+    }
+    // records straddling the sample boundary read as a torn tail, which
+    // scan-parsing already treats as end-of-valid-data
+    parse_records(&buf)
+}
+
 pub(crate) fn scan_records(file: &dyn DbFile) -> Result<(Vec<ScannedRecord>, u64)> {
     let len = file.len()?;
     let mut buf = vec![0u8; len as usize];
     if len > 0 {
         file.read_exact_at(0, &mut buf)?;
     }
+    parse_records(&buf)
+}
+
+fn parse_records(buf: &[u8]) -> Result<(Vec<ScannedRecord>, u64)> {
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos < buf.len() {
