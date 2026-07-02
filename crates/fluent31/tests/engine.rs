@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use fluent31::{Db, Error, Options, SyncMode, WriteBatch};
+use fluent31::{Compression, Db, Error, Options, SyncMode, WriteBatch};
 
 /// Tiny sizes so every structure (flush, tiering, vlog rotation, fragment
 /// splitting) is exercised by small tests. SyncMode::Never because macOS
@@ -48,6 +48,48 @@ fn basic_crud() {
     db.delete(b"a".to_vec()).unwrap();
     assert!(db.get(b"a").unwrap().is_none());
     assert_eq!(db.get(b"b").unwrap().unwrap(), b"2");
+}
+
+/// Reads never depend on Options::compression: a store written under
+/// Compression::Lz4 reads back fully after reopening with the default
+/// (Compression::None), and newly written raw tables mix freely with the
+/// compressed ones already on disk.
+#[test]
+fn compression_cross_compat_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Db::open(
+            dir.path(),
+            Options {
+                compression: Compression::Lz4,
+                ..small_opts()
+            },
+        )
+        .unwrap();
+        for i in 0..300 {
+            db.put(k(i), v(i, "lz4")).unwrap();
+        }
+        db.flush().unwrap();
+        db.compact_all().unwrap();
+    }
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    for i in 0..300 {
+        assert_eq!(db.get(&k(i)).unwrap().unwrap(), v(i, "lz4"), "reopen {i}");
+    }
+    // mixed state: raw L0 tables above compressed lower levels
+    for i in 300..400 {
+        db.put(k(i), v(i, "raw")).unwrap();
+    }
+    db.flush().unwrap();
+    for i in 0..300 {
+        assert_eq!(db.get(&k(i)).unwrap().unwrap(), v(i, "lz4"), "mixed {i}");
+    }
+    // compaction merges compressed inputs into raw outputs
+    db.compact_all().unwrap();
+    for i in 0..400 {
+        let expect = if i < 300 { v(i, "lz4") } else { v(i, "raw") };
+        assert_eq!(db.get(&k(i)).unwrap().unwrap(), expect, "compacted {i}");
+    }
 }
 
 #[test]
@@ -288,12 +330,12 @@ fn large_values_roundtrip_through_vlog() {
     assert!(db.stats().vlog_files > 1, "expected vlog rotation");
 
     // scans resolve pointers in batches
-    let n = db
+    let entries = db
         .iter(None, None, false)
         .unwrap()
-        .map(|r| r.unwrap())
-        .count();
-    assert_eq!(n, 60);
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 60);
 
     // survive reopen
     drop(db);
@@ -579,12 +621,12 @@ fn snapshot_reads_survive_vlog_gc_retirement() {
     // the retired file (this returned Corruption before the fix)
     assert_eq!(db.get(&k(0)).unwrap().unwrap(), big(999));
     assert_eq!(db.get_at(&k(0), &snap).unwrap().unwrap(), big(999));
-    let n = db
+    let entries = db
         .iter_at(None, None, false, &snap)
         .unwrap()
-        .map(|r| r.unwrap())
-        .count();
-    assert_eq!(n, 20);
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 20);
 }
 
 /// Regression (review finding): a vlog file retired but not yet deleted at

@@ -29,7 +29,7 @@ mod wal;
 mod wasm;
 
 pub use batch::WriteBatch;
-pub use config::{IoBackend, Options, SyncMode};
+pub use config::{Compression, IoBackend, Options, SyncMode};
 pub use db::{Db, DbStats, Snapshot};
 pub use error::{Error, Result};
 pub use iter::DbIterator;

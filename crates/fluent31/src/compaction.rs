@@ -279,7 +279,12 @@ fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
                 let file = db.io.create_new(&db.paths.table(id))?;
                 builder = Some((
                     id,
-                    TableBuilder::new(file, db.opts.block_size, db.opts.bloom_bits_per_key),
+                    TableBuilder::new(
+                        file,
+                        db.opts.block_size,
+                        db.opts.bloom_bits_per_key,
+                        db.opts.compression,
+                    ),
                 ));
             }
             builder.as_mut().unwrap().1.add(merge.ikey(), merge.value())?;

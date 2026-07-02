@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
-use super::{BlockRef, Footer, TableStats, BLOCK_TRAILER_LEN};
+use super::{BlockRef, Footer, TableStats, CODEC_LZ4, CODEC_NONE, FORMAT, FORMAT_COMPRESSED};
 use crate::block::BlockBuilder;
 use crate::bloom;
 use crate::coding::{crc32, put_len_prefixed, put_uvarint};
+use crate::config::Compression;
 use crate::error::Result;
 use crate::io::DbFile;
 use crate::types::{ikey_kind, ikey_seqno, ikey_ukey, ValueKind};
@@ -14,11 +15,15 @@ pub(crate) struct TableBuilder {
     file: Arc<dyn DbFile>,
     block_size: usize,
     bloom_bits_per_key: usize,
+    compression: Compression,
 
     block: BlockBuilder,
     /// (last internal key of block, block ref)
     index: Vec<(Vec<u8>, BlockRef)>,
     offset: u64,
+    /// Whether any block was actually stored compressed — gates the footer
+    /// format bump (old readers keep opening tables that stayed all-raw).
+    wrote_compressed: bool,
 
     key_hashes: Vec<u64>,
     last_hashed_ukey: Vec<u8>,
@@ -28,14 +33,21 @@ pub(crate) struct TableBuilder {
 }
 
 impl TableBuilder {
-    pub fn new(file: Arc<dyn DbFile>, block_size: usize, bloom_bits_per_key: usize) -> Self {
+    pub fn new(
+        file: Arc<dyn DbFile>,
+        block_size: usize,
+        bloom_bits_per_key: usize,
+        compression: Compression,
+    ) -> Self {
         TableBuilder {
             file,
             block_size,
             bloom_bits_per_key,
+            compression,
             block: BlockBuilder::default(),
             index: Vec::new(),
             offset: 0,
+            wrote_compressed: false,
             key_hashes: Vec::new(),
             last_hashed_ukey: Vec::new(),
             stats: TableStats {
@@ -95,16 +107,30 @@ impl TableBuilder {
         Ok(())
     }
 
-    fn write_block(&mut self, mut payload: Vec<u8>) -> Result<BlockRef> {
-        payload.push(0); // compression: none
-        let crc = crc32(&payload);
-        payload.extend_from_slice(&crc.to_le_bytes());
-        let off = self.file.append(&payload)?;
+    fn write_block(&mut self, payload: Vec<u8>, compression: Compression) -> Result<BlockRef> {
+        let (codec, mut buf) = match compression {
+            Compression::Lz4 => {
+                let compressed = lz4_flex::block::compress_prepend_size(&payload);
+                if compressed.len() < payload.len() {
+                    (CODEC_LZ4, compressed)
+                } else {
+                    // incompressible: store raw so a block never grows; the
+                    // codec byte keeps each block self-describing
+                    (CODEC_NONE, payload)
+                }
+            }
+            Compression::None => (CODEC_NONE, payload),
+        };
+        self.wrote_compressed |= codec != CODEC_NONE;
+        buf.push(codec);
+        let crc = crc32(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
+        let off = self.file.append(&buf)?;
         debug_assert_eq!(off, self.offset);
-        self.offset += payload.len() as u64;
+        self.offset += buf.len() as u64;
         Ok(BlockRef {
             off,
-            len: payload.len() as u32,
+            len: buf.len() as u32,
         })
     }
 
@@ -114,7 +140,7 @@ impl TableBuilder {
         }
         let last_ikey = self.stats.last_ikey.clone();
         let payload = self.block.finish();
-        let r = self.write_block(payload)?;
+        let r = self.write_block(payload, self.compression)?;
         self.index.push((last_ikey, r));
         Ok(())
     }
@@ -125,8 +151,12 @@ impl TableBuilder {
         assert!(self.started, "cannot finish an empty table");
         self.flush_block()?;
 
+        // Only the key-bearing payloads (data + index) go through the
+        // configured codec: bloom filters are high-entropy by construction,
+        // and the stats block is ~50 bytes of metadata — "compressing" either
+        // would bump the table format for no real win.
         let filter = bloom::build(&self.key_hashes, self.bloom_bits_per_key);
-        let filter_ref = self.write_block(filter)?;
+        let filter_ref = self.write_block(filter, Compression::None)?;
 
         let mut index_payload = Vec::new();
         for (last_ikey, r) in &self.index {
@@ -134,14 +164,19 @@ impl TableBuilder {
             put_uvarint(&mut index_payload, r.off);
             put_uvarint(&mut index_payload, u64::from(r.len));
         }
-        let index_ref = self.write_block(index_payload)?;
+        let index_ref = self.write_block(index_payload, self.compression)?;
 
-        let stats_ref = self.write_block(self.stats.encode())?;
+        let stats_ref = self.write_block(self.stats.encode(), Compression::None)?;
 
         let footer = Footer {
             filter: filter_ref,
             index: index_ref,
             stats: stats_ref,
+            format: if self.wrote_compressed {
+                FORMAT_COMPRESSED
+            } else {
+                FORMAT
+            },
         };
         self.file.append(&footer.encode())?;
         self.offset += super::FOOTER_LEN as u64;
@@ -149,7 +184,6 @@ impl TableBuilder {
         // Durability: the table's contents must be stable before any manifest
         // references it (DESIGN.md §5).
         self.file.sync_data()?;
-        let _ = BLOCK_TRAILER_LEN;
         Ok((self.stats, self.offset))
     }
 }

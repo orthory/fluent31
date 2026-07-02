@@ -780,6 +780,7 @@ dependencies = [
  "crossbeam-skiplist",
  "io-uring",
  "libc",
+ "lz4_flex",
  "parking_lot",
  "tempfile",
  "wasmtime",
@@ -1153,6 +1154,12 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 
 [[package]]
 name = "mach2"

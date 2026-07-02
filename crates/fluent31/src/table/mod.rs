@@ -1,8 +1,9 @@
 //! Sorted-run table files.
 //!
 //! Layout: `[data block]* [filter block] [index block] [stats block] [footer]`
-//! Every block carries a trailer `[compression u8 = 0][crc32c u32]` where the
-//! CRC covers payload + compression byte. The footer is fixed-width:
+//! Every block carries a trailer `[compression u8][crc32c u32]` where the
+//! CRC covers payload + compression byte (0 = raw, 1 = lz4 with the
+//! uncompressed size prepended). The footer is fixed-width:
 //!
 //! `[filter_off u64][filter_len u32][index_off u64][index_len u32]
 //!  [stats_off u64][stats_len u32][format u32][magic u64]` (48 bytes)
@@ -18,9 +19,18 @@ use crate::error::{corrupt, Result};
 use crate::io::DbFile;
 
 pub(crate) const MAGIC: u64 = 0xf115_e731_ab1e_0001;
+/// Base format: every block stored raw (codec byte 0).
 pub(crate) const FORMAT: u32 = 1;
+/// At least one block is lz4-compressed (codec byte 1). Written only when a
+/// table actually contains a compressed block, so stores that never enable
+/// compression stay readable by format-1 binaries.
+pub(crate) const FORMAT_COMPRESSED: u32 = 2;
 pub(crate) const FOOTER_LEN: usize = 48;
 pub(crate) const BLOCK_TRAILER_LEN: usize = 5;
+
+/// Block codec bytes (the trailer's `compression u8`).
+pub(crate) const CODEC_NONE: u8 = 0;
+pub(crate) const CODEC_LZ4: u8 = 1;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BlockRef {
@@ -34,6 +44,7 @@ pub(crate) struct Footer {
     pub filter: BlockRef,
     pub index: BlockRef,
     pub stats: BlockRef,
+    pub format: u32,
 }
 
 impl Footer {
@@ -45,7 +56,7 @@ impl Footer {
         out.extend_from_slice(&self.index.len.to_le_bytes());
         out.extend_from_slice(&self.stats.off.to_le_bytes());
         out.extend_from_slice(&self.stats.len.to_le_bytes());
-        out.extend_from_slice(&FORMAT.to_le_bytes());
+        out.extend_from_slice(&self.format.to_le_bytes());
         out.extend_from_slice(&MAGIC.to_le_bytes());
         debug_assert_eq!(out.len(), FOOTER_LEN);
         out
@@ -70,19 +81,20 @@ impl Footer {
         if magic != MAGIC {
             return Err(corrupt("bad table magic"));
         }
-        if format != FORMAT {
+        if !(FORMAT..=FORMAT_COMPRESSED).contains(&format) {
             return Err(corrupt(format!("unsupported table format {format}")));
         }
         Ok(Footer {
             filter,
             index,
             stats,
+            format,
         })
     }
 }
 
-/// Read a block (payload without trailer) directly from the file, verifying
-/// its CRC.
+/// Read a block (payload without trailer, decompressed) directly from the
+/// file, verifying its CRC.
 pub(crate) fn read_block_verified(file: &dyn DbFile, r: BlockRef) -> Result<Vec<u8>> {
     if (r.len as usize) < BLOCK_TRAILER_LEN {
         return Err(corrupt("block shorter than trailer"));
@@ -94,12 +106,15 @@ pub(crate) fn read_block_verified(file: &dyn DbFile, r: BlockRef) -> Result<Vec<
     if crc32(&buf[..payload_end]) != stored_crc {
         return Err(corrupt("block crc mismatch"));
     }
-    let compression = buf[payload_end - 1];
-    if compression != 0 {
-        return Err(corrupt(format!("unsupported compression {compression}")));
+    match buf[payload_end - 1] {
+        CODEC_NONE => {
+            buf.truncate(payload_end - 1);
+            Ok(buf)
+        }
+        CODEC_LZ4 => lz4_flex::block::decompress_size_prepended(&buf[..payload_end - 1])
+            .map_err(|e| corrupt(format!("lz4 block decode: {e}"))),
+        codec => Err(corrupt(format!("unsupported compression {codec}"))),
     }
-    buf.truncate(payload_end - 1);
-    Ok(buf)
 }
 
 /// Per-table statistics persisted in the stats block.

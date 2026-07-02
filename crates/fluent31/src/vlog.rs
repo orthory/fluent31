@@ -307,8 +307,8 @@ mod tests {
         let handle = Arc::new(VlogFileHandle::new(1, path.clone(), file));
         let vlog = Vlog::new(handle.clone(), 0);
 
-        let p1 = vlog.append(b"a", &vec![1u8; 100]).unwrap();
-        let p2 = vlog.append(b"b", &vec![2u8; 200]).unwrap();
+        let p1 = vlog.append(b"a", &[1u8; 100]).unwrap();
+        let p2 = vlog.append(b"b", &[2u8; 200]).unwrap();
         vlog.sync_head().unwrap();
 
         assert_eq!(read_value(&handle, &p1, b"a", None).unwrap(), vec![1u8; 100]);
