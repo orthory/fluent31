@@ -11,7 +11,7 @@ use crate::config::DbPaths;
 use crate::error::{corrupt, Error, Result};
 use crate::io::{atomic_write, sync_dir};
 
-const MANIFEST_MAGIC: u64 = 0xf1_15_e7_31_3a_a1_0001;
+const MANIFEST_MAGIC: u64 = 0xf115_e731_3aa1_0001;
 const MANIFEST_FORMAT: u32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -173,7 +173,7 @@ pub(crate) fn save(paths: &DbPaths, gen: u64, data: &ManifestData) -> Result<()>
 /// Read CURRENT and the manifest it names. Returns (gen, data).
 pub(crate) fn load(paths: &DbPaths) -> Result<(u64, ManifestData)> {
     let cur = std::fs::read_to_string(paths.current())
-        .map_err(|e| Error::Io(e))?;
+        .map_err(Error::Io)?;
     let name = cur.trim();
     let gen: u64 = name
         .strip_prefix("MANIFEST-")

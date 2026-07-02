@@ -1,7 +1,7 @@
 //! Interactive dev shell for fluent31 — redis-cli style, every command
 //! reports its wall-clock latency.
 //!
-//! Usage: fluent-cli <db-dir> [--std|--uring] [--nosync]
+//! Usage: fluent-cli <db-dir> [--std|--uring] [--nosync] [--sync-every <ms>]
 //!
 //! Byte arguments accept plain UTF-8 or `hex:DEADBEEF`.
 
@@ -362,15 +362,29 @@ impl Shell {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(dir) = args.first().filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: fluent-cli <db-dir> [--std|--uring] [--nosync]");
+        eprintln!("usage: fluent-cli <db-dir> [--std|--uring] [--nosync] [--sync-every <ms>]");
         std::process::exit(2);
     };
     let mut opts = Options::default();
-    for flag in &args[1..] {
+    let mut it = args[1..].iter();
+    while let Some(flag) = it.next() {
         match flag.as_str() {
             "--std" => opts.io_backend = IoBackend::Std,
             "--uring" => opts.io_backend = IoBackend::Uring,
             "--nosync" => opts.sync = SyncMode::Never,
+            "--sync-every" => {
+                let ms = it
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|ms| *ms > 0)
+                    .unwrap_or_else(|| {
+                        eprintln!("--sync-every needs a positive millisecond value");
+                        std::process::exit(2);
+                    });
+                opts.sync = SyncMode::Periodic {
+                    every: std::time::Duration::from_millis(ms),
+                };
+            }
             other => {
                 eprintln!("unknown flag {other}");
                 std::process::exit(2);

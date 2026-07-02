@@ -73,6 +73,7 @@ impl Table {
         })
     }
 
+    #[allow(dead_code)] // debugging/inspection helper, kept intentionally
     pub fn block_count(&self) -> usize {
         self.index.len()
     }

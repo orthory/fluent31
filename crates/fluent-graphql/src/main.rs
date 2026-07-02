@@ -14,7 +14,7 @@ use fluent31::{Db, Options, SyncMode};
 use fluent_graphql::SchemaManager;
 use tower_http::limit::RequestBodyLimitLayer;
 
-const USAGE: &str = "usage: fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync always|never] [--max-body-bytes N]\n       fluent-graphql --print-schema";
+const USAGE: &str = "usage: fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync always|never|periodic:<ms>] [--max-body-bytes N]\n       fluent-graphql --print-schema";
 const DEFAULT_MAX_BODY: usize = 32 << 20;
 
 fn usage() -> ExitCode {
@@ -37,6 +37,15 @@ fn main() -> ExitCode {
             "--sync" => match args.next().as_deref() {
                 Some("always") => sync = SyncMode::Always,
                 Some("never") => sync = SyncMode::Never,
+                Some(v) if v.starts_with("periodic:") => {
+                    let Some(ms) = v["periodic:".len()..].parse::<u64>().ok().filter(|ms| *ms > 0)
+                    else {
+                        return usage();
+                    };
+                    sync = SyncMode::Periodic {
+                        every: std::time::Duration::from_millis(ms),
+                    };
+                }
                 _ => return usage(),
             },
             "--max-body-bytes" => match args.next().and_then(|v| v.parse().ok()) {

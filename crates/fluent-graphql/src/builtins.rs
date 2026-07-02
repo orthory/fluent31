@@ -505,6 +505,21 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             .description("Delete a checkpoint archive."),
         )
         .field(
+            Field::new("syncWal", TypeRef::named(TypeRef::BOOLEAN), |ctx| {
+                FieldFuture::new(async move {
+                    let mgr = manager(&ctx)?;
+                    let db = mgr.db.clone();
+                    mgr.blocking_write(move || db.sync_wal()).await?;
+                    Ok(Some(FieldValue::value(true)))
+                })
+            })
+            .description(
+                "Durability barrier: every write acked before this call is durable on \
+                 return. The explicit companion to running the server with --sync \
+                 periodic:<ms>.",
+            ),
+        )
+        .field(
             Field::new("flush", TypeRef::named(TypeRef::BOOLEAN), |ctx| {
                 FieldFuture::new(async move {
                     let mgr = manager(&ctx)?;

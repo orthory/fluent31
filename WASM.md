@@ -284,7 +284,7 @@ reference scalars only. `output` may reference a declared type.
   `wasm`, `modules`, `stats`, `checkpoints`, `snapshotSeqno`, `put`,
   `delete`, `writeBatch`, `wasmExecute`, `installModule`,
   `uninstallModule`, `checkpoint`, `deleteCheckpoint`, `flush`,
-  `compactAll`, `gcVlog`, `reloadSchema`);
+  `compactAll`, `gcVlog`, `reloadSchema`, `syncWal`);
 - declared type names must not be reserved (`Query`, `Mutation`,
   `Subscription`, `Bytes`, `BytesInput`, `U64`, `Json`, `Pair`,
   `ScanPage`, `Module`, `Checkpoint`, `GcResult`, `LevelStats`, `Stats`,
