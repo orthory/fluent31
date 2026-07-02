@@ -355,6 +355,9 @@ fn stats_object() -> Object {
         .field(value_field("discardBytes", TypeRef::named_nn("U64")))
         .field(value_field("cacheHits", TypeRef::named_nn("U64")))
         .field(value_field("cacheMisses", TypeRef::named_nn("U64")))
+        .field(value_field("commitGroups", TypeRef::named_nn("U64")))
+        .field(value_field("commitBatches", TypeRef::named_nn("U64")))
+        .field(value_field("walSyncs", TypeRef::named_nn("U64")))
 }
 
 fn put_op_input() -> InputObject {

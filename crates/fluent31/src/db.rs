@@ -4,6 +4,10 @@
 //! Locking (fixed global order — always acquire left before right):
 //! `write_mu` → `manifest` → `state` → `snapshots`
 //! Not every path takes every lock; no path acquires them out of order.
+//! Group-commit locks are leaves off that chain: `commit_queue` is taken
+//! after `write_mu` (leader) or standalone (enqueue/front checks), and
+//! `CommitWaiter::inner` nests inside `commit_queue` or standalone —
+//! neither is ever held while acquiring a lock from the global chain.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -73,24 +77,31 @@ impl SnapshotList {
 }
 
 pub(crate) struct Signal {
-    mu: Mutex<()>,
+    /// Pending-notify flag: a notify with no waiter parks here instead of
+    /// vanishing, so a wake sent between a consumer's work and its next
+    /// wait is consumed immediately (no lost-wakeup latency cliff).
+    mu: Mutex<bool>,
     cv: Condvar,
 }
 
 impl Signal {
     fn new() -> Self {
         Signal {
-            mu: Mutex::new(()),
+            mu: Mutex::new(false),
             cv: Condvar::new(),
         }
     }
     pub fn notify(&self) {
-        let _g = self.mu.lock();
+        let mut g = self.mu.lock();
+        *g = true;
         self.cv.notify_all();
     }
     pub fn wait_timeout(&self, d: Duration) {
         let mut g = self.mu.lock();
-        self.cv.wait_for(&mut g, d);
+        if !*g {
+            self.cv.wait_for(&mut g, d);
+        }
+        *g = false;
     }
 }
 
@@ -99,6 +110,51 @@ pub(crate) struct RetiredVlog {
     pub id: u64,
     pub retired_at: SeqNo,
     pub handle: Arc<VlogFileHandle>,
+}
+
+/// One enqueued write awaiting group commit. `ops` is taken by the leader;
+/// `result` is set when the group completes.
+pub(crate) struct CommitWaiter {
+    inner: Mutex<WaiterInner>,
+    cv: Condvar,
+}
+
+pub(crate) struct WaiterInner {
+    ops: Option<Vec<BatchOp>>,
+    bytes: usize,
+    result: Option<Result<()>>,
+}
+
+/// Unwind safety net for the committer thread: once waiters are drained
+/// from the queue, only the committer can complete them. If it panics
+/// mid-group, this guard degrades the store — a panic mid-write leaves
+/// WAL/vlog state unknown — and fails every undelivered waiter, so no
+/// client thread hangs (parked clients also poll bg_error, covering the
+/// committer dying entirely).
+struct GroupPanicGuard<'a> {
+    db: &'a DbInner,
+    group: &'a [Arc<CommitWaiter>],
+    armed: bool,
+}
+
+impl Drop for GroupPanicGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.db
+            .set_bg_error("commit thread panicked; write state unknown");
+        for w in self.group {
+            let mut g = w.inner.lock();
+            if g.result.is_none() {
+                g.result = Some(Err(Error::Background(
+                    "commit thread panicked; write state unknown".into(),
+                )));
+            }
+            drop(g);
+            w.cv.notify_one();
+        }
+    }
 }
 
 pub(crate) struct DbInner {
@@ -110,6 +166,12 @@ pub(crate) struct DbInner {
 
     pub state: RwLock<DbState>,
     pub write_mu: Mutex<WriteState>,
+    /// Writers waiting for (or leading) a group commit; the front is the
+    /// leader. See `write_batch_unchecked`.
+    pub commit_queue: Mutex<std::collections::VecDeque<Arc<CommitWaiter>>>,
+    pub commit_groups: AtomicU64,
+    pub commit_batches: AtomicU64,
+    pub wal_syncs: AtomicU64,
     pub visible_seqno: AtomicU64,
     pub next_file_id: AtomicU64,
     pub manifest: Mutex<ManifestState>,
@@ -125,6 +187,7 @@ pub(crate) struct DbInner {
     pub compaction_mu: Mutex<()>,
 
     pub shutdown: AtomicBool,
+    pub commit_signal: Signal,
     pub flush_signal: Signal,
     pub compact_signal: Signal,
     /// Signaled on flush/compaction progress (stall + flush waiters).
@@ -249,6 +312,16 @@ impl DbInner {
 
     // ---------------------------------------------------------- write path
 
+    /// Degrade the store: every subsequent write is refused until reopen.
+    /// Used by background threads on flush/compaction failure and by the
+    /// write path when a hard IO failure leaves WAL/vlog state unknown.
+    pub fn set_bg_error(&self, msg: impl Into<String>) {
+        let mut g = self.bg_error.lock();
+        if g.is_none() {
+            *g = Some(msg.into());
+        }
+    }
+
     pub fn check_bg_error(&self) -> Result<()> {
         if let Some(msg) = self.bg_error.lock().as_ref() {
             return Err(Error::Background(msg.clone()));
@@ -297,39 +370,115 @@ impl DbInner {
         Ok(())
     }
 
-    pub fn write_batch(&self, batch: &WriteBatch) -> Result<()> {
-        self.validate_batch(batch)?;
+    pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
+        self.validate_batch(&batch)?;
         self.write_batch_unchecked(batch)
     }
 
-    /// Write path without user-key validation (system keys, GC rewrites,
-    /// transaction commits that already validated).
-    pub fn write_batch_unchecked(&self, batch: &WriteBatch) -> Result<()> {
+    /// Write path without user-key validation (system keys, transaction
+    /// commits that already validated). Group commit, LevelDB-style: the
+    /// caller enqueues its batch and the writer at the queue front becomes
+    /// the leader — it drains a bounded group, applies every batch under
+    /// one `write_mu` critical section with ONE vlog fsync and ONE WAL
+    /// fsync for the whole group, then hands each waiter its result.
+    /// Concurrent writers therefore amortize fsync latency instead of
+    /// serializing on it.
+    pub fn write_batch_unchecked(&self, batch: WriteBatch) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
         self.check_bg_error()?;
         self.wait_for_space()?;
-        let mut ws = self.write_mu.lock();
-        self.apply_locked(&mut ws, &batch.ops)?;
-        Ok(())
+
+        // Grouping exists to amortize fsyncs. Without them (SyncMode::Never)
+        // the queue's park/unpark handoffs only cost — a plain mutex handoff
+        // is cheaper — so relaxed-durability writers take the direct path.
+        if self.opts.sync == SyncMode::Never {
+            let mut ws = self.write_mu.lock();
+            let r = self.apply_locked(&mut ws, &batch.ops);
+            self.commit_groups.fetch_add(1, Ordering::Relaxed);
+            self.commit_batches.fetch_add(1, Ordering::Relaxed);
+            return r;
+        }
+
+        // No uncontended fast path in Always mode, deliberately: a writer
+        // that wins write_mu pays a FULL solo fsync (~ms) while blocking
+        // the committer from forming a group — measured to fragment groups
+        // and halve 4-thread throughput. The queue handoff costs ~µs
+        // against an fsync; every sync write goes through the committer.
+        let bytes = batch.byte_size();
+        let waiter = Arc::new(CommitWaiter {
+            inner: Mutex::new(WaiterInner {
+                ops: Some(batch.ops),
+                bytes,
+                result: None,
+            }),
+            cv: Condvar::new(),
+        });
+        self.commit_queue.lock().push_back(waiter.clone());
+        self.commit_signal.notify();
+
+        // park until the committer thread delivers the result. Result is
+        // set and read under the same waiter mutex, so no wakeup can be
+        // lost; the timeout exists only so a dead committer (panic sets
+        // bg_error) or shutdown can't strand this thread.
+        let mut g = waiter.inner.lock();
+        loop {
+            if let Some(r) = g.result.take() {
+                return r;
+            }
+            waiter.cv.wait_for(&mut g, Duration::from_millis(100));
+            if g.result.is_some() {
+                continue;
+            }
+            // poll for a degraded store / shutdown — WITHOUT holding the
+            // waiter lock (the flush thread may briefly hold bg_error, and
+            // the committer needs waiter.inner to deliver)
+            drop(g);
+            let degraded = self.bg_error.lock().clone();
+            let shut = self.shutdown.load(Ordering::Acquire);
+            if degraded.is_some() || shut {
+                // bail ONLY if the batch can be pulled back out of the
+                // queue. If the committer already drained it, a result is
+                // guaranteed (delivery or panic guard) — returning an
+                // error for a batch that may still commit would hand the
+                // caller a false failure and invite duplicating retries.
+                let removed = {
+                    let mut q = self.commit_queue.lock();
+                    match q.iter().position(|w| Arc::ptr_eq(w, &waiter)) {
+                        Some(i) => {
+                            q.remove(i);
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if removed {
+                    return Err(match degraded {
+                        Some(msg) => Error::Background(msg),
+                        None => Error::Closed,
+                    });
+                }
+            }
+            g = waiter.inner.lock();
+        }
     }
 
-    /// Core of the write path; caller holds `write_mu`.
-    pub(crate) fn apply_locked(
-        &self,
-        ws: &mut WriteState,
-        ops: &[BatchOp],
-    ) -> Result<()> {
+    /// Core of the write path for callers that need their own `write_mu`
+    /// critical section (transaction commits validating under the mutex,
+    /// GC relocations probing liveness under it) and for the single-batch
+    /// lanes of `write_batch_unchecked`.
+    ///
+    /// This is the allocation-lean single-batch twin of
+    /// `apply_group_locked` — same phases, same error semantics (hard IO
+    /// failures degrade the store; rotation failure after publish keeps
+    /// the ack). Any change here must be mirrored there.
+    pub(crate) fn apply_locked(&self, ws: &mut WriteState, ops: &[BatchOp]) -> Result<()> {
         let base = self.visible_seqno.load(Ordering::Acquire) + 1;
         if base + ops.len() as u64 >= MAX_SEQNO {
             return Err(Error::InvalidArgument("seqno space exhausted".into()));
         }
-
-        // size-check BEFORE vlog placement: rejecting afterwards would
-        // orphan already-appended vlog records that no discard accounting
-        // ever reclaims (pointer reprs only shrink the encoded batch, so
-        // this bound is conservative)
+        // size-check BEFORE vlog placement (see apply_group_locked)
         let approx: u64 = ops
             .iter()
             .map(|op| match op {
@@ -351,7 +500,13 @@ impl DbInner {
                 BatchOp::Put { key, value } => {
                     let repr = if value.len() >= self.opts.value_threshold {
                         any_vlog = true;
-                        encode_ptr(self.vlog.append(key, value)?)
+                        match self.vlog.append(key, value) {
+                            Ok(ptr) => encode_ptr(ptr),
+                            Err(e) => {
+                                self.set_bg_error(format!("vlog append failed: {e}"));
+                                return Err(e);
+                            }
+                        }
                     } else {
                         encode_inline(value)
                     };
@@ -370,10 +525,12 @@ impl DbInner {
             entries.push(e);
         }
 
-        // 2. durability ordering: payload before pointer (vlog fsync before
-        //    the WAL record referencing it becomes durable)
+        // 2. durability ordering: payload before pointer
         if any_vlog && self.opts.sync == SyncMode::Always {
-            self.vlog.sync_head()?;
+            if let Err(e) = self.vlog.sync_head() {
+                self.set_bg_error(format!("vlog sync failed: {e}"));
+                return Err(e);
+            }
         }
         let payload = encode_batch(base, &entries);
         if payload.len() as u64 >= 1 << 30 {
@@ -381,32 +538,282 @@ impl DbInner {
                 "write batch exceeds WAL record limit".into(),
             ));
         }
-        ws.wal.append_record(&payload)?;
+        if let Err(e) = ws.wal.append_record(&payload) {
+            self.set_bg_error(format!("wal append failed: {e}"));
+            return Err(e);
+        }
         if self.opts.sync == SyncMode::Always {
-            ws.wal.sync()?;
+            if let Err(e) = ws.wal.sync() {
+                self.set_bg_error(format!("wal sync failed: {e}"));
+                return Err(e);
+            }
+            self.wal_syncs.fetch_add(1, Ordering::Relaxed);
         }
 
         // 3. memtable inserts, then publish
         let mem = self.state.read().mem.clone();
         for (i, e) in entries.iter().enumerate() {
-            mem.insert(
-                make_ikey(&e.key, base + i as u64, e.kind),
-                e.repr.clone(),
-            );
+            mem.insert(make_ikey(&e.key, base + i as u64, e.kind), e.repr.clone());
         }
         self.visible_seqno
             .store(base + entries.len() as u64 - 1, Ordering::Release);
 
-        // 4. rotations
-        if mem.approximate_bytes() >= self.opts.memtable_size {
-            self.rotate_memtable_locked(ws)?;
-            self.flush_signal.notify();
-        }
-        let (_, head_written, _) = self.vlog.head_state();
-        if head_written >= self.opts.vlog_file_size {
-            self.rotate_vlog_locked()?;
+        // 4. rotations. The write is durable and published: the ack stands
+        // even if rotation fails — the store degrades instead.
+        let mut rotate = || -> Result<()> {
+            if mem.approximate_bytes() >= self.opts.memtable_size {
+                self.rotate_memtable_locked(ws)?;
+                self.flush_signal.notify();
+            }
+            let (_, head_written, _) = self.vlog.head_state();
+            if head_written >= self.opts.vlog_file_size {
+                self.rotate_vlog_locked()?;
+            }
+            Ok(())
+        };
+        if let Err(e) = rotate() {
+            self.set_bg_error(format!("post-write rotation failed: {e}"));
         }
         Ok(())
+    }
+
+    /// Apply a group of batches under one `write_mu` critical section
+    /// (multi-batch twin of `apply_locked` — keep their phases in sync):
+    /// per-batch validation and WAL records (each batch keeps its own
+    /// contiguous seqno range and all-or-nothing atomicity), but one vlog
+    /// fsync and one WAL fsync for the whole group.
+    ///
+    /// Error semantics: batch-local validation failures skip just that
+    /// batch (it consumes no seqnos, later batches proceed). A hard IO
+    /// failure mid-group fails that batch with the real error and every
+    /// LATER batch with `Error::Background` — the already-appended prefix
+    /// still completes, so survivors are always a seqno-contiguous prefix
+    /// and `visible_seqno` never publishes past a failed batch.
+    pub(crate) fn apply_group_locked(
+        &self,
+        ws: &mut WriteState,
+        batches: &[&[BatchOp]],
+    ) -> Vec<Result<()>> {
+        let mut results: Vec<Option<Result<()>>> = Vec::new();
+        results.resize_with(batches.len(), || None);
+
+        // ---- phase 0: per-batch validation + seqno assignment ----------
+        // (validation failures consume no seqnos, so accepted batches form
+        // a contiguous seqno range starting at visible+1)
+        let mut next = self.visible_seqno.load(Ordering::Acquire) + 1;
+        let mut accepted: Vec<(usize, u64)> = Vec::with_capacity(batches.len());
+        for (i, ops) in batches.iter().enumerate() {
+            // size-check BEFORE vlog placement: rejecting afterwards would
+            // orphan already-appended vlog records that no discard
+            // accounting ever reclaims (pointer reprs only shrink the
+            // encoded batch, so this bound is conservative)
+            let approx: u64 = ops
+                .iter()
+                .map(|op| match op {
+                    BatchOp::Put { key, value } => (key.len() + value.len() + 32) as u64,
+                    BatchOp::Delete { key } => (key.len() + 16) as u64,
+                })
+                .sum();
+            if approx >= 1 << 30 {
+                results[i] = Some(Err(Error::InvalidArgument(
+                    "write batch exceeds WAL record limit".into(),
+                )));
+                continue;
+            }
+            if next + ops.len() as u64 >= MAX_SEQNO {
+                results[i] = Some(Err(Error::InvalidArgument(
+                    "seqno space exhausted".into(),
+                )));
+                continue;
+            }
+            accepted.push((i, next));
+            next += ops.len() as u64;
+        }
+
+        // fail every accepted batch from `from` onward: their writes were
+        // NOT applied (retry is safe once the store recovers), so they get
+        // an "aborted" IO error, never a fabricated Background — that
+        // variant is reserved for a store actually flagged via bg_error
+        let aborted = |msg: &str| {
+            Error::Io(std::io::Error::other(format!(
+                "write group aborted by another batch's failure: {msg}"
+            )))
+        };
+        let fail_tail = |results: &mut Vec<Option<Result<()>>>,
+                         accepted: &[(usize, u64)],
+                         from: usize,
+                         msg: &str| {
+            for &(j, _) in &accepted[from..] {
+                if results[j].is_none() {
+                    results[j] = Some(Err(aborted(msg)));
+                }
+            }
+        };
+        // a hard failure mid-group leaves WAL/vlog head state unknown:
+        // degrade the store (writes refused until reopen) and skip the
+        // phase-6 rotation so a WAL with a possibly-torn middle is never
+        // sealed — sealed-WAL corruption fails recovery permanently, while
+        // an unsealed tail is truncated cleanly on reopen. Vlog values
+        // already placed for aborted batches are orphaned (pre-existing
+        // leak class, unreclaimed by discard accounting) — bounded by the
+        // group cap and moot in practice: the store requires a reopen.
+        let mut hard_failure = false;
+
+        // ---- phase 1: place large values in the vlog --------------------
+        let mut placed: Vec<(usize, u64, Vec<EncEntry>)> = Vec::with_capacity(accepted.len());
+        let mut any_vlog = false;
+        'place: for (gi, &(i, base)) in accepted.iter().enumerate() {
+            let mut entries = Vec::with_capacity(batches[i].len());
+            for op in batches[i] {
+                let e = match op {
+                    BatchOp::Put { key, value } => {
+                        let repr = if value.len() >= self.opts.value_threshold {
+                            any_vlog = true;
+                            match self.vlog.append(key, value) {
+                                Ok(ptr) => encode_ptr(ptr),
+                                Err(e) => {
+                                    let msg = e.to_string();
+                                    self.set_bg_error(format!("vlog append failed: {msg}"));
+                                    hard_failure = true;
+                                    results[i] = Some(Err(e));
+                                    fail_tail(&mut results, &accepted, gi + 1, &msg);
+                                    break 'place;
+                                }
+                            }
+                        } else {
+                            encode_inline(value)
+                        };
+                        EncEntry {
+                            kind: ValueKind::Put,
+                            key: key.clone(),
+                            repr,
+                        }
+                    }
+                    BatchOp::Delete { key } => EncEntry {
+                        kind: ValueKind::Delete,
+                        key: key.clone(),
+                        repr: Vec::new(),
+                    },
+                };
+                entries.push(e);
+            }
+            if results[i].is_none() {
+                placed.push((i, base, entries));
+            }
+        }
+
+        // ---- phase 2: durability ordering — payload before pointer ------
+        // (vlog fsync before any WAL record referencing it becomes durable;
+        // ONE sync for the whole group)
+        if any_vlog && self.opts.sync == SyncMode::Always {
+            if let Err(e) = self.vlog.sync_head() {
+                let msg = e.to_string();
+                self.set_bg_error(format!("vlog sync failed: {msg}"));
+                let mut real = Some(e);
+                for (i, _, _) in &placed {
+                    results[*i] =
+                        Some(Err(real.take().unwrap_or_else(|| aborted(&msg))));
+                }
+                return results.into_iter().map(|r| r.expect("filled")).collect();
+            }
+        }
+
+        // ---- phase 3: WAL append, one record per batch -------------------
+        let mut appended: Vec<(usize, u64, Vec<EncEntry>)> = Vec::with_capacity(placed.len());
+        for (i, base, entries) in placed.into_iter() {
+            let from_tail = |accepted: &[(usize, u64)]| {
+                accepted
+                    .iter()
+                    .position(|&(j, _)| j == i)
+                    .map(|p| p + 1)
+                    .unwrap_or(accepted.len())
+            };
+            let payload = encode_batch(base, &entries);
+            if payload.len() as u64 >= 1 << 30 {
+                // unreachable given the conservative phase-0 bound; kept as
+                // belt-and-braces. Prefix-fail (not skip) so survivors stay
+                // a contiguous seqno prefix, as documented.
+                let msg = "write batch exceeds WAL record limit";
+                results[i] = Some(Err(Error::InvalidArgument(msg.into())));
+                fail_tail(&mut results, &accepted, from_tail(&accepted), msg);
+                break;
+            }
+            if let Err(e) = ws.wal.append_record(&payload) {
+                // the WAL tail is now in an unknown state (possibly a torn
+                // record mid-file): degrade the store
+                let msg = e.to_string();
+                self.set_bg_error(format!("wal append failed: {msg}"));
+                hard_failure = true;
+                results[i] = Some(Err(e));
+                fail_tail(&mut results, &accepted, from_tail(&accepted), &msg);
+                break;
+            }
+            appended.push((i, base, entries));
+        }
+
+        // ---- phase 4: ONE WAL fsync for the whole group -------------------
+        if self.opts.sync == SyncMode::Always && !appended.is_empty() {
+            if let Err(e) = ws.wal.sync() {
+                // gray zone (same as the old single-writer path): records
+                // may or may not be durable; every appended batch reports
+                // failure, nothing is published, and the store degrades —
+                // continuing to ack writes ordered after unsynced records
+                // would risk silent loss on recovery
+                let msg = e.to_string();
+                self.set_bg_error(format!("wal sync failed: {msg}"));
+                let mut real = Some(e);
+                for (i, _, _) in &appended {
+                    results[*i] =
+                        Some(Err(real.take().unwrap_or_else(|| aborted(&msg))));
+                }
+                return results.into_iter().map(|r| r.expect("filled")).collect();
+            }
+            self.wal_syncs.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // ---- phase 5: memtable inserts, then publish ---------------------
+        if let Some((_, last_base, last_entries)) = appended.last() {
+            let mem = self.state.read().mem.clone();
+            for (i, base, entries) in &appended {
+                for (k, e) in entries.iter().enumerate() {
+                    mem.insert(make_ikey(&e.key, base + k as u64, e.kind), e.repr.clone());
+                }
+                results[*i] = Some(Ok(()));
+            }
+            self.visible_seqno.store(
+                last_base + last_entries.len() as u64 - 1,
+                Ordering::Release,
+            );
+
+            // ---- phase 6: rotations, once per group ----------------------
+            // skipped after a mid-group hard failure: rotating would seal a
+            // WAL whose tail may hold a torn record, and sealed-WAL
+            // corruption fails recovery permanently (an unsealed tail is
+            // truncated cleanly on reopen)
+            if !hard_failure {
+                let mut rotate = || -> Result<()> {
+                    if mem.approximate_bytes() >= self.opts.memtable_size {
+                        self.rotate_memtable_locked(ws)?;
+                        self.flush_signal.notify();
+                    }
+                    let (_, head_written, _) = self.vlog.head_state();
+                    if head_written >= self.opts.vlog_file_size {
+                        self.rotate_vlog_locked()?;
+                    }
+                    Ok(())
+                };
+                if let Err(e) = rotate() {
+                    // every batch in the group is durable and published:
+                    // their acks stand (flipping them to errors would invite
+                    // duplicate retries of visible writes — the old path's
+                    // false-negative wart, amplified by a group). The store
+                    // degrades instead: subsequent writes are refused.
+                    self.set_bg_error(format!("post-write rotation failed: {e}"));
+                }
+            }
+        }
+
+        results.into_iter().map(|r| r.expect("filled")).collect()
     }
 
     pub fn alloc_file_id(&self) -> u64 {
@@ -653,12 +1060,28 @@ pub struct DbStats {
     pub discard_bytes: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
+    /// Group commits led (leader critical sections on the batch path).
+    pub commit_groups: u64,
+    /// Batches committed through the group path; `commit_batches -
+    /// commit_groups` is how many fsyncs group commit saved.
+    pub commit_batches: u64,
+    /// WAL fsyncs actually performed (SyncMode::Always only).
+    pub wal_syncs: u64,
 }
 
 impl Db {
     pub fn open(dir: impl AsRef<Path>, opts: Options) -> Result<Db> {
         let inner = open_inner(dir.as_ref(), opts)?;
         let mut threads = Vec::new();
+        {
+            let i = inner.clone();
+            threads.push(
+                std::thread::Builder::new()
+                    .name("fluent31-commit".into())
+                    .spawn(move || commit_thread(i))
+                    .expect("spawn commit thread"),
+            );
+        }
         {
             let i = inner.clone();
             threads.push(
@@ -695,7 +1118,7 @@ impl Db {
     }
 
     pub fn write(&self, batch: WriteBatch) -> Result<()> {
-        self.inner.write_batch(&batch)
+        self.inner.write_batch(batch)
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -805,6 +1228,9 @@ impl Db {
             discard_bytes,
             cache_hits: hits,
             cache_misses: misses,
+            commit_groups: inner.commit_groups.load(Ordering::Relaxed),
+            commit_batches: inner.commit_batches.load(Ordering::Relaxed),
+            wal_syncs: inner.wal_syncs.load(Ordering::Relaxed),
         }
     }
 
@@ -877,11 +1303,93 @@ impl Db {
 impl Drop for Db {
     fn drop(&mut self) {
         self.inner.shutdown.store(true, Ordering::Release);
+        self.inner.commit_signal.notify();
         self.inner.flush_signal.notify();
         self.inner.compact_signal.notify();
         self.inner.progress_signal.notify();
         for t in self.threads.drain(..) {
             let _ = t.join();
+        }
+    }
+}
+
+/// The committer: the single owner of the grouped write path. Drains
+/// everything queued, applies it chunked by the group byte cap (one WAL
+/// fsync per chunk), delivers results, and immediately drains again — so
+/// while an fsync is in flight, every active writer has time to enqueue,
+/// and steady-state group size approaches the number of in-flight writers
+/// (no leader election, no handoff gap).
+fn commit_thread(db: Arc<DbInner>) {
+    loop {
+        let drained: Vec<Arc<CommitWaiter>> = {
+            let mut q = db.commit_queue.lock();
+            q.drain(..).collect()
+        };
+        if drained.is_empty() {
+            if db.shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            db.commit_signal.wait_timeout(Duration::from_millis(100));
+            continue;
+        }
+
+        let mut start = 0;
+        while start < drained.len() {
+            // chunk by the group byte cap (LevelDB heuristic) so one huge
+            // batch can't hold hostage the latency of small neighbors
+            let first_bytes = drained[start].inner.lock().bytes;
+            let cap = group_byte_cap(first_bytes);
+            let mut end = start + 1;
+            let mut total = first_bytes;
+            while end < drained.len() {
+                let b = drained[end].inner.lock().bytes;
+                if total + b > cap {
+                    break;
+                }
+                total += b;
+                end += 1;
+            }
+            let group = &drained[start..end];
+
+            // degradation gate, re-checked per chunk: honors set_bg_error's
+            // "writes refused until reopen" contract and stops a chunk from
+            // appending into a WAL whose tail a previous chunk's sync
+            // failure may have left torn
+            if let Some(msg) = db.bg_error.lock().clone() {
+                for w in group {
+                    let mut g = w.inner.lock();
+                    g.result = Some(Err(Error::Background(msg.clone())));
+                    drop(g);
+                    w.cv.notify_one();
+                }
+                start = end;
+                continue;
+            }
+
+            let mut guard = GroupPanicGuard {
+                db: &db,
+                group,
+                armed: true,
+            };
+            let batches: Vec<Vec<BatchOp>> = group
+                .iter()
+                .map(|w| w.inner.lock().ops.take().expect("ops present"))
+                .collect();
+            let refs: Vec<&[BatchOp]> = batches.iter().map(|b| b.as_slice()).collect();
+            let results = {
+                let mut ws = db.write_mu.lock();
+                db.apply_group_locked(&mut ws, &refs)
+            };
+            db.commit_groups.fetch_add(1, Ordering::Relaxed);
+            db.commit_batches.fetch_add(group.len() as u64, Ordering::Relaxed);
+            for (w, r) in group.iter().zip(results) {
+                let mut g = w.inner.lock();
+                g.result = Some(r);
+                drop(g);
+                w.cv.notify_one();
+            }
+            guard.armed = false;
+            start = end;
         }
     }
 }
@@ -892,10 +1400,9 @@ fn flush_thread(db: Arc<DbInner>) {
             Ok(true) => continue,
             Ok(false) => db.flush_signal.wait_timeout(Duration::from_millis(200)),
             Err(e) => {
-                let mut g = db.bg_error.lock();
-                if g.is_none() {
-                    *g = Some(format!("flush failed: {e}"));
-                }
+                // set_bg_error releases the lock immediately: holding it
+                // across the backoff would stall every bg_error poller
+                db.set_bg_error(format!("flush failed: {e}"));
                 db.progress_signal.notify();
                 db.flush_signal.wait_timeout(Duration::from_millis(500));
             }
@@ -908,10 +1415,7 @@ fn compact_thread(db: Arc<DbInner>) {
         let did = match crate::compaction::maintenance_pass(&db) {
             Ok(did) => did,
             Err(e) => {
-                let mut g = db.bg_error.lock();
-                if g.is_none() {
-                    *g = Some(format!("compaction failed: {e}"));
-                }
+                db.set_bg_error(format!("compaction failed: {e}"));
                 db.progress_signal.notify();
                 false
             }
@@ -1203,6 +1707,10 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
             version: Arc::new(version),
         }),
         write_mu: Mutex::new(WriteState { wal }),
+        commit_queue: Mutex::new(std::collections::VecDeque::new()),
+        commit_groups: AtomicU64::new(0),
+        commit_batches: AtomicU64::new(0),
+        wal_syncs: AtomicU64::new(0),
         visible_seqno: AtomicU64::new(max_seq),
         next_file_id: AtomicU64::new(next_file_id),
         manifest: Mutex::new(ManifestState {
@@ -1215,6 +1723,7 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
         gc_mu: Mutex::new(()),
         compaction_mu: Mutex::new(()),
         shutdown: AtomicBool::new(false),
+        commit_signal: Signal::new(),
         flush_signal: Signal::new(),
         compact_signal: Signal::new(),
         progress_signal: Signal::new(),
@@ -1333,4 +1842,179 @@ fn startup_gc(inner: &Arc<DbInner>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Group byte cap, LevelDB's heuristic: 1 MiB max, but when the front
+/// batch is small, front + 128 KiB so small writes aren't delayed by huge
+/// neighbors. A batch larger than the cap always commits (alone): the
+/// leader unconditionally includes the front.
+fn group_byte_cap(first_bytes: usize) -> usize {
+    if first_bytes <= 128 << 10 {
+        first_bytes + (128 << 10)
+    } else {
+        1 << 20
+    }
+}
+
+#[cfg(test)]
+mod group_commit_tests {
+    use super::*;
+    use crate::batch::WriteBatch;
+
+    #[test]
+    fn group_cap_matches_leveldb_heuristic() {
+        assert_eq!(group_byte_cap(0), 128 << 10);
+        assert_eq!(group_byte_cap(100), 100 + (128 << 10));
+        assert_eq!(group_byte_cap(128 << 10), (128 << 10) * 2);
+        assert_eq!(group_byte_cap((128 << 10) + 1), 1 << 20);
+        // a >1MiB front is not capped out of its own group: the leader
+        // always includes the front, the cap only stops ADDING neighbors
+        assert_eq!(group_byte_cap(2 << 20), 1 << 20);
+    }
+
+    /// A writer whose batch was already drained by the committer must NOT
+    /// bail on a bg_error poll: bailing would report failure for a write
+    /// that still commits. It must wait for the real result — and result /
+    /// visible state must always agree.
+    #[test]
+    fn parked_writer_never_gets_false_error_for_an_inflight_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(
+            crate::Db::open(
+                dir.path(),
+                Options {
+                    sync: SyncMode::Always,
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+
+        // stall the committer mid-cycle: it drains the queue, then blocks
+        // on write_mu (held here) with the batch already in hand
+        let ws = db.inner.write_mu.lock();
+        let db2 = db.clone();
+        let writer = std::thread::spawn(move || db2.put("inflight", "v"));
+        std::thread::sleep(Duration::from_millis(200)); // drained + blocked
+
+        // store degrades while the batch is in flight (mimics a flush
+        // failure): the writer's poll fires but must keep waiting — its
+        // batch is no longer in the queue
+        db.inner.set_bg_error("test: simulated flush failure");
+        std::thread::sleep(Duration::from_millis(250)); // several polls
+
+        drop(ws); // committer proceeds
+        let result = writer.join().unwrap();
+        let present = db.inner.get_at_seq(b"inflight", MAX_SEQNO).unwrap().is_some();
+        // either outcome is legal here (the committer's degradation gate
+        // may or may not have seen bg_error before this chunk) — but ack
+        // and state must AGREE:
+        assert_eq!(
+            result.is_ok(),
+            present,
+            "ack and visible state must agree: result={result:?} present={present}"
+        );
+    }
+
+    /// A writer whose batch is still QUEUED when the store degrades pulls
+    /// it back out and errors truthfully: the batch must never be applied
+    /// afterwards.
+    #[test]
+    fn queued_writer_bails_truthfully_when_store_degrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(
+            crate::Db::open(
+                dir.path(),
+                Options {
+                    sync: SyncMode::Always,
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+
+        // first batch: drained by the committer, stuck behind write_mu
+        let ws = db.inner.write_mu.lock();
+        let db2 = db.clone();
+        let first = std::thread::spawn(move || db2.put("first", "v"));
+        std::thread::sleep(Duration::from_millis(150));
+
+        // second batch: enqueued but NOT yet drained (committer is stuck)
+        let db3 = db.clone();
+        let second = std::thread::spawn(move || db3.put("second", "v"));
+        std::thread::sleep(Duration::from_millis(100));
+
+        db.inner.set_bg_error("test: degraded");
+        // second's poll (<=100ms later) finds itself still queued: removes
+        // itself and errors; the committer never sees its batch
+        let second_res = second.join().unwrap();
+        assert!(
+            matches!(second_res, Err(Error::Background(_))),
+            "{second_res:?}"
+        );
+
+        drop(ws);
+        let first_res = first.join().unwrap();
+        let first_present = db.inner.get_at_seq(b"first", MAX_SEQNO).unwrap().is_some();
+        assert_eq!(first_res.is_ok(), first_present, "first: {first_res:?}");
+        assert!(
+            db.inner.get_at_seq(b"second", MAX_SEQNO).unwrap().is_none(),
+            "a truthfully-errored batch must never be applied"
+        );
+    }
+
+    /// Phase-0 validation failures are batch-local: a mid-group reject
+    /// consumes no seqnos, later batches proceed, and every batch gets
+    /// exactly one result.
+    #[test]
+    fn group_validation_failure_is_batch_local_and_results_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(
+            dir.path(),
+            Options {
+                sync: SyncMode::Never,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let inner = &db.inner;
+
+        // park visible_seqno so close to MAX_SEQNO that a 3-op batch fails
+        // the seqno-space check while 1-op batches still fit
+        inner
+            .visible_seqno
+            .store(MAX_SEQNO - 4, Ordering::Release);
+
+        let mk = |n: usize| -> Vec<BatchOp> {
+            let mut b = WriteBatch::new();
+            for i in 0..n {
+                b.put(format!("k{n}-{i}"), "v");
+            }
+            b.ops
+        };
+        let one_a = mk(1);
+        let three = mk(3);
+        let one_b = mk(1);
+
+        let mut ws = inner.write_mu.lock();
+        let results = inner.apply_group_locked(
+            &mut ws,
+            &[one_a.as_slice(), three.as_slice(), one_b.as_slice()],
+        );
+        drop(ws);
+
+        assert_eq!(results.len(), 3, "one result per batch, always");
+        assert!(results[0].is_ok(), "{:?}", results[0]);
+        assert!(
+            matches!(&results[1], Err(Error::InvalidArgument(m)) if m.contains("seqno")),
+            "{:?}",
+            results[1]
+        );
+        assert!(results[2].is_ok(), "validation skip is batch-local: {:?}", results[2]);
+        // the skipped batch consumed no seqnos: exactly 2 were used
+        assert_eq!(
+            inner.visible_seqno.load(Ordering::Acquire),
+            MAX_SEQNO - 2
+        );
+    }
 }

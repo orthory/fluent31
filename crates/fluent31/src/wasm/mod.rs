@@ -144,7 +144,7 @@ pub(crate) fn install_module(db: &Arc<DbInner>, name: &str, wasm: &[u8]) -> Resu
     }
     let mut b = WriteBatch::new();
     b.put(sys_wasm_key(name), wasm.to_vec());
-    db.write_batch_unchecked(&b)
+    db.write_batch_unchecked(b)
 }
 
 pub(crate) fn uninstall_module(db: &Arc<DbInner>, name: &str) -> Result<()> {
@@ -154,7 +154,7 @@ pub(crate) fn uninstall_module(db: &Arc<DbInner>, name: &str) -> Result<()> {
     }
     let mut b = WriteBatch::new();
     b.delete(sys_wasm_key(name));
-    db.write_batch_unchecked(&b)
+    db.write_batch_unchecked(b)
 }
 
 pub(crate) fn list_modules(db: &Arc<DbInner>) -> Result<Vec<ModuleInfo>> {

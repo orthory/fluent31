@@ -525,12 +525,17 @@ async fn stats_and_maintenance() {
     .await;
     let d = run(
         &schema,
-        r#"{ stats { backend visibleSeqno memtableBytes levels { runs tables bytes } } }"#,
+        r#"{ stats { backend visibleSeqno memtableBytes levels { runs tables bytes }
+                     commitGroups commitBatches walSyncs } }"#,
         json!({}),
     )
     .await;
     assert!(u64_field(&d["stats"]["visibleSeqno"]) >= 1);
     assert!(d["stats"]["backend"].as_str().is_some());
+    assert!(u64_field(&d["stats"]["commitBatches"]) >= 1, "put went through the commit path");
+    assert!(u64_field(&d["stats"]["commitGroups"]) >= 1);
+    // SyncMode::Never in tests: no WAL fsyncs
+    assert_eq!(u64_field(&d["stats"]["walSyncs"]), 0);
 
     let d = run(
         &schema,
