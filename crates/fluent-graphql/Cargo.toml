@@ -1,0 +1,26 @@
+[package]
+name = "fluent-graphql"
+version.workspace = true
+edition.workspace = true
+description = "GraphQL server for fluent31: direct KV operations plus registered WASM queries and executors"
+
+[lib]
+name = "fluent_graphql"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fluent-graphql"
+path = "src/main.rs"
+
+[dependencies]
+fluent31 = { path = "../fluent31" }
+async-graphql = "7"
+async-graphql-axum = "7"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
+tower-http = { version = "0.6", features = ["limit"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"
