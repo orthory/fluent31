@@ -77,24 +77,31 @@ impl SnapshotList {
 }
 
 pub(crate) struct Signal {
-    mu: Mutex<()>,
+    /// Pending-notify flag: a notify with no waiter parks here instead of
+    /// vanishing, so a wake sent between a consumer's work and its next
+    /// wait is consumed immediately (no lost-wakeup latency cliff).
+    mu: Mutex<bool>,
     cv: Condvar,
 }
 
 impl Signal {
     fn new() -> Self {
         Signal {
-            mu: Mutex::new(()),
+            mu: Mutex::new(false),
             cv: Condvar::new(),
         }
     }
     pub fn notify(&self) {
-        let _g = self.mu.lock();
+        let mut g = self.mu.lock();
+        *g = true;
         self.cv.notify_all();
     }
     pub fn wait_timeout(&self, d: Duration) {
         let mut g = self.mu.lock();
-        self.cv.wait_for(&mut g, d);
+        if !*g {
+            self.cv.wait_for(&mut g, d);
+        }
+        *g = false;
     }
 }
 
@@ -421,14 +428,39 @@ impl DbInner {
                 return r;
             }
             waiter.cv.wait_for(&mut g, Duration::from_millis(100));
-            if g.result.is_none() {
-                if let Some(msg) = self.bg_error.lock().as_ref() {
-                    return Err(Error::Background(msg.clone()));
-                }
-                if self.shutdown.load(Ordering::Acquire) {
-                    return Err(Error::Closed);
+            if g.result.is_some() {
+                continue;
+            }
+            // poll for a degraded store / shutdown — WITHOUT holding the
+            // waiter lock (the flush thread may briefly hold bg_error, and
+            // the committer needs waiter.inner to deliver)
+            drop(g);
+            let degraded = self.bg_error.lock().clone();
+            let shut = self.shutdown.load(Ordering::Acquire);
+            if degraded.is_some() || shut {
+                // bail ONLY if the batch can be pulled back out of the
+                // queue. If the committer already drained it, a result is
+                // guaranteed (delivery or panic guard) — returning an
+                // error for a batch that may still commit would hand the
+                // caller a false failure and invite duplicating retries.
+                let removed = {
+                    let mut q = self.commit_queue.lock();
+                    match q.iter().position(|w| Arc::ptr_eq(w, &waiter)) {
+                        Some(i) => {
+                            q.remove(i);
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if removed {
+                    return Err(match degraded {
+                        Some(msg) => Error::Background(msg),
+                        None => Error::Closed,
+                    });
                 }
             }
+            g = waiter.inner.lock();
         }
     }
 
@@ -1319,6 +1351,21 @@ fn commit_thread(db: Arc<DbInner>) {
             }
             let group = &drained[start..end];
 
+            // degradation gate, re-checked per chunk: honors set_bg_error's
+            // "writes refused until reopen" contract and stops a chunk from
+            // appending into a WAL whose tail a previous chunk's sync
+            // failure may have left torn
+            if let Some(msg) = db.bg_error.lock().clone() {
+                for w in group {
+                    let mut g = w.inner.lock();
+                    g.result = Some(Err(Error::Background(msg.clone())));
+                    drop(g);
+                    w.cv.notify_one();
+                }
+                start = end;
+                continue;
+            }
+
             let mut guard = GroupPanicGuard {
                 db: &db,
                 group,
@@ -1353,10 +1400,9 @@ fn flush_thread(db: Arc<DbInner>) {
             Ok(true) => continue,
             Ok(false) => db.flush_signal.wait_timeout(Duration::from_millis(200)),
             Err(e) => {
-                let mut g = db.bg_error.lock();
-                if g.is_none() {
-                    *g = Some(format!("flush failed: {e}"));
-                }
+                // set_bg_error releases the lock immediately: holding it
+                // across the backoff would stall every bg_error poller
+                db.set_bg_error(format!("flush failed: {e}"));
                 db.progress_signal.notify();
                 db.flush_signal.wait_timeout(Duration::from_millis(500));
             }
@@ -1369,10 +1415,7 @@ fn compact_thread(db: Arc<DbInner>) {
         let did = match crate::compaction::maintenance_pass(&db) {
             Ok(did) => did,
             Err(e) => {
-                let mut g = db.bg_error.lock();
-                if g.is_none() {
-                    *g = Some(format!("compaction failed: {e}"));
-                }
+                db.set_bg_error(format!("compaction failed: {e}"));
                 db.progress_signal.notify();
                 false
             }
@@ -1827,6 +1870,97 @@ mod group_commit_tests {
         // a >1MiB front is not capped out of its own group: the leader
         // always includes the front, the cap only stops ADDING neighbors
         assert_eq!(group_byte_cap(2 << 20), 1 << 20);
+    }
+
+    /// A writer whose batch was already drained by the committer must NOT
+    /// bail on a bg_error poll: bailing would report failure for a write
+    /// that still commits. It must wait for the real result — and result /
+    /// visible state must always agree.
+    #[test]
+    fn parked_writer_never_gets_false_error_for_an_inflight_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(
+            crate::Db::open(
+                dir.path(),
+                Options {
+                    sync: SyncMode::Always,
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+
+        // stall the committer mid-cycle: it drains the queue, then blocks
+        // on write_mu (held here) with the batch already in hand
+        let ws = db.inner.write_mu.lock();
+        let db2 = db.clone();
+        let writer = std::thread::spawn(move || db2.put("inflight", "v"));
+        std::thread::sleep(Duration::from_millis(200)); // drained + blocked
+
+        // store degrades while the batch is in flight (mimics a flush
+        // failure): the writer's poll fires but must keep waiting — its
+        // batch is no longer in the queue
+        db.inner.set_bg_error("test: simulated flush failure");
+        std::thread::sleep(Duration::from_millis(250)); // several polls
+
+        drop(ws); // committer proceeds
+        let result = writer.join().unwrap();
+        let present = db.inner.get_at_seq(b"inflight", MAX_SEQNO).unwrap().is_some();
+        // either outcome is legal here (the committer's degradation gate
+        // may or may not have seen bg_error before this chunk) — but ack
+        // and state must AGREE:
+        assert_eq!(
+            result.is_ok(),
+            present,
+            "ack and visible state must agree: result={result:?} present={present}"
+        );
+    }
+
+    /// A writer whose batch is still QUEUED when the store degrades pulls
+    /// it back out and errors truthfully: the batch must never be applied
+    /// afterwards.
+    #[test]
+    fn queued_writer_bails_truthfully_when_store_degrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(
+            crate::Db::open(
+                dir.path(),
+                Options {
+                    sync: SyncMode::Always,
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+
+        // first batch: drained by the committer, stuck behind write_mu
+        let ws = db.inner.write_mu.lock();
+        let db2 = db.clone();
+        let first = std::thread::spawn(move || db2.put("first", "v"));
+        std::thread::sleep(Duration::from_millis(150));
+
+        // second batch: enqueued but NOT yet drained (committer is stuck)
+        let db3 = db.clone();
+        let second = std::thread::spawn(move || db3.put("second", "v"));
+        std::thread::sleep(Duration::from_millis(100));
+
+        db.inner.set_bg_error("test: degraded");
+        // second's poll (<=100ms later) finds itself still queued: removes
+        // itself and errors; the committer never sees its batch
+        let second_res = second.join().unwrap();
+        assert!(
+            matches!(second_res, Err(Error::Background(_))),
+            "{second_res:?}"
+        );
+
+        drop(ws);
+        let first_res = first.join().unwrap();
+        let first_present = db.inner.get_at_seq(b"first", MAX_SEQNO).unwrap().is_some();
+        assert_eq!(first_res.is_ok(), first_present, "first: {first_res:?}");
+        assert!(
+            db.inner.get_at_seq(b"second", MAX_SEQNO).unwrap().is_none(),
+            "a truthfully-errored batch must never be applied"
+        );
     }
 
     /// Phase-0 validation failures are batch-local: a mid-group reject
