@@ -137,6 +137,9 @@ impl Txn {
             return Ok(());
         }
         self.db.check_bg_error()?;
+        // commits are writes: honor the same memtable/L0 backpressure as the
+        // plain write path
+        self.db.wait_for_space()?;
         let ops: Vec<BatchOp> = self
             .writes
             .iter()

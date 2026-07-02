@@ -538,6 +538,171 @@ fn sync_always_mode_works() {
     assert_eq!(db.get(b"big").unwrap().unwrap(), vec![9u8; 500]);
 }
 
+/// Regression (review finding): a registered snapshot must keep resolving
+/// values whose pointers lead into a vlog file that GC retired AFTER the
+/// snapshot was taken — the victim file must stay in the resolution map
+/// until the deletion gates prove nobody can need it.
+#[test]
+fn snapshot_reads_survive_vlog_gc_retirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    // suppress background merges so gc timing is fully deterministic
+    opts.l0_compaction_trigger = 100;
+    opts.tier_width = 100;
+    opts.vlog_gc_ratio = 0.1;
+    let db = Db::open(dir.path(), opts).unwrap();
+
+    let big = |tag: u32| format!("{:0>300}", tag).into_bytes();
+    // key0 written once — its only version points into the first vlog file
+    db.put(k(0), big(999)).unwrap();
+    // neighbors written into the same vlog file, then overwritten repeatedly
+    // so that file becomes mostly garbage
+    for round in 0..4u32 {
+        for i in 1..20u32 {
+            db.put(k(i), big(round * 100 + i)).unwrap();
+        }
+        db.flush().unwrap();
+    }
+
+    let snap = db.snapshot();
+    // now make the old file a victim: compaction credits discard stats,
+    // gc relocates key0 (at a seqno above the snapshot) and retires the file
+    db.compact_all().unwrap();
+    let mut retired = 0;
+    while db.gc_vlog().unwrap().is_some() {
+        retired += 1;
+        assert!(retired < 50);
+    }
+    assert!(retired > 0, "expected a retirement");
+
+    // latest reads see the relocation; the snapshot must still see through
+    // the retired file (this returned Corruption before the fix)
+    assert_eq!(db.get(&k(0)).unwrap().unwrap(), big(999));
+    assert_eq!(db.get_at(&k(0), &snap).unwrap().unwrap(), big(999));
+    let n = db
+        .iter_at(None, None, false, &snap)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .count();
+    assert_eq!(n, 20);
+}
+
+/// Regression (review finding): a vlog file retired but not yet deleted at
+/// shutdown must survive the reopen cycle — resolvable for old versions,
+/// never re-listed as live, and cleanly deletable once the gates pass.
+#[test]
+fn retired_vlog_survives_reopen_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    opts.l0_compaction_trigger = 100;
+    opts.tier_width = 100;
+    opts.vlog_gc_ratio = 0.1;
+    let big = |tag: u32| format!("{:0>300}", tag).into_bytes();
+    {
+        let db = Db::open(dir.path(), opts.clone()).unwrap();
+        for round in 0..4u32 {
+            for i in 0..20u32 {
+                db.put(k(i), big(round * 100 + i)).unwrap();
+            }
+            db.flush().unwrap();
+        }
+        // hold a snapshot so the deletion gates CANNOT pass: the retirement
+        // must persist across shutdown
+        let _snap = db.snapshot();
+        db.compact_all().unwrap();
+        let mut retired = 0;
+        while db.gc_vlog().unwrap().is_some() {
+            retired += 1;
+            assert!(retired < 50);
+        }
+        assert!(retired > 0, "expected a pending retirement at shutdown");
+        // _snap dropped here, then the db closes with vlog_retired non-empty
+    }
+    // reopen with the retirement pending: reads must work, and the file
+    // must not have been re-adopted into the live set
+    {
+        let db = Db::open(dir.path(), opts.clone()).unwrap();
+        for i in 0..20u32 {
+            assert_eq!(db.get(&k(i)).unwrap().unwrap(), big(300 + i), "key {i}");
+        }
+        // let the maintenance thread pass the gates and delete the victim
+        db.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+    }
+    // and the post-deletion state must reopen cleanly (this failed before
+    // the fix: vlog_live still referenced the unlinked file)
+    let db = Db::open(dir.path(), opts).unwrap();
+    for i in 0..20u32 {
+        assert_eq!(db.get(&k(i)).unwrap().unwrap(), big(300 + i), "key {i}");
+    }
+}
+
+/// Regression (review finding): a zero-filled region at the WAL tail (disk
+/// preallocation / crash artifact) must classify as torn-tail loss, not as
+/// a valid empty record that later fails decoding.
+#[test]
+fn zero_filled_wal_tail_is_torn() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Db::open(dir.path(), small_opts()).unwrap();
+        db.put(b"kept".to_vec(), b"1".to_vec()).unwrap();
+    }
+    let mut wals: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let n = p.file_name().unwrap().to_string_lossy().into_owned();
+            n.starts_with("wal-") && n.ends_with(".log")
+        })
+        .collect();
+    wals.sort();
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(wals.last().unwrap())
+            .unwrap();
+        f.write_all(&[0u8; 64]).unwrap();
+    }
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    assert_eq!(db.get(b"kept").unwrap().unwrap(), b"1");
+}
+
+/// Regression (review finding): repeated reopen after a torn WAL tail must
+/// stay stable — recovery truncates the tail so the file can never later be
+/// misclassified as damaged-sealed.
+#[test]
+fn torn_tail_reopen_is_stable() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Db::open(dir.path(), small_opts()).unwrap();
+        db.put(b"a".to_vec(), b"1".to_vec()).unwrap();
+        db.put(b"b".to_vec(), b"2".to_vec()).unwrap();
+    }
+    let mut wals: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let n = p.file_name().unwrap().to_string_lossy().into_owned();
+            n.starts_with("wal-") && n.ends_with(".log")
+        })
+        .collect();
+    wals.sort();
+    let last = wals.last().unwrap();
+    let len = std::fs::metadata(last).unwrap().len();
+    let f = std::fs::OpenOptions::new().write(true).open(last).unwrap();
+    f.set_len(len - 3).unwrap();
+    drop(f);
+
+    for round in 0..3 {
+        let db = Db::open(dir.path(), small_opts()).unwrap();
+        assert_eq!(db.get(b"a").unwrap().unwrap(), b"1", "round {round}");
+        assert!(db.get(b"b").unwrap().is_none(), "round {round}");
+    }
+}
+
 /// On Linux the io_uring backend must actually engage (Auto may silently
 /// fall back; force it and drive batched reads through the ring).
 #[test]

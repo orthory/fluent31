@@ -155,10 +155,15 @@ pub(crate) fn scan_records(file: &dyn DbFile) -> Result<(Vec<(u64, u32, Vec<u8>,
         let Ok(klen) = r.uvarint() else { break };
         let Ok(vlen) = r.uvarint() else { break };
         let header = rest.len() - r.remaining();
-        let total = header as u64 + klen + vlen;
-        if total > rest.len() as u64 {
+        // corruption-controlled varints: checked math so a wrapped sum stops
+        // the scan cleanly instead of panicking on the slice
+        let Some(total) = (header as u64)
+            .checked_add(klen)
+            .and_then(|t| t.checked_add(vlen))
+            .filter(|&t| t <= rest.len() as u64 && t <= u32::MAX as u64)
+        else {
             break;
-        }
+        };
         if crc32(&rest[4..total as usize]) != crc {
             break;
         }
@@ -195,6 +200,11 @@ impl Vlog {
 
     pub fn append(&self, key: &[u8], value: &[u8]) -> Result<ValuePtr> {
         let rec = encode_record(key, value);
+        if rec.len() as u64 > u32::MAX as u64 {
+            return Err(crate::error::Error::InvalidArgument(
+                "vlog record exceeds 4 GiB pointer limit".into(),
+            ));
+        }
         let mut head = self.head.lock();
         let off = head.handle.file.append(&rec)?;
         head.written = off + rec.len() as u64;

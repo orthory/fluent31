@@ -94,6 +94,11 @@ impl Block {
         let mut r = Reader::new(&self.data[off..self.entries_end]);
         let iklen = r.uvarint()? as usize;
         let rlen = r.uvarint()? as usize;
+        if iklen < crate::types::TRAILER_LEN {
+            // file-sourced key too short to carry a trailer: corrupt data,
+            // not a panic in the trailer arithmetic
+            return Err(corrupt("internal key shorter than trailer"));
+        }
         let ikey = r.bytes(iklen)?;
         let repr = r.bytes(rlen)?;
         Ok((ikey, repr))

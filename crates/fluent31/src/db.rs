@@ -141,20 +141,20 @@ pub(crate) struct DbInner {
 impl DbInner {
     // ---------------------------------------------------------------- reads
 
-    /// Assemble a consistent read view. Order matters: clone the Arcs under
-    /// the state lock FIRST, then load the visible seqno — a pinned older
-    /// structure always still contains whatever GC dropped afterwards.
+    /// Assemble a consistent read view. Ordering is load-bearing twice over:
+    /// the Arcs are cloned before the seqno loads (a pinned older structure
+    /// still contains whatever GC dropped afterwards), and the seqno load
+    /// happens *inside* the state read lock so no structural change that the
+    /// seqno could reference — e.g. a vlog head rotation followed by a write
+    /// into the new head — can slip in between (rotations take the state
+    /// write lock).
     pub fn read_view(&self) -> ReadView {
-        let (mem, imms, version) = {
-            let s = self.state.read();
-            (s.mem.clone(), s.imms.clone(), s.version.clone())
-        };
-        let visible = self.visible_seqno.load(Ordering::Acquire);
+        let s = self.state.read();
         ReadView {
-            mem,
-            imms,
-            version,
-            visible,
+            mem: s.mem.clone(),
+            imms: s.imms.clone(),
+            version: s.version.clone(),
+            visible: self.visible_seqno.load(Ordering::Acquire),
         }
     }
 
@@ -287,7 +287,7 @@ impl DbInner {
             || s.version.levels[0].len() >= self.opts.l0_stall_trigger
     }
 
-    fn wait_for_space(&self) -> Result<()> {
+    pub(crate) fn wait_for_space(&self) -> Result<()> {
         while self.stalled() {
             self.check_bg_error()?;
             self.flush_signal.notify();
@@ -324,6 +324,23 @@ impl DbInner {
         let base = self.visible_seqno.load(Ordering::Acquire) + 1;
         if base + ops.len() as u64 >= MAX_SEQNO {
             return Err(Error::InvalidArgument("seqno space exhausted".into()));
+        }
+
+        // size-check BEFORE vlog placement: rejecting afterwards would
+        // orphan already-appended vlog records that no discard accounting
+        // ever reclaims (pointer reprs only shrink the encoded batch, so
+        // this bound is conservative)
+        let approx: u64 = ops
+            .iter()
+            .map(|op| match op {
+                BatchOp::Put { key, value } => (key.len() + value.len() + 32) as u64,
+                BatchOp::Delete { key } => (key.len() + 16) as u64,
+            })
+            .sum();
+        if approx >= 1 << 30 {
+            return Err(Error::InvalidArgument(
+                "write batch exceeds WAL record limit".into(),
+            ));
         }
 
         // 1. place large values in the vlog
@@ -990,18 +1007,39 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
     for &id in &mdata.vlog_live {
         live.insert(id, open_vlog(id)?);
     }
+    // retired victims still awaiting their deletion gates: they stay
+    // RESOLVABLE (in the version map, sharing the same handle Arc) until
+    // process_retired passes the gates — old versions in tables may still
+    // dereference them
+    let retired_ids: std::collections::HashSet<u64> =
+        mdata.vlog_retired.iter().map(|(id, _)| *id).collect();
+    let mut retired_list = Vec::new();
+    for &(id, s) in &mdata.vlog_retired {
+        if paths.vlog(id).exists() {
+            let handle = open_vlog(id)?;
+            live.insert(id, handle.clone());
+            retired_list.push(RetiredVlog {
+                id,
+                retired_at: s,
+                handle,
+            });
+        }
+    }
     // young files: created after the manifest's head was recorded (rotation
-    // does not flip the manifest); adopt them — never delete pre-replay
+    // does not flip the manifest); adopt them — never delete pre-replay.
+    // Retired ids are NOT young even when id >= head: re-adopting them into
+    // the live set would leave a dangling vlog_live entry once the deletion
+    // gates pass.
     let mut young: BTreeMap<u64, BTreeMap<u64, (u32, Vec<u8>)>> = BTreeMap::new();
     for &id in disk_vlogs.iter() {
-        if id >= mdata.vlog_head && !live.contains_key(&id) {
+        if id >= mdata.vlog_head && !live.contains_key(&id) && !retired_ids.contains(&id) {
             live.insert(id, open_vlog(id)?);
         }
     }
     // valid-prefix index of every young file (head included) for WAL replay
     // pointer validation
     for (&id, handle) in live.iter() {
-        if id >= mdata.vlog_head {
+        if id >= mdata.vlog_head && !retired_ids.contains(&id) {
             let (records, _valid) = vlog::scan_records(handle.file.as_ref())?;
             let map = records
                 .into_iter()
@@ -1009,20 +1047,6 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
                 .collect();
             young.insert(id, map);
             next_file_id = next_file_id.max(id + 1);
-        }
-    }
-
-    // ---- retired victims still awaiting gates ------------------------------
-    let mut retired_list = Vec::new();
-    for &(id, s) in &mdata.vlog_retired {
-        let path = paths.vlog(id);
-        if path.exists() {
-            let handle = open_vlog(id)?;
-            retired_list.push(RetiredVlog {
-                id,
-                retired_at: s,
-                handle,
-            });
         }
     }
 
@@ -1037,13 +1061,23 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
                     wal_ids.push(id);
                 }
                 next_file_id = next_file_id.max(id + 1);
+            } else if let Some(id) = parse_file_id(name, "sst-", ".tbl") {
+                // orphaned outputs of a crashed flush/compaction: startup_gc
+                // deletes them at the END of open, so the id counter must
+                // already clear them or the recovery flush collides
+                next_file_id = next_file_id.max(id + 1);
             }
         }
     }
     wal_ids.sort_unstable();
 
-    let recovered = Arc::new(Memtable::new(0));
+    // the recovered memtable is 1:1 with ALL replayed WALs: tagging it with
+    // the newest replayed id makes its (synchronous) flush advance the floor
+    // past every replayed WAL in the SAME manifest write that records the
+    // recovery SST — no window where reopen would re-replay and duplicate
+    let recovered = Arc::new(Memtable::new(wal_ids.last().copied().unwrap_or(0)));
     let mut max_seq = mdata.last_flushed_seqno;
+    let mut truncate_torn: Option<(u64, u64)> = None; // (wal id, valid_len)
     'wals: for (wi, &wid) in wal_ids.iter().enumerate() {
         let file = io_backend.open_read(&paths.wal(wid))?;
         let is_last = wi == wal_ids.len() - 1;
@@ -1083,13 +1117,29 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
         }
         match tail {
             WalTail::Clean => {}
-            WalTail::Torn { .. } if is_last => break,
+            WalTail::Torn { valid_len } if is_last => {
+                truncate_torn = Some((wid, valid_len));
+                break;
+            }
             WalTail::Torn { valid_len } => {
                 return Err(corrupt(format!(
                     "sealed wal-{wid:06} damaged at offset {valid_len}"
                 )));
             }
         }
+    }
+
+    // Neutralize a torn tail NOW: once the fresh WAL below exists, this file
+    // is no longer the newest, and a crash before the floor advances would
+    // make the next open misread the (legitimate) torn tail as sealed-WAL
+    // corruption — permanently. Truncating to the valid prefix makes the
+    // file clean under every future classification.
+    if let Some((wid, valid_len)) = truncate_torn {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(paths.wal(wid))?;
+        f.set_len(valid_len)?;
+        f.sync_all()?;
     }
 
     // ---- fresh head vlog (never append to a file that predates a crash) ---
@@ -1151,63 +1201,60 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
         _lock_file: lock_file,
     });
 
-    // recovery memtable: mark it as backed by all replayed WALs — flushing it
-    // must advance the floor past the newest replayed id, so pin its wal_id
-    // to the fresh WAL id (all replayed ids are below it).
-    // (Memtable.wal_id is set at construction; we constructed `recovered`
-    // with 0, so flush it synchronously right now instead.)
+    // Flush the recovered memtable synchronously. Its wal_id is the newest
+    // replayed WAL, so flush_one's manifest write records the recovery SST
+    // AND advances the floor past every replayed WAL atomically — a crash
+    // in between can only re-replay, never observe the SST without the
+    // floor (which would duplicate data).
     if !inner.state.read().imms.is_empty() {
-        // Replace the placeholder wal_id: rebuild the imm with correct id is
-        // unnecessary — flush_one advances the floor to imm.wal_id + 1, so
-        // give it the fresh WAL's predecessor semantics by flushing while the
-        // real floor target is the fresh wal id.
-        // Simplest correct route: flush now, then bump the floor explicitly.
         inner.flush_one()?;
-        let mut m = inner.manifest.lock();
-        let mut data = m.data.clone();
-        data.wal_floor = wal_id; // every replayed WAL is now redundant
-        data.next_file_id = inner.next_file_id.load(Ordering::SeqCst);
-        let gen = m.gen + 1;
-        manifest::save(&inner.paths, gen, &data)?;
-        m.gen = gen;
-        m.data = data;
-        let floor = m.data.wal_floor;
-        drop(m);
-        inner.delete_old_wals(floor);
-    } else {
-        // persist adopted young vlogs + fresh head + fresh wal floor
+    }
+
+    // Consolidated open-completion manifest: fresh WAL floor, the adopted
+    // vlog set (retired victims are tracked in vlog_retired, never in
+    // vlog_live — the in-memory version map holds both for resolution),
+    // fresh head, and the final id counter.
+    {
+        let retired_now: std::collections::HashSet<u64> = {
+            let m = inner.manifest.lock();
+            m.data.vlog_retired.iter().map(|(id, _)| *id).collect()
+        };
+        let live_ids: Vec<u64> = inner
+            .state
+            .read()
+            .version
+            .vlogs
+            .keys()
+            .copied()
+            .filter(|id| !retired_now.contains(id))
+            .collect();
         let mut m = inner.manifest.lock();
         let mut data = m.data.clone();
         data.wal_floor = wal_id;
-        data.vlog_live = inner.state.read().version.vlogs.keys().copied().collect();
+        data.vlog_live = live_ids;
         data.vlog_head = head_id;
         data.next_file_id = inner.next_file_id.load(Ordering::SeqCst);
         let gen = m.gen + 1;
         manifest::save(&inner.paths, gen, &data)?;
         m.gen = gen;
         m.data = data;
-        let floor = m.data.wal_floor;
         drop(m);
-        inner.delete_old_wals(floor);
-    }
-
-    // make sure the manifest reflects the adopted vlog set in the flush path
-    {
-        let mut m = inner.manifest.lock();
-        let live_ids: Vec<u64> = inner.state.read().version.vlogs.keys().copied().collect();
-        if m.data.vlog_live != live_ids || m.data.vlog_head != head_id {
-            let mut data = m.data.clone();
-            data.vlog_live = live_ids;
-            data.vlog_head = head_id;
-            let gen = m.gen + 1;
-            manifest::save(&inner.paths, gen, &data)?;
-            m.gen = gen;
-            m.data = data;
-        }
+        inner.delete_old_wals(wal_id);
     }
 
     // ---- startup GC of unreferenced files ----------------------------------
     startup_gc(&inner)?;
+
+    // sweep checkpoint builds that crashed mid-creation (we hold the LOCK,
+    // so nothing can be legitimately building right now)
+    if let Ok(rd) = std::fs::read_dir(inner.paths.archive_root()) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(".tmp-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
 
     Ok(inner)
 }

@@ -72,6 +72,12 @@ pub(crate) fn read_wal(file: &dyn DbFile) -> Result<(Vec<Vec<u8>>, WalTail)> {
         let mut r = Reader::new(&buf[pos..pos + HEADER_LEN]);
         let rec_len = r.u32().expect("sized") as usize;
         let crc = r.u32().expect("sized");
+        // an all-zero header would pass the CRC check (crc32 of an empty
+        // payload is 0), but the engine never writes empty records — treat a
+        // zero-filled region as a torn tail, not data
+        if rec_len == 0 && crc == 0 {
+            return Ok((records, WalTail::Torn { valid_len: pos as u64 }));
+        }
         if rec_len as u32 > MAX_RECORD || buf.len() - pos - HEADER_LEN < rec_len {
             return Ok((records, WalTail::Torn { valid_len: pos as u64 }));
         }
@@ -102,7 +108,7 @@ mod tests {
         let path = dir.path().join("wal");
         let w = WalWriter::new(io.create_new(&path).unwrap());
         w.append_record(b"first").unwrap();
-        w.append_record(b"").unwrap();
+        w.append_record(b"second").unwrap();
         w.append_record(&vec![7u8; 100_000]).unwrap();
         w.sync().unwrap();
 
@@ -111,8 +117,30 @@ mod tests {
         assert_eq!(tail, WalTail::Clean);
         assert_eq!(recs.len(), 3);
         assert_eq!(recs[0], b"first");
-        assert_eq!(recs[1], b"");
+        assert_eq!(recs[1], b"second");
         assert_eq!(recs[2], vec![7u8; 100_000]);
+    }
+
+    #[test]
+    fn zero_filled_tail_is_torn_not_empty_record() {
+        // an empty record's header is indistinguishable from zero fill, so
+        // the reader treats it as a torn tail — the engine never writes
+        // empty payloads (a batch always encodes at least its header)
+        let (dir, io) = setup();
+        let path = dir.path().join("wal");
+        let w = WalWriter::new(io.create_new(&path).unwrap());
+        w.append_record(b"real").unwrap();
+        w.sync().unwrap();
+        let valid = std::fs::metadata(&path).unwrap().len();
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(&[0u8; 32]).unwrap();
+        }
+        let f = io.open_read(&path).unwrap();
+        let (recs, tail) = read_wal(f.as_ref()).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(tail, WalTail::Torn { valid_len: valid });
     }
 
     #[test]

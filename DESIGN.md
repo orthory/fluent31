@@ -148,13 +148,21 @@ rotation-vs-GC data-loss window found in design review.
    validated against the scanned prefix (offset+len+**embedded key**
    match); a mismatch is torn-tail loss → replay stops globally. CRC
    damage in a sealed (non-newest) WAL is a hard corruption error — sealed
-   WALs were fdatasynced at rotation, prefix semantics stay honest.
-5. The replayed memtable is **flushed synchronously**, the floor advances
-   past every replayed WAL, and a **fresh vlog head** is created — the
-   engine never appends to a file that predates a crash (kills the
-   offset-reuse aliasing bug class; the key check in every vlog read is
-   the second layer).
-6. Startup GC: delete sst/vlog/wal files no durable state references.
+   WALs were fdatasynced at rotation, prefix semantics stay honest. A
+   zero-filled tail region classifies as torn (an all-zero header would
+   otherwise pass the CRC check). The newest WAL's torn tail is
+   **truncated on the spot** — otherwise a crash later in recovery would
+   leave a file that the next open misreads as damaged-sealed, bricking
+   the store.
+5. The replayed memtable is **flushed synchronously** — it is tagged with
+   the newest replayed WAL id, so the flush's own manifest write records
+   the recovery SST and advances the floor past every replayed WAL
+   *atomically* (a crash in between can only re-replay, never duplicate).
+   A **fresh vlog head** is then created — the engine never appends to a
+   file that predates a crash (kills the offset-reuse aliasing bug class;
+   the key check in every vlog read is the second layer).
+6. Startup GC: delete sst/vlog/wal files no durable state references, and
+   sweep crashed checkpoint builds (`archive/.tmp-*`).
 
 ## 6. MVCC, snapshots, transactions
 
@@ -216,16 +224,23 @@ dataset stay memory-resident, and compaction moves pointers, not payloads.
   against the *current* newest version (under the mutex — atomic vs all
   writers, no OCC conflicts with user txns needed for correctness of GC
   itself), and re-puts still-live values through the normal write path.
-  Retirement seqno `S` = visible seqno after the last chunk; every shadow
-  of a victim-pointing version therefore has seqno ≤ S.
-- **Deletion gates** (design-review fixes, the BadgerDB bug class): a
-  retired victim is `mark_obsolete`d only when (a) the snapshot watermark
-  is strictly above `S` — no snapshot can resolve a version that
-  dereferences the victim — **and** (b) `last_flushed_seqno >= S` — the
-  relocations are in fsynced tables, so no crash can resurrect
-  pointers into a deleted file. Physical unlink then happens on the last
-  Arc drop: Versions own vlog handles, so long scans and checkpoints
-  holding old ReadViews pin the file regardless of the gates.
+  Before the retirement manifest flip, the vlog head and WAL are synced —
+  a durable "victim disowned" record must never precede the durability of
+  the relocations it depends on. Retirement seqno `S` = visible seqno
+  after the last chunk; every shadow of a victim-pointing version
+  therefore has seqno ≤ S.
+- **Retirement ≠ removal from resolution** (code-review fix): the victim
+  stays in `Version::vlogs` — snapshots at/below `S` still resolve old
+  versions that point into it. It leaves the resolution map only when the
+  **deletion gates** pass: (a) the snapshot watermark strictly above `S` —
+  no snapshot can resolve a version that dereferences the victim — **and**
+  (b) `last_flushed_seqno >= S` — the relocations are in fsynced tables,
+  so no crash can resurrect pointers into a deleted file (the BadgerDB
+  bug class). Only then is the handle dropped and `mark_obsolete`d;
+  physical unlink happens on the last Arc drop, so long scans and
+  checkpoints holding old ReadViews pin the file regardless. At reopen,
+  gated victims are re-adopted as resolvable-but-retired (never back into
+  `vlog_live`).
 - Discard stats are persisted in the same manifest flip as the compaction
   that produced them. Known limitation: stats lag under lazy leveling
   (old pointers surface only when merges reach them); `stats` exposes

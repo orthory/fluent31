@@ -111,14 +111,14 @@ impl ManifestData {
         let last_flushed_seqno = r.u64()?;
         let wal_floor = r.u64()?;
         let nlevels = r.uvarint()? as usize;
-        let mut levels = Vec::with_capacity(nlevels);
+        let mut levels = Vec::with_capacity(nlevels.min(1024));
         for _ in 0..nlevels {
             let nruns = r.uvarint()? as usize;
-            let mut runs = Vec::with_capacity(nruns);
+            let mut runs = Vec::with_capacity(nruns.min(1024));
             for _ in 0..nruns {
                 let id = r.u64()?;
                 let ntables = r.uvarint()? as usize;
-                let mut table_ids = Vec::with_capacity(ntables);
+                let mut table_ids = Vec::with_capacity(ntables.min(1024));
                 for _ in 0..ntables {
                     table_ids.push(r.u64()?);
                 }
@@ -127,18 +127,18 @@ impl ManifestData {
             levels.push(runs);
         }
         let nv = r.uvarint()? as usize;
-        let mut vlog_live = Vec::with_capacity(nv);
+        let mut vlog_live = Vec::with_capacity(nv.min(1024));
         for _ in 0..nv {
             vlog_live.push(r.u64()?);
         }
         let vlog_head = r.u64()?;
         let nr = r.uvarint()? as usize;
-        let mut vlog_retired = Vec::with_capacity(nr);
+        let mut vlog_retired = Vec::with_capacity(nr.min(1024));
         for _ in 0..nr {
             vlog_retired.push((r.u64()?, r.u64()?));
         }
         let nd = r.uvarint()? as usize;
-        let mut discard = Vec::with_capacity(nd);
+        let mut discard = Vec::with_capacity(nd.min(1024));
         for _ in 0..nd {
             discard.push((r.u64()?, r.u64()?));
         }

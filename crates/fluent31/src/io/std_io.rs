@@ -3,22 +3,23 @@
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use super::{DbFile, Io};
 use crate::error::Result;
 
 pub(super) struct StdFile {
     f: File,
-    append_off: AtomicU64,
+    append_off: Mutex<u64>,
 }
 
 impl StdFile {
     pub(super) fn new(f: File, len: u64) -> Self {
         StdFile {
             f,
-            append_off: AtomicU64::new(len),
+            append_off: Mutex::new(len),
         }
     }
 }
@@ -33,9 +34,15 @@ impl DbFile for StdFile {
     }
 
     fn append(&self, data: &[u8]) -> Result<u64> {
-        let off = self.append_off.fetch_add(data.len() as u64, Ordering::SeqCst);
-        self.f.write_all_at(data, off)?;
-        Ok(off)
+        // advance the offset only after the write fully succeeds: a failed
+        // (possibly partial) write must not leave a hole that later appends
+        // silently skip past — the retry overwrites the same region and CRC
+        // framing covers any torn remnant
+        let mut off = self.append_off.lock();
+        self.f.write_all_at(data, *off)?;
+        let at = *off;
+        *off += data.len() as u64;
+        Ok(at)
     }
 
     fn sync_data(&self) -> Result<()> {

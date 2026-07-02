@@ -128,14 +128,20 @@ impl TableStats {
 
     pub fn decode(buf: &[u8]) -> Result<TableStats> {
         let mut r = Reader::new(buf);
-        Ok(TableStats {
+        let stats = TableStats {
             entries: r.u64()?,
             tombstones: r.u64()?,
             min_seq: r.u64()?,
             max_seq: r.u64()?,
             first_ikey: r.len_prefixed()?.to_vec(),
             last_ikey: r.len_prefixed()?.to_vec(),
-        })
+        };
+        if stats.first_ikey.len() < crate::types::TRAILER_LEN
+            || stats.last_ikey.len() < crate::types::TRAILER_LEN
+        {
+            return Err(corrupt("stats keys shorter than trailer"));
+        }
+        Ok(stats)
     }
 
     pub fn min_ukey(&self) -> &[u8] {

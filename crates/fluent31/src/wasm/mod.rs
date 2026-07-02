@@ -209,7 +209,16 @@ fn run_instance(db: &Arc<DbInner>, module: &Module, ctx: HostCtx) -> Result<(i32
         .get_typed_func::<(), i32>(&mut store, "run")
         .map_err(|e| Error::Wasm(format!("missing run(): {e}")))?;
     match run.call(&mut store, ()) {
-        Ok(code) => Ok((code, store.into_data())),
+        Ok(code) => {
+            let mut ctx = store.into_data();
+            // a host-side engine error (Corruption/Io surfaced to the guest
+            // as EIO) must fail the invocation even if the guest swallowed
+            // the errno and exited cleanly
+            if let Some(e) = ctx.host_error.take() {
+                return Err(e);
+            }
+            Ok((code, ctx))
+        }
         Err(trap) => {
             // surface a host-side error (EIO from a failing read, etc.) in
             // preference to the generic trap text

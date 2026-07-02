@@ -39,7 +39,7 @@ pub(crate) fn maintenance_pass(db: &Arc<DbInner>) -> Result<bool> {
     let mut did = false;
     {
         let _guard = db.compaction_mu.lock();
-        while let Some(job) = pick(db) {
+        while let Some(job) = pick(db, false) {
             run_job(db, job)?;
             did = true;
             if db.shutdown.load(Ordering::Acquire) {
@@ -52,21 +52,25 @@ pub(crate) fn maintenance_pass(db: &Arc<DbInner>) -> Result<bool> {
     Ok(did)
 }
 
+/// Manual full compaction: merges regardless of the configured triggers
+/// until every level holds at most one run.
 pub(crate) fn compact_until_quiet(db: &Arc<DbInner>) -> Result<()> {
     db.check_bg_error()?;
     let _guard = db.compaction_mu.lock();
-    while let Some(job) = pick(db) {
+    while let Some(job) = pick(db, true) {
         run_job(db, job)?;
     }
     Ok(())
 }
 
-fn pick(db: &Arc<DbInner>) -> Option<Job> {
+fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
     let s = db.state.read();
     let v = &s.version;
     let last = v.levels.len() - 1;
     for i in 0..last {
-        let trigger = if i == 0 {
+        let trigger = if force {
+            2
+        } else if i == 0 {
             db.opts.l0_compaction_trigger
         } else {
             db.opts.tier_width
@@ -217,9 +221,19 @@ fn install(
         );
     }
     if !discard.is_empty() {
+        // only files still in the resolution map (and not already retired)
+        // accumulate stats: pointers into retired/deleted files would pin
+        // dead entries in the manifest forever. NB: manifest vlog_live lags
+        // rotation (new heads are only persisted at reopen/GC), so the
+        // version map — not vlog_live — is the live-set authority here.
+        let resolvable: std::collections::HashSet<u64> =
+            db.state.read().version.vlogs.keys().copied().collect();
         let mut map = data.discard_map();
         for (f, b) in &discard {
-            *map.entry(*f).or_insert(0) += *b;
+            let is_retired = data.vlog_retired.iter().any(|(id, _)| id == f);
+            if resolvable.contains(f) && !is_retired {
+                *map.entry(*f).or_insert(0) += *b;
+            }
         }
         data.discard = map.into_iter().collect();
     }
@@ -285,6 +299,16 @@ fn process_retired(db: &Arc<DbInner>) -> Result<bool> {
         manifest::save(&db.paths, gen, &data)?;
         m.gen = gen;
         m.data = data;
+
+        // only now drop the victims from the resolution map: the gates
+        // guarantee no current or future reader can resolve a version that
+        // dereferences them (older pinned Versions keep their own Arcs)
+        let mut s = db.state.write();
+        let mut v = s.version.clone_shape();
+        for r in &ready {
+            v.vlogs.remove(&r.id);
+        }
+        s.version = Arc::new(v);
     }
     for r in ready {
         // actual unlink happens when the last pinned Version drops its Arc
@@ -313,7 +337,9 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
         let discard = m.data.discard_map();
         let mut best: Option<(u64, f64)> = None;
         for (&id, h) in &s.version.vlogs {
-            if id == head {
+            // the version map also carries gated-retired victims (kept
+            // resolvable for old snapshots) — never re-pick those
+            if id == head || m.data.vlog_retired.iter().any(|(r, _)| *r == id) {
                 continue;
             }
             let Some(&dead) = discard.get(&id) else {
@@ -363,6 +389,16 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
         }
     }
 
+    // The retirement manifest flip below is DURABLE; the relocations it
+    // depends on must be durable first (in relaxed sync modes they so far
+    // live only in the unsynced WAL / vlog head). Payload before pointer,
+    // pointer before the metadata that disowns the old copy.
+    {
+        let ws = db.write_mu.lock();
+        db.vlog.sync_head()?;
+        ws.wal.sync()?;
+    }
+
     // S: sampled after every relocation is committed. Any key we skipped was
     // already shadowed by a write with seqno <= S, so every reader at
     // snapshot > S resolves victim-free versions.
@@ -378,11 +414,10 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
         manifest::save(&db.paths, gen, &data)?;
         m.gen = gen;
         m.data = data;
-
-        let mut s = db.state.write();
-        let mut v = s.version.clone_shape();
-        v.vlogs.remove(&victim_id);
-        s.version = Arc::new(v);
+        // NOTE: the victim deliberately STAYS in Version::vlogs — registered
+        // snapshots at/below S still resolve old versions that point into
+        // it. process_retired removes it from the resolution map only once
+        // the gates prove no reader can ever need it again.
     }
     db.retired.lock().push(RetiredVlog {
         id: victim_id,

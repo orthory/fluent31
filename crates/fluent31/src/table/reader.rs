@@ -47,6 +47,9 @@ impl Table {
         let mut r = Reader::new(&index_payload);
         while !r.is_empty() {
             let last_ikey = r.len_prefixed()?.to_vec();
+            if last_ikey.len() < crate::types::TRAILER_LEN {
+                return Err(corrupt("index key shorter than trailer"));
+            }
             let off = r.uvarint()?;
             let len = r.uvarint()?;
             index.push(IndexEntry {

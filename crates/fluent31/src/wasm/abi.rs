@@ -98,6 +98,10 @@ impl HostCtx {
     pub fn new(db: Arc<DbInner>, access: Access, input: Vec<u8>) -> HostCtx {
         let limits = StoreLimitsBuilder::new()
             .memory_size(db.opts.wasm_memory_limit)
+            // the per-memory size cap only bounds anything if the memory
+            // COUNT is bounded too (multi-memory modules)
+            .memories(1)
+            .tables(4)
             .instances(2)
             .build();
         HostCtx {
@@ -390,7 +394,9 @@ pub(crate) fn register(linker: &mut Linker<HostCtx>) -> WResult<()> {
         "fluent",
         "scan_next",
         |mut caller: Caller<'_, HostCtx>, h: i32, buf: i32, cap: i32| -> WResult<i32> {
-            let cap = cap as u32 as usize;
+            // host-side batch ceiling: a huge guest cap must not make the
+            // host resolve/buffer gigabytes before the guest write traps
+            let cap = (cap as u32 as usize).min(16 << 20);
             let mut out: Vec<u8> = Vec::new();
             {
                 let ctx = caller.data_mut();

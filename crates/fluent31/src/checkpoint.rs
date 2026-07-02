@@ -83,14 +83,22 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<CheckpointInfo> {
         seq: cut,
     };
 
-    // 3. build the archive in a temp dir
+    // 3. build the archive in a temp dir. create_dir doubles as the mutual
+    //    exclusion for concurrent same-name checkpoints: the second caller
+    //    fails here instead of clobbering the first one's in-progress build.
+    //    (Stale .tmp-* dirs from crashes are swept at Db::open.)
     let root = inner.paths.archive_root();
     std::fs::create_dir_all(&root)?;
     let tmp_dir = root.join(format!(".tmp-{name}"));
-    if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir)?;
-    }
-    std::fs::create_dir_all(&tmp_dir)?;
+    std::fs::create_dir(&tmp_dir).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::InvalidArgument(format!(
+                "checkpoint {name:?} is already being created"
+            ))
+        } else {
+            Error::Io(e)
+        }
+    })?;
 
     // tables (paths stay live: the pinned view holds their Arc handles and
     // unlink only ever happens in handle Drop)
