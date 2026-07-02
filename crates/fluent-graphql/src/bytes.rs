@@ -18,7 +18,7 @@ pub fn nibble(c: u8) -> Option<u8> {
 
 pub fn decode_hex(s: &str) -> Result<Vec<u8>, async_graphql::Error> {
     let b = s.as_bytes();
-    if b.len() % 2 != 0 {
+    if !b.len().is_multiple_of(2) {
         return Err(async_graphql::Error::new("invalid hex: odd length"));
     }
     b.chunks_exact(2)

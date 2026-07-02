@@ -322,6 +322,24 @@ impl DbInner {
         }
     }
 
+    /// Durability barrier: everything acked before this call is durable
+    /// when it returns. Payload before pointer, as everywhere: the vlog
+    /// head syncs before the WAL records referencing it.
+    pub fn sync_wal(&self) -> Result<()> {
+        self.check_bg_error()?;
+        let ws = self.write_mu.lock();
+        if let Err(e) = self.vlog.sync_head() {
+            self.set_bg_error(format!("vlog sync failed: {e}"));
+            return Err(e);
+        }
+        if let Err(e) = ws.wal.sync() {
+            self.set_bg_error(format!("wal sync failed: {e}"));
+            return Err(e);
+        }
+        self.wal_syncs.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     pub fn check_bg_error(&self) -> Result<()> {
         if let Some(msg) = self.bg_error.lock().as_ref() {
             return Err(Error::Background(msg.clone()));
@@ -390,10 +408,11 @@ impl DbInner {
         self.check_bg_error()?;
         self.wait_for_space()?;
 
-        // Grouping exists to amortize fsyncs. Without them (SyncMode::Never)
-        // the queue's park/unpark handoffs only cost — a plain mutex handoff
-        // is cheaper — so relaxed-durability writers take the direct path.
-        if self.opts.sync == SyncMode::Never {
+        // Grouping exists to amortize fsyncs. Writers that don't fsync
+        // inline (Never, and Periodic — its fsyncs ride a background timer)
+        // gain nothing from the queue's park/unpark handoffs, so they take
+        // the direct path.
+        if self.opts.sync != SyncMode::Always {
             let mut ws = self.write_mu.lock();
             let r = self.apply_locked(&mut ws, &batch.ops);
             self.commit_groups.fetch_add(1, Ordering::Relaxed);
@@ -1169,6 +1188,14 @@ impl Db {
 
     // --------------------------------------------------------- maintenance
 
+    /// Durability barrier: every write acked before this call is durable
+    /// on return (fsyncs the vlog head, then the WAL). The explicit
+    /// companion to `SyncMode::Periodic`; harmless (one extra fsync) under
+    /// the other modes.
+    pub fn sync_wal(&self) -> Result<()> {
+        self.inner.sync_wal()
+    }
+
     /// Freeze the active memtable and wait until everything is in tables.
     pub fn flush(&self) -> Result<()> {
         self.inner.force_rotate()?;
@@ -1320,16 +1347,40 @@ impl Drop for Db {
 /// and steady-state group size approaches the number of in-flight writers
 /// (no leader election, no handoff gap).
 fn commit_thread(db: Arc<DbInner>) {
+    // In Periodic mode the write path never queues, so this thread is
+    // purely the durability timer: fsync the WAL + vlog head every
+    // `every`, bounding crash loss to roughly that window.
+    let periodic = match db.opts.sync {
+        SyncMode::Periodic { every } => Some(every.max(Duration::from_millis(1))),
+        _ => None,
+    };
+    let mut last_sync = std::time::Instant::now();
     loop {
+        if let Some(every) = periodic {
+            if last_sync.elapsed() >= every {
+                // failure degrades the store; the loop keeps running so
+                // shutdown still drains and joins cleanly
+                let _ = db.sync_wal();
+                last_sync = std::time::Instant::now();
+            }
+        }
         let drained: Vec<Arc<CommitWaiter>> = {
             let mut q = db.commit_queue.lock();
             q.drain(..).collect()
         };
         if drained.is_empty() {
             if db.shutdown.load(Ordering::Acquire) {
+                // Periodic: one final barrier so a clean close loses nothing
+                if periodic.is_some() {
+                    let _ = db.sync_wal();
+                }
                 return;
             }
-            db.commit_signal.wait_timeout(Duration::from_millis(100));
+            let idle = periodic
+                .map(|every| every.saturating_sub(last_sync.elapsed()).max(Duration::from_millis(1)))
+                .unwrap_or(Duration::from_millis(100))
+                .min(Duration::from_millis(100));
+            db.commit_signal.wait_timeout(idle);
             continue;
         }
 

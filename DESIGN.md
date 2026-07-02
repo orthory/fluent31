@@ -372,8 +372,10 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
   batches to leader-election gaps). Each batch keeps its own WAL record,
   contiguous seqno range, and all-or-nothing atomicity;
   `DbStats.commit_{groups,batches}` and `wal_syncs` expose the
-  amortization. `SyncMode::Never` writers take a direct path (no fsyncs
-  to amortize; a mutex handoff is cheaper than a queue round trip), as do
+  amortization. `SyncMode::Never` and `SyncMode::Periodic` writers take a
+  direct path (no inline fsyncs to amortize; Periodic rides a background
+  timer on the commit thread, bounding crash loss to its interval, with
+  `Db::sync_wal` / GraphQL `syncWal` as the explicit barrier), as do
   transaction commits and GC relocations, which validate under their own
   `write_mu` sections and do not group. Hard IO failures in the write
   path degrade the store (`bg_error`) instead of leaving WAL/vlog state

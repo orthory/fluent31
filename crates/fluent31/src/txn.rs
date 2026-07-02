@@ -113,8 +113,8 @@ impl Txn {
             .writes
             .iter()
             .filter(|(k, _)| {
-                lo_v.as_ref().map_or(true, |lo| *k >= lo)
-                    && hi_v.as_ref().map_or(true, |hi| *k < hi)
+                lo_v.as_ref().is_none_or(|lo| *k >= lo)
+                    && hi_v.as_ref().is_none_or(|hi| *k < hi)
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();

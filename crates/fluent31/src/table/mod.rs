@@ -17,7 +17,7 @@ use crate::coding::{crc32, Reader};
 use crate::error::{corrupt, Result};
 use crate::io::DbFile;
 
-pub(crate) const MAGIC: u64 = 0xf1_15_e7_31_ab_1e_0001;
+pub(crate) const MAGIC: u64 = 0xf115_e731_ab1e_0001;
 pub(crate) const FORMAT: u32 = 1;
 pub(crate) const FOOTER_LEN: usize = 48;
 pub(crate) const BLOCK_TRAILER_LEN: usize = 5;

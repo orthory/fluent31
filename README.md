@@ -115,6 +115,7 @@ transactions, `install/query/exec` drive WASM, `gc` runs value-log GC.
 
 ```sh
 cargo run -p fluent-graphql -- ./data            # http://127.0.0.1:8317/graphql, GraphiQL at /
+cargo run -p fluent-graphql -- ./data --sync periodic:50   # memory-speed acks, <=50ms loss window
 cargo run -p fluent-graphql -- --print-schema    # dump the SDL
 ```
 

@@ -319,11 +319,10 @@ impl Iterator for Scan {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.filled {
-            if self.done || !self.refill() {
+        if self.pos >= self.filled
+            && (self.done || !self.refill()) {
                 return None;
             }
-        }
         let klen = self.read_varint()? as usize;
         let vlen = self.read_varint()? as usize;
         if self.pos + klen + vlen > self.filled {

@@ -3,10 +3,16 @@ use std::path::PathBuf;
 /// When appends are pushed to stable storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncMode {
-    /// fdatasync the vlog and WAL on every write batch. Durable to the last op.
+    /// fdatasync the vlog and WAL on every write batch (group-committed:
+    /// concurrent writers share one fsync). Durable to the last acked op.
     Always,
-    /// Leave flushing to the OS page cache. Crash may lose recent tail writes
-    /// (never yields a corrupt store: recovery truncates at the torn tail).
+    /// Acks at memory speed; a background timer fsyncs the WAL and vlog
+    /// head every `every`, bounding crash loss to roughly that window.
+    /// `Db::sync_wal` provides an explicit durability barrier on demand.
+    /// (Never yields a corrupt store: recovery truncates at the torn tail.)
+    Periodic { every: std::time::Duration },
+    /// Leave flushing entirely to the OS page cache. Crash may lose recent
+    /// tail writes (never corrupt: recovery truncates at the torn tail).
     Never,
 }
 

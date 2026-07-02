@@ -140,7 +140,10 @@ pub(crate) fn read_values_batch(
 /// Scan a vlog file from the start, yielding (offset, record_len, key, vlen)
 /// for every valid record; stops cleanly at the first invalid one. Used by GC
 /// (liveness scan) and recovery (valid-prefix of young files).
-pub(crate) fn scan_records(file: &dyn DbFile) -> Result<(Vec<(u64, u32, Vec<u8>, u32)>, u64)> {
+/// One scanned record: (offset, record len, key, value len).
+pub(crate) type ScannedRecord = (u64, u32, Vec<u8>, u32);
+
+pub(crate) fn scan_records(file: &dyn DbFile) -> Result<(Vec<ScannedRecord>, u64)> {
     let len = file.len()?;
     let mut buf = vec![0u8; len as usize];
     if len > 0 {
