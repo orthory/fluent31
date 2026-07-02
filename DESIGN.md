@@ -375,16 +375,19 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
   amortization. `SyncMode::Never` and `SyncMode::Periodic` writers take a
   direct path (no inline fsyncs to amortize; Periodic rides a background
   timer on the commit thread, bounding crash loss to its interval, with
-  `Db::sync_wal` / GraphQL `syncWal` as the explicit barrier), as do
-  transaction commits and GC relocations, which validate under their own
-  `write_mu` sections and do not group. Hard IO failures in the write
+  `Db::sync_wal` / GraphQL `syncWal` as the explicit barrier), as does GC relocation, which validates
+  liveness under its own `write_mu` section. OCC transaction commits DO
+  group under `SyncMode::Always`: the committer performs validation and
+  application in one `write_mu` critical section per chunk, checking each
+  transaction's read/lock set against the store view AND the writes of
+  earlier batches in the same fsync group (in-group revalidation) — so
+  concurrent transactions and `wasmExecute` executors share fsyncs like
+  plain writers. Relaxed modes keep the direct commit path. Hard IO failures in the write
   path degrade the store (`bg_error`) instead of leaving WAL/vlog state
   ambiguous; a committer panic fails the in-flight group (unwind guard)
   and parked writers poll `bg_error`, so client threads can never hang.
-- Known v1 limits (documented, deliberate): OCC transaction commits don't
-  group (each pays its own fsync; grouping them would need in-group
-  conflict revalidation); no block compression (format-versioned for
-  later); discard-stat lag under lazy leveling (no sampling fallback yet);
+- Known v1 limits (documented, deliberate): no block compression
+  (format-versioned for later); discard-stat lag under lazy leveling (no sampling fallback yet);
   GC relocations bump seqnos, so a hot large-value key can cost a user txn
   a retry; fixed `max_levels` (no dynamic depth); bottom merges rewrite the
   whole bottom level (fragments bound file sizes, not total merge work).

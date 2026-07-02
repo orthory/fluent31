@@ -17,9 +17,30 @@ fn main() {
     std::thread::scope(|s| {
         for t in 0..threads {
             let db = db.clone(); let barrier = barrier.clone();
+            let txn_mode = std::env::args().nth(4).as_deref() == Some("txn");
             s.spawn(move || {
                 barrier.wait();
-                for i in 0..per { db.put(format!("b/{t}/{i}"), "value-payload-64-bytes-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").unwrap(); }
+                for i in 0..per {
+                    if txn_mode {
+                        // disjoint-key OCC transactions: group without conflicts
+                        loop {
+                            let mut txn = db.begin();
+                            let cur = txn
+                                .get_for_update(format!("t/{t}").as_bytes())
+                                .unwrap()
+                                .map(|v| u64::from_le_bytes(v[..8].try_into().unwrap()))
+                                .unwrap_or(0);
+                            txn.put(format!("t/{t}"), (cur + 1).to_le_bytes().to_vec()).unwrap();
+                            match txn.commit() {
+                                Ok(()) => break,
+                                Err(fluent31::Error::Conflict) => continue,
+                                Err(e) => panic!("{e}"),
+                            }
+                        }
+                    } else {
+                        db.put(format!("b/{t}/{i}"), "value-payload-64-bytes-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").unwrap();
+                    }
+                }
             });
         }
     });

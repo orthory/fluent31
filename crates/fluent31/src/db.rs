@@ -112,6 +112,10 @@ pub(crate) struct RetiredVlog {
     pub handle: Arc<VlogFileHandle>,
 }
 
+/// A commit-queue entry as the committer consumes it: the batch plus the
+/// optional OCC validation spec (snapshot, conflict keys).
+type QueuedEntry = (Vec<BatchOp>, Option<(SeqNo, Vec<Vec<u8>>)>);
+
 /// One enqueued write awaiting group commit. `ops` is taken by the leader;
 /// `result` is set when the group completes.
 pub(crate) struct CommitWaiter {
@@ -122,6 +126,10 @@ pub(crate) struct CommitWaiter {
 pub(crate) struct WaiterInner {
     ops: Option<Vec<BatchOp>>,
     bytes: usize,
+    /// OCC validation for transactional commits: no key may have a
+    /// committed version newer than the snapshot — neither in the store
+    /// nor written by an earlier batch of the same group.
+    validate: Option<(SeqNo, Vec<Vec<u8>>)>,
     result: Option<Result<()>>,
 }
 
@@ -426,10 +434,22 @@ impl DbInner {
         // and halve 4-thread throughput. The queue handoff costs ~µs
         // against an fsync; every sync write goes through the committer.
         let bytes = batch.byte_size();
+        self.queue_commit(batch.ops, bytes, None)
+    }
+
+    /// Enqueue a batch (optionally OCC-validated) on the commit queue and
+    /// park until the committer delivers its result.
+    pub(crate) fn queue_commit(
+        &self,
+        ops: Vec<BatchOp>,
+        bytes: usize,
+        validate: Option<(SeqNo, Vec<Vec<u8>>)>,
+    ) -> Result<()> {
         let waiter = Arc::new(CommitWaiter {
             inner: Mutex::new(WaiterInner {
-                ops: Some(batch.ops),
+                ops: Some(ops),
                 bytes,
+                validate,
                 result: None,
             }),
             cv: Condvar::new(),
@@ -1422,20 +1442,77 @@ fn commit_thread(db: Arc<DbInner>) {
                 group,
                 armed: true,
             };
-            let batches: Vec<Vec<BatchOp>> = group
+            let entries: Vec<QueuedEntry> = group
                 .iter()
-                .map(|w| w.inner.lock().ops.take().expect("ops present"))
+                .map(|w| {
+                    let mut g = w.inner.lock();
+                    (g.ops.take().expect("ops present"), g.validate.take())
+                })
                 .collect();
-            let refs: Vec<&[BatchOp]> = batches.iter().map(|b| b.as_slice()).collect();
-            let results = {
+
+            // OCC validation + apply share ONE write_mu critical section:
+            // exactly the atomicity Txn::commit had when it held the mutex
+            // itself, extended with an in-group written-keys check so two
+            // conflicting transactions in the same chunk cannot both pass
+            // (the earlier one's writes are not in the view yet).
+            let mut results: Vec<Option<Result<()>>> = Vec::new();
+            results.resize_with(group.len(), || None);
+            {
                 let mut ws = db.write_mu.lock();
-                db.apply_group_locked(&mut ws, &refs)
-            };
+                let view = db.read_view();
+                let mut written: std::collections::HashSet<&[u8]> =
+                    std::collections::HashSet::new();
+                let mut included: Vec<usize> = Vec::with_capacity(entries.len());
+                for (i, (ops, validate)) in entries.iter().enumerate() {
+                    if let Some((snap, keys)) = validate {
+                        let conflict = keys.iter().try_fold(false, |hit, key| {
+                            if hit || written.contains(key.as_slice()) {
+                                return Ok::<bool, Error>(true);
+                            }
+                            Ok(match view.latest(key)? {
+                                Some((seq, _)) => seq > *snap,
+                                None => false,
+                            })
+                        });
+                        match conflict {
+                            Ok(false) => {}
+                            Ok(true) => {
+                                results[i] = Some(Err(Error::Conflict));
+                                continue;
+                            }
+                            Err(e) => {
+                                results[i] = Some(Err(e));
+                                continue;
+                            }
+                        }
+                    }
+                    for op in ops {
+                        written.insert(match op {
+                            BatchOp::Put { key, .. } => key.as_slice(),
+                            BatchOp::Delete { key } => key.as_slice(),
+                        });
+                    }
+                    // a locks-only transaction validates but applies nothing
+                    if !ops.is_empty() {
+                        included.push(i);
+                    } else {
+                        results[i] = Some(Ok(()));
+                    }
+                }
+                let refs: Vec<&[BatchOp]> =
+                    included.iter().map(|&i| entries[i].0.as_slice()).collect();
+                if !refs.is_empty() {
+                    let applied = db.apply_group_locked(&mut ws, &refs);
+                    for (&i, r) in included.iter().zip(applied) {
+                        results[i] = Some(r);
+                    }
+                }
+            }
             db.commit_groups.fetch_add(1, Ordering::Relaxed);
             db.commit_batches.fetch_add(group.len() as u64, Ordering::Relaxed);
             for (w, r) in group.iter().zip(results) {
                 let mut g = w.inner.lock();
-                g.result = Some(r);
+                g.result = Some(r.expect("every group entry resolved"));
                 drop(g);
                 w.cv.notify_one();
             }
@@ -1921,6 +1998,81 @@ mod group_commit_tests {
         // a >1MiB front is not capped out of its own group: the leader
         // always includes the front, the cap only stops ADDING neighbors
         assert_eq!(group_byte_cap(2 << 20), 1 << 20);
+    }
+
+    /// Two conflicting transactions forced into the SAME fsync group: the
+    /// in-group written-set check must fail exactly one (the store view
+    /// alone cannot see the earlier one's uncommitted writes).
+    #[test]
+    fn conflicting_txns_in_one_group_cannot_both_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(
+            crate::Db::open(
+                dir.path(),
+                Options {
+                    sync: SyncMode::Always,
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+        db.put("k", 0u64.to_le_bytes().to_vec()).unwrap();
+
+        let mut t1 = db.begin();
+        let mut t2 = db.begin();
+        for t in [&mut t1, &mut t2] {
+            let v = t.get_for_update(b"k").unwrap().unwrap();
+            let n = u64::from_le_bytes(v[..8].try_into().unwrap());
+            t.put("k", (n + 1).to_le_bytes().to_vec()).unwrap();
+        }
+
+        // hold write_mu so both commits land in one committer chunk
+        let ws = db.inner.write_mu.lock();
+        let h1 = std::thread::spawn(move || t1.commit());
+        let h2 = std::thread::spawn(move || t2.commit());
+        std::thread::sleep(Duration::from_millis(200));
+        drop(ws);
+
+        let (r1, r2) = (h1.join().unwrap(), h2.join().unwrap());
+        let ok = [r1.is_ok(), r2.is_ok()].iter().filter(|b| **b).count();
+        assert_eq!(ok, 1, "exactly one may commit: {r1:?} vs {r2:?}");
+        let v = db.get(b"k").unwrap().unwrap();
+        assert_eq!(u64::from_le_bytes(v[..8].try_into().unwrap()), 1);
+    }
+
+    /// A plain batch write queued ahead of a transaction in the same group
+    /// conflicts it via the in-group written set.
+    #[test]
+    fn plain_write_in_same_group_conflicts_later_txn() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(
+            crate::Db::open(
+                dir.path(),
+                Options {
+                    sync: SyncMode::Always,
+                    ..Options::default()
+                },
+            )
+            .unwrap(),
+        );
+        db.put("k", "orig").unwrap();
+
+        let mut txn = db.begin();
+        let _ = txn.get_for_update(b"k").unwrap();
+        txn.put("k", "from-txn").unwrap();
+
+        let ws = db.inner.write_mu.lock();
+        let db1 = db.clone();
+        let put = std::thread::spawn(move || db1.put("k", "from-put"));
+        std::thread::sleep(Duration::from_millis(100)); // put enqueues first
+        let commit = std::thread::spawn(move || txn.commit());
+        std::thread::sleep(Duration::from_millis(100));
+        drop(ws);
+
+        put.join().unwrap().unwrap();
+        let r = commit.join().unwrap();
+        assert!(matches!(r, Err(Error::Conflict)), "{r:?}");
+        assert_eq!(db.get(b"k").unwrap().as_deref(), Some(b"from-put".as_ref()));
     }
 
     /// A writer whose batch was already drained by the committer must NOT

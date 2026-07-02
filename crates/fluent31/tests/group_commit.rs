@@ -276,3 +276,64 @@ fn vlog_values_survive_grouping() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// OCC transaction grouping (SyncMode::Always routes commits through the
+// committer with in-group conflict revalidation)
+// ---------------------------------------------------------------------------
+
+/// Concurrent OCC counter increments in Always mode: no lost updates, and
+/// commits share fsyncs (grouping visible in stats).
+#[test]
+fn txn_commits_group_and_never_lose_updates() {
+    const THREADS: usize = 8;
+    const PER: usize = 10;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        Db::open(
+            dir.path(),
+            Options {
+                sync: SyncMode::Always,
+                ..Options::default()
+            },
+        )
+        .unwrap(),
+    );
+    db.put("ctr", 0u64.to_le_bytes().to_vec()).unwrap();
+    let barrier = Arc::new(Barrier::new(THREADS));
+    std::thread::scope(|s| {
+        for _ in 0..THREADS {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            s.spawn(move || {
+                barrier.wait();
+                for _ in 0..PER {
+                    loop {
+                        let mut txn = db.begin();
+                        let cur = txn.get_for_update(b"ctr").unwrap().unwrap();
+                        let n = u64::from_le_bytes(cur[..8].try_into().unwrap());
+                        txn.put("ctr", (n + 1).to_le_bytes().to_vec()).unwrap();
+                        match txn.commit() {
+                            Ok(()) => break,
+                            Err(Error::Conflict) => continue,
+                            Err(e) => panic!("unexpected: {e}"),
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let ctr = db.get(b"ctr").unwrap().unwrap();
+    assert_eq!(
+        u64::from_le_bytes(ctr[..8].try_into().unwrap()),
+        (THREADS * PER) as u64,
+        "lost updates through the grouped txn path"
+    );
+    let stats = db.stats();
+    assert!(
+        stats.commit_groups < stats.commit_batches,
+        "txn commits must group: groups={} batches={}",
+        stats.commit_groups,
+        stats.commit_batches
+    );
+}

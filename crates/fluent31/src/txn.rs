@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use crate::batch::BatchOp;
+use crate::config::SyncMode;
 use crate::db::DbInner;
 use crate::error::{Error, Result};
 use crate::iter::DbIterator;
@@ -132,6 +133,13 @@ impl Txn {
 
     /// Validate + apply atomically. Consumes the transaction; on `Conflict`
     /// nothing was written.
+    ///
+    /// Under `SyncMode::Always` the commit rides the group-commit queue:
+    /// the committer performs the validation and the application in one
+    /// `write_mu` critical section (checking the store AND the writes of
+    /// earlier batches in the same fsync group), so concurrent transactions
+    /// share fsyncs exactly like plain batch writers. Relaxed sync modes
+    /// keep the direct path.
     pub fn commit(self) -> Result<()> {
         if self.writes.is_empty() && self.locks.is_empty() {
             return Ok(());
@@ -151,6 +159,18 @@ impl Txn {
                 None => BatchOp::Delete { key: k.clone() },
             })
             .collect();
+
+        if self.db.opts.sync == SyncMode::Always {
+            let keys: Vec<Vec<u8>> = self
+                .writes
+                .keys()
+                .chain(self.locks.iter())
+                .cloned()
+                .collect();
+            return self
+                .db
+                .queue_commit(ops, self.bytes, Some((self.snap, keys)));
+        }
 
         let mut ws = self.db.write_mu.lock();
         // validation inside the write mutex: no writer can slip a version in
