@@ -359,20 +359,26 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
   every command prints its latency.
 - Cargo features: `wasm` (default) gates wasmtime; `--no-default-features`
   builds the pure storage engine (used to cross-check the uring backend).
-- Group commit (LevelDB-style): concurrent batch writers enqueue on a
-  commit queue; the front becomes leader, drains a bounded group (1 MiB
-  cap, or first+128 KiB when the front batch is small), and pays ONE vlog
-  fsync + ONE WAL fsync for the whole group. Each batch keeps its own WAL
-  record, contiguous seqno range, and all-or-nothing atomicity;
+- Group commit (committer-thread pipeline): `SyncMode::Always` batch
+  writers enqueue on a commit queue and park; a dedicated
+  `fluent31-commit` thread drains EVERYTHING queued each cycle, applies it
+  in cap-bounded chunks (1 MiB, or first+128 KiB when the front batch is
+  small) under one `write_mu` section per chunk with ONE vlog fsync + ONE
+  WAL fsync, delivers results, and immediately drains again. While an
+  fsync is in flight every active writer has time to enqueue, so
+  steady-state group size approaches the number of in-flight writers —
+  throughput scales with client concurrency instead of convoying on
+  fsyncs (this out-groups LevelDB's leader/follower design, which loses
+  batches to leader-election gaps). Each batch keeps its own WAL record,
+  contiguous seqno range, and all-or-nothing atomicity;
   `DbStats.commit_{groups,batches}` and `wal_syncs` expose the
-  amortization. The queue engages only under `SyncMode::Always` with
-  actual contention — `SyncMode::Never` writers and uncontended writers
-  take a lean direct path (grouping exists to amortize fsyncs; without
-  them a plain mutex handoff is cheaper). Transaction commits and GC
-  relocations keep their own `write_mu` sections (they validate under the
-  mutex) and do not group. Hard IO failures in the write path now degrade
-  the store (`bg_error`) instead of leaving WAL/vlog state ambiguous, and
-  a leader panic can never strand queued writers (unwind guard).
+  amortization. `SyncMode::Never` writers take a direct path (no fsyncs
+  to amortize; a mutex handoff is cheaper than a queue round trip), as do
+  transaction commits and GC relocations, which validate under their own
+  `write_mu` sections and do not group. Hard IO failures in the write
+  path degrade the store (`bg_error`) instead of leaving WAL/vlog state
+  ambiguous; a committer panic fails the in-flight group (unwind guard)
+  and parked writers poll `bg_error`, so client threads can never hang.
 - Known v1 limits (documented, deliberate): OCC transaction commits don't
   group (each pays its own fsync; grouping them would need in-group
   conflict revalidation); no block compression (format-versioned for

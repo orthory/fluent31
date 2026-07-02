@@ -118,12 +118,12 @@ pub(crate) struct WaiterInner {
     result: Option<Result<()>>,
 }
 
-/// Unwind safety net for a commit leader: once a group is popped from the
-/// queue, only the leader can complete its waiters. If the leader panics
-/// before delivering results, this guard (a) degrades the store — a panic
-/// mid-write leaves WAL/vlog state unknown — and (b) fails every
-/// undelivered waiter and wakes the next leader, so no client thread hangs
-/// forever (parking_lot mutexes do not poison).
+/// Unwind safety net for the committer thread: once waiters are drained
+/// from the queue, only the committer can complete them. If it panics
+/// mid-group, this guard degrades the store — a panic mid-write leaves
+/// WAL/vlog state unknown — and fails every undelivered waiter, so no
+/// client thread hangs (parked clients also poll bg_error, covering the
+/// committer dying entirely).
 struct GroupPanicGuard<'a> {
     db: &'a DbInner,
     group: &'a [Arc<CommitWaiter>],
@@ -136,19 +136,16 @@ impl Drop for GroupPanicGuard<'_> {
             return;
         }
         self.db
-            .set_bg_error("group commit leader panicked; write state unknown");
+            .set_bg_error("commit thread panicked; write state unknown");
         for w in self.group {
             let mut g = w.inner.lock();
             if g.result.is_none() {
                 g.result = Some(Err(Error::Background(
-                    "group commit leader panicked; write state unknown".into(),
+                    "commit thread panicked; write state unknown".into(),
                 )));
             }
             drop(g);
             w.cv.notify_one();
-        }
-        if let Some(f) = self.db.commit_queue.lock().front() {
-            f.cv.notify_one();
         }
     }
 }
@@ -183,6 +180,7 @@ pub(crate) struct DbInner {
     pub compaction_mu: Mutex<()>,
 
     pub shutdown: AtomicBool,
+    pub commit_signal: Signal,
     pub flush_signal: Signal,
     pub compact_signal: Signal,
     /// Signaled on flush/compaction progress (stall + flush waiters).
@@ -396,19 +394,11 @@ impl DbInner {
             return r;
         }
 
-        // fast path: uncontended writers skip the queue machinery entirely
-        // (no waiter alloc, no condvar) — the group path only pays off when
-        // writers actually overlap on fsync latency
-        if let Some(mut ws) = self.write_mu.try_lock() {
-            if self.commit_queue.lock().is_empty() {
-                let r = self.apply_locked(&mut ws, &batch.ops);
-                self.commit_groups.fetch_add(1, Ordering::Relaxed);
-                self.commit_batches.fetch_add(1, Ordering::Relaxed);
-                return r;
-            }
-            // writers are queued: fall through and take our place in line
-        }
-
+        // No uncontended fast path in Always mode, deliberately: a writer
+        // that wins write_mu pays a FULL solo fsync (~ms) while blocking
+        // the committer from forming a group — measured to fragment groups
+        // and halve 4-thread throughput. The queue handoff costs ~µs
+        // against an fsync; every sync write goes through the committer.
         let bytes = batch.byte_size();
         let waiter = Arc::new(CommitWaiter {
             inner: Mutex::new(WaiterInner {
@@ -419,87 +409,26 @@ impl DbInner {
             cv: Condvar::new(),
         });
         self.commit_queue.lock().push_back(waiter.clone());
+        self.commit_signal.notify();
 
+        // park until the committer thread delivers the result. Result is
+        // set and read under the same waiter mutex, so no wakeup can be
+        // lost; the timeout exists only so a dead committer (panic sets
+        // bg_error) or shutdown can't strand this thread.
+        let mut g = waiter.inner.lock();
         loop {
-            // a leader (possibly this thread, last iteration) finished us
-            {
-                let mut g = waiter.inner.lock();
-                if let Some(r) = g.result.take() {
-                    return r;
+            if let Some(r) = g.result.take() {
+                return r;
+            }
+            waiter.cv.wait_for(&mut g, Duration::from_millis(100));
+            if g.result.is_none() {
+                if let Some(msg) = self.bg_error.lock().as_ref() {
+                    return Err(Error::Background(msg.clone()));
+                }
+                if self.shutdown.load(Ordering::Acquire) {
+                    return Err(Error::Closed);
                 }
             }
-            // only the queue front leads; everyone else parks. The timeout
-            // guards the park/notify race — correctness never depends on
-            // the wakeup, it only trims latency.
-            let am_front = {
-                let q = self.commit_queue.lock();
-                q.front().is_some_and(|f| Arc::ptr_eq(f, &waiter))
-            };
-            if !am_front {
-                let mut g = waiter.inner.lock();
-                if g.result.is_none() {
-                    waiter.cv.wait_for(&mut g, Duration::from_millis(20));
-                }
-                continue;
-            }
-
-            // ---- leader ----------------------------------------------
-            let mut ws = self.write_mu.lock();
-            // drain the group under the queue lock. Caps are LevelDB's:
-            // 1 MiB max, and when the front batch is small, front+128KiB so
-            // small writes aren't delayed by huge neighbors.
-            let group: Vec<Arc<CommitWaiter>> = {
-                let mut q = self.commit_queue.lock();
-                let first_bytes = q
-                    .front()
-                    .map(|f| f.inner.lock().bytes)
-                    .unwrap_or(0);
-                let cap = group_byte_cap(first_bytes);
-                let mut group = Vec::new();
-                let mut total = 0usize;
-                while let Some(f) = q.front() {
-                    let b = f.inner.lock().bytes;
-                    if !group.is_empty() && total + b > cap {
-                        break;
-                    }
-                    total += b;
-                    group.push(q.pop_front().expect("front exists"));
-                }
-                group
-            };
-            // from this point the group is out of the queue: if the leader
-            // panics before delivering results, no other thread can ever
-            // complete these waiters — the guard fills them in on unwind
-            // (and degrades the store, since a panic mid-write leaves
-            // WAL/vlog state unknown)
-            let mut guard = GroupPanicGuard {
-                db: self,
-                group: &group,
-                armed: true,
-            };
-            let batches: Vec<Vec<BatchOp>> = group
-                .iter()
-                .map(|w| w.inner.lock().ops.take().expect("ops present"))
-                .collect();
-            let refs: Vec<&[BatchOp]> = batches.iter().map(|b| b.as_slice()).collect();
-            let results = self.apply_group_locked(&mut ws, &refs);
-            self.commit_groups.fetch_add(1, Ordering::Relaxed);
-            self.commit_batches
-                .fetch_add(group.len() as u64, Ordering::Relaxed);
-            drop(ws);
-
-            for (w, r) in group.iter().zip(results) {
-                let mut g = w.inner.lock();
-                g.result = Some(r);
-                drop(g);
-                w.cv.notify_one();
-            }
-            guard.armed = false;
-            // hand leadership to whoever is front now
-            if let Some(f) = self.commit_queue.lock().front() {
-                f.cv.notify_one();
-            }
-            // loop: this thread's own result was just set
         }
     }
 
@@ -1116,6 +1045,15 @@ impl Db {
             let i = inner.clone();
             threads.push(
                 std::thread::Builder::new()
+                    .name("fluent31-commit".into())
+                    .spawn(move || commit_thread(i))
+                    .expect("spawn commit thread"),
+            );
+        }
+        {
+            let i = inner.clone();
+            threads.push(
+                std::thread::Builder::new()
                     .name("fluent31-flush".into())
                     .spawn(move || flush_thread(i))
                     .expect("spawn flush thread"),
@@ -1333,11 +1271,78 @@ impl Db {
 impl Drop for Db {
     fn drop(&mut self) {
         self.inner.shutdown.store(true, Ordering::Release);
+        self.inner.commit_signal.notify();
         self.inner.flush_signal.notify();
         self.inner.compact_signal.notify();
         self.inner.progress_signal.notify();
         for t in self.threads.drain(..) {
             let _ = t.join();
+        }
+    }
+}
+
+/// The committer: the single owner of the grouped write path. Drains
+/// everything queued, applies it chunked by the group byte cap (one WAL
+/// fsync per chunk), delivers results, and immediately drains again — so
+/// while an fsync is in flight, every active writer has time to enqueue,
+/// and steady-state group size approaches the number of in-flight writers
+/// (no leader election, no handoff gap).
+fn commit_thread(db: Arc<DbInner>) {
+    loop {
+        let drained: Vec<Arc<CommitWaiter>> = {
+            let mut q = db.commit_queue.lock();
+            q.drain(..).collect()
+        };
+        if drained.is_empty() {
+            if db.shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            db.commit_signal.wait_timeout(Duration::from_millis(100));
+            continue;
+        }
+
+        let mut start = 0;
+        while start < drained.len() {
+            // chunk by the group byte cap (LevelDB heuristic) so one huge
+            // batch can't hold hostage the latency of small neighbors
+            let first_bytes = drained[start].inner.lock().bytes;
+            let cap = group_byte_cap(first_bytes);
+            let mut end = start + 1;
+            let mut total = first_bytes;
+            while end < drained.len() {
+                let b = drained[end].inner.lock().bytes;
+                if total + b > cap {
+                    break;
+                }
+                total += b;
+                end += 1;
+            }
+            let group = &drained[start..end];
+
+            let mut guard = GroupPanicGuard {
+                db: &db,
+                group,
+                armed: true,
+            };
+            let batches: Vec<Vec<BatchOp>> = group
+                .iter()
+                .map(|w| w.inner.lock().ops.take().expect("ops present"))
+                .collect();
+            let refs: Vec<&[BatchOp]> = batches.iter().map(|b| b.as_slice()).collect();
+            let results = {
+                let mut ws = db.write_mu.lock();
+                db.apply_group_locked(&mut ws, &refs)
+            };
+            db.commit_groups.fetch_add(1, Ordering::Relaxed);
+            db.commit_batches.fetch_add(group.len() as u64, Ordering::Relaxed);
+            for (w, r) in group.iter().zip(results) {
+                let mut g = w.inner.lock();
+                g.result = Some(r);
+                drop(g);
+                w.cv.notify_one();
+            }
+            guard.armed = false;
+            start = end;
         }
     }
 }
@@ -1675,6 +1680,7 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
         gc_mu: Mutex::new(()),
         compaction_mu: Mutex::new(()),
         shutdown: AtomicBool::new(false),
+        commit_signal: Signal::new(),
         flush_signal: Signal::new(),
         compact_signal: Signal::new(),
         progress_signal: Signal::new(),
