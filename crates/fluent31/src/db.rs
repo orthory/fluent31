@@ -189,10 +189,11 @@ pub(crate) struct DbInner {
     pub retired: Mutex<Vec<RetiredVlog>>,
     /// Serializes vlog GC passes (manual + automatic).
     pub gc_mu: Mutex<()>,
-    /// GC sampling cooldowns: vlog file id -> visible seqno at last sample.
-    /// A file whose sample came back below the GC ratio is not resampled
-    /// until enough new writes could have changed the answer.
-    pub gc_sampled_at: Mutex<std::collections::HashMap<u64, SeqNo>>,
+    /// GC sampling cooldowns: vlog file id -> (visible seqno, vlog head id)
+    /// at last sample. A below-ratio file is resampled once enough new
+    /// writes happened — by seqno count, OR by the head having rotated
+    /// (large-value workloads accrue garbage fast while seqnos crawl).
+    pub gc_sampled_at: Mutex<std::collections::HashMap<u64, (SeqNo, u64)>>,
     /// Serializes compaction jobs: the maintenance thread and user-invoked
     /// `compact_all` must never pick/merge concurrently (both would grab the
     /// same input runs).

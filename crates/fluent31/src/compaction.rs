@@ -327,8 +327,13 @@ const GC_SAMPLE_BYTES: u64 = 1 << 20;
 /// that sampling adds nothing.
 const GC_SAMPLE_MIN_FILE: u64 = 4 << 20;
 /// Don't resample a below-ratio file until this many new writes have
-/// happened — its dead ratio can only change with writes.
-const GC_RESAMPLE_SEQ_DELTA: u64 = 100_000;
+/// happened — its dead ratio can only change with writes. A vlog head
+/// rotation also expires the cooldown: for large-value workloads a sealed
+/// ~vlog_file_size of new data is massive garbage potential while the
+/// seqno counter barely moves (the maintenance loop samples files EARLY,
+/// while they are still mostly live — without the rotation escape those
+/// early verdicts would blind GC on low-seqno-volume stores).
+const GC_RESAMPLE_SEQ_DELTA: u64 = 10_000;
 
 /// Discard-stat fallback: estimate one sealed vlog file's dead ratio by
 /// probing a bounded oldest-first sample of its records against the LSM
@@ -361,7 +366,10 @@ fn sample_victim(db: &Arc<DbInner>) -> Result<Option<(u64, Arc<VlogFileHandle>)>
             .filter(|id| {
                 sampled
                     .get(id)
-                    .map(|&at| visible.saturating_sub(at) >= GC_RESAMPLE_SEQ_DELTA)
+                    .map(|&(at_seq, at_head)| {
+                        visible.saturating_sub(at_seq) >= GC_RESAMPLE_SEQ_DELTA
+                            || at_head != head
+                    })
                     .unwrap_or(true)
             })
             .collect();
@@ -380,9 +388,10 @@ fn sample_victim(db: &Arc<DbInner>) -> Result<Option<(u64, Arc<VlogFileHandle>)>
         return Ok(None);
     };
 
+    let head_now = db.state.read().version.vlog_head_id;
     let (records, sampled_len) = vlog::sample_records(handle.file.as_ref(), GC_SAMPLE_BYTES)?;
     if sampled_len == 0 {
-        db.gc_sampled_at.lock().insert(id, visible);
+        db.gc_sampled_at.lock().insert(id, (visible, head_now));
         return Ok(None);
     }
     let view = db.read_view();
@@ -403,7 +412,7 @@ fn sample_victim(db: &Arc<DbInner>) -> Result<Option<(u64, Arc<VlogFileHandle>)>
     if ratio >= db.opts.vlog_gc_ratio {
         Ok(Some((id, handle)))
     } else {
-        db.gc_sampled_at.lock().insert(id, visible);
+        db.gc_sampled_at.lock().insert(id, (visible, head_now));
         Ok(None)
     }
 }

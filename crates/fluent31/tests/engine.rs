@@ -900,13 +900,35 @@ fn vlog_gc_sampling_reclaims_without_discard_stats() {
         retired += 1;
         assert!(retired < 100, "gc runaway");
     }
-    // the background maintenance thread also runs GC passes with the same
-    // sampling fallback and may win the race — assert the OUTCOME (garbage
-    // reclaimed by someone), not which caller reclaimed it
-    assert!(
-        retired > 0 || db.stats().vlog_retired > 0,
-        "sampling fallback must find garbage that discard stats cannot see"
-    );
+    // The background maintenance thread runs the same sampling fallback and
+    // can win every race — it may even have retired AND deleted victims
+    // already (clearing vlog_retired again). The only race-free signal is
+    // ground truth: reclaimed disk space. ~25.6 MB was written but only
+    // ~6.4 MB (one round) is live; poll for the vlog footprint to drop
+    // below written-total, which is impossible without at least one file
+    // reclaimed.
+    let vlog_bytes = || -> u64 {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".vlog"))
+            .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+            .sum()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let _ = db.gc_vlog(); // keep nudging alongside the bg loop
+        if vlog_bytes() < 20 << 20 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sampling fallback never reclaimed: {} vlog bytes still on disk \
+             (retired={retired})",
+            vlog_bytes()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     for i in 0..400u32 {
         assert_eq!(db.get(&k(i)).unwrap().unwrap(), big(i, 3), "key {i}");
     }
