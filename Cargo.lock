@@ -763,6 +763,16 @@ name = "fluent-guest"
 version = "0.1.0"
 
 [[package]]
+name = "fluent-wire"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "fluent31",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fluent31"
 version = "0.1.0"
 dependencies = [

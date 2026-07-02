@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fluent31", "crates/fluent-guest", "crates/fluent-cli", "crates/fluent-graphql"]
+members = ["crates/fluent31", "crates/fluent-guest", "crates/fluent-cli", "crates/fluent-graphql", "crates/fluent-wire"]
 
 [workspace.package]
 edition = "2021"

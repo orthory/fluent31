@@ -203,6 +203,19 @@ mutation { placeOrder(customer: "you", amountCents: "4200") { id customerTotalCe
 query    { topCustomers(limit: 3) { customer orders totalCents avgCents } }
 ```
 
+## The wire protocol
+
+For the data-plane heat lane — raw bytes, request/response correlation by
+id, out-of-order completion on one connection (a slow `EXEC` never blocks
+the `GET`s pipelined behind it):
+
+```sh
+cargo run -p fluent-wire -- ./data --sync periodic:50    # tcp 127.0.0.1:8427
+```
+
+Spec in [`WIRE.md`](WIRE.md); reference client `fluent_wire::WireClient`.
+GraphQL stays the general/typed/admin plane.
+
 ## Testing
 
 ```sh
@@ -227,6 +240,7 @@ crates/fluent31       the engine (lib)
 crates/fluent-guest   guest-side SDK for WASM modules
 crates/fluent-cli     interactive shell
 crates/fluent-graphql GraphQL server (axum + async-graphql)
+crates/fluent-wire    binary wire-protocol server + reference client
 guests/               example WASM guests (separate workspace): agg, transfer,
                       place_order + top_customers (typed GraphQL demo pair)
 ```
