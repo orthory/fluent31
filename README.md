@@ -1,0 +1,138 @@
+# fluent31
+
+An embedded key-value database engine in Rust:
+
+- **LSM storage, tuned for writes *and* lookups** — lazy leveling (tiered
+  merges everywhere, leveled bottom), bloom-guarded fragmented runs,
+  WiscKey-style **key-value separation** so the index stays small and
+  memory-friendly while big values live in an append-only value log.
+- **MVCC everywhere** — consistent snapshots, optimistic transactions with
+  first-committer-wins conflicts and `get_for_update` write-skew defense.
+- **io_uring** on Linux (batched reads for scans/value resolution), portable
+  positioned IO elsewhere. Develops and tests fine on macOS.
+- **No SQL — WASM.** Install WebAssembly modules *into* the database and run
+  them as read-only **queries** or transactional **executors** against a
+  kernel-style syscall ABI (`get`/`put`/`delete`, batched scans, input/output
+  streams, fuel + memory limits).
+- **PITR checkpoints** — `checkpoint("name")` hard-links the immutable files
+  into `archive/name/`, which is itself a complete database directory:
+  restore = open, and opening read-write forks copy-on-write.
+
+See [DESIGN.md](DESIGN.md) for the full architecture.
+
+## Quick start
+
+```rust
+use fluent31::{Db, Options};
+
+let db = Db::open("./data", Options::default())?;
+db.put("user/1", "ada")?;
+assert_eq!(db.get(b"user/1")?.as_deref(), Some(&b"ada"[..]));
+
+// snapshots
+let snap = db.snapshot();
+db.put("user/1", "grace")?;
+assert_eq!(db.get_at(b"user/1", &snap)?.as_deref(), Some(&b"ada"[..]));
+
+// transactions (optimistic, snapshot isolation)
+let mut txn = db.begin();
+let bal = txn.get_for_update(b"acct")?;
+txn.put("acct", "90")?;
+txn.commit()?; // Err(Error::Conflict) if someone else wrote acct
+
+// ordered scans, both directions
+for kv in db.iter(Some(b"user/"), Some(b"user0"), false)? {
+    let (k, v) = kv?;
+}
+
+// point-in-time checkpoint; restore by just opening the archive dir
+let cp = db.checkpoint("before-migration")?;
+let frozen = Db::open(&cp.path, Options::default())?;
+```
+
+## WASM instead of SQL
+
+Write a guest with the SDK, build it for `wasm32-unknown-unknown`, install
+it, run it:
+
+```rust
+// guests/agg/src/lib.rs — "SELECT count,sum,min,max WHERE prefix"
+fn agg_main() -> i32 {
+    let prefix = fluent_guest::input();
+    let (mut count, mut sum) = (0u64, 0u64);
+    for (_k, v) in fluent_guest::scan_prefix(&prefix).unwrap() {
+        count += 1;
+        sum += u64::from_le_bytes(v[..8].try_into().unwrap());
+    }
+    fluent_guest::output(&count.to_le_bytes());
+    fluent_guest::output(&sum.to_le_bytes());
+    0
+}
+fluent_guest::fluent_main!(agg_main);
+```
+
+```rust
+db.install_module("agg", &std::fs::read("agg.wasm")?)?;
+let out = db.query("agg", b"metric/")?;          // read-only, snapshot-bound
+let out = db.execute("transfer", &input)?;        // transactional, auto-retried
+```
+
+Executors run inside a transaction: guest exit `0` commits, anything else
+aborts; commit conflicts re-run the module against a fresh snapshot
+automatically. Guests are sandboxed hard: fuel-metered, memory-capped,
+output/log/scan/write-set-capped, no WASI, reserved keyspace invisible.
+
+Build the bundled examples:
+
+```sh
+cargo build --manifest-path guests/Cargo.toml --target wasm32-unknown-unknown --release
+```
+
+## The shell
+
+```
+$ cargo run -p fluent-cli -- ./data
+fluent31 shell — ./data — opened in (54.78 ms) — `help` for commands
+io backend: std
+fluent31> put hello world
+OK  (3.02 ms)
+fluent31> get hello
+"world"  (28.7 µs)
+fluent31> scan - - --limit 10
+   1) "hello" => "world"  (237.6 µs)
+fluent31> checkpoint snap1
+checkpoint snap1 @ seq 2 -> ./data/archive/snap1  (61.20 ms)
+fluent31> stats
+backend        std
+visible seqno  2
+...
+```
+
+Every command prints its wall-clock latency. `begin/tput/commit` drive
+transactions, `install/query/exec` drive WASM, `gc` runs value-log GC.
+
+## Testing
+
+```sh
+cargo test --workspace           # 72 tests incl. randomized model test + wasm e2e
+```
+
+On Linux the suite exercises the io_uring backend automatically. Under
+Docker, io_uring syscalls are blocked by the default seccomp profile:
+
+```sh
+docker run --security-opt seccomp=unconfined -v $PWD:/src -w /src rust:1 \
+  sh -c "rustup target add wasm32-unknown-unknown && cargo test --workspace"
+```
+
+`cargo check -p fluent31 --no-default-features` builds the engine without
+the WASM layer (no wasmtime).
+
+## Crate layout
+
+```
+crates/fluent31       the engine (lib)
+crates/fluent-guest   guest-side SDK for WASM modules
+crates/fluent-cli     interactive shell
+guests/               example WASM guests (separate workspace): agg, transfer
+```

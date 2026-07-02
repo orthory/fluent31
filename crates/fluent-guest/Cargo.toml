@@ -1,0 +1,7 @@
+[package]
+name = "fluent-guest"
+version.workspace = true
+edition.workspace = true
+description = "Guest-side SDK for writing fluent31 WASM queries and executors"
+
+[dependencies]

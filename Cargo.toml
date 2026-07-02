@@ -1,6 +1,11 @@
-[package]
-name = "fluent31"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = ["crates/fluent31", "crates/fluent-guest", "crates/fluent-cli"]
 
-[dependencies]
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+debug = true

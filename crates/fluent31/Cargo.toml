@@ -1,0 +1,24 @@
+[package]
+name = "fluent31"
+version.workspace = true
+edition.workspace = true
+description = "LSM key-value engine with MVCC, io_uring IO, and in-database WASM execution"
+
+[dependencies]
+crossbeam-skiplist = "0.1"
+parking_lot = "0.12"
+crc32fast = "1"
+wasmtime = { version = "46.0.1", default-features = false, features = ["runtime", "cranelift", "wat"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["wasm"]
+# In-database WASM execution (queries/executors). Disable for a pure
+# storage-engine build (e.g. cross-checking the io_uring backend).
+wasm = ["dep:wasmtime"]

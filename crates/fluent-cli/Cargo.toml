@@ -1,0 +1,13 @@
+[package]
+name = "fluent-cli"
+version.workspace = true
+edition.workspace = true
+description = "Interactive dev shell for fluent31 (redis-cli style, with per-op latency)"
+
+[[bin]]
+name = "fluent-cli"
+path = "src/main.rs"
+
+[dependencies]
+fluent31 = { path = "../fluent31" }
+rustyline = "18.0.1"
