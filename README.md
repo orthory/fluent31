@@ -111,10 +111,50 @@ visible seqno  2
 Every command prints its wall-clock latency. `begin/tput/commit` drive
 transactions, `install/query/exec` drive WASM, `gc` runs value-log GC.
 
+## The GraphQL server
+
+```sh
+cargo run -p fluent-graphql -- ./data            # http://127.0.0.1:8317/graphql, GraphiQL at /
+cargo run -p fluent-graphql -- --print-schema    # dump the SDL
+```
+
+One schema covers both the direct operations and the registered WASM
+programs. Every field of a single GraphQL query operation executes at one
+pinned MVCC snapshot, so multi-field reads are mutually consistent:
+
+```graphql
+query {
+  snapshotSeqno
+  get(key: {text: "user/1"}) { text }
+  scan(prefix: {text: "user/"}, limit: 100) {
+    pairs { key { text } value { base64 } }
+    hasMore
+    nextAfter { base64 }        # pass back as `after` to paginate
+  }
+  wasm(module: "agg", input: {text: "user/"}) { hex }   # read-only WASM query
+}
+
+mutation {
+  put(key: {text: "user/3"}, value: {text: "carol"})
+  writeBatch(ops: [{put: {key: {text: "a"}, value: {text: "1"}}},
+                   {delete: {text: "b"}}])                # atomic
+  wasmExecute(module: "transfer", input: {base64: "..."}) { base64 }  # transactional
+  installModule(name: "agg", wasm: {base64: "..."}) { name size }
+  checkpoint(name: "snap1") { lastSeqno }
+}
+```
+
+Keys and values are raw bytes: inputs take exactly one of `text` / `base64` /
+`hex`, outputs expose all three plus `len`. 64-bit engine quantities (seqnos,
+timestamps, byte totals) use the string-encoded `U64` scalar — they don't fit
+GraphQL's 32-bit `Int` or JS double precision. Engine failures map to
+`extensions.code` (`CONFLICT`, `INVALID_ARGUMENT`, `GUEST_FAILED` with the
+guest's exit code and output, ...).
+
 ## Testing
 
 ```sh
-cargo test --workspace           # 72 tests incl. randomized model test + wasm e2e
+cargo test --workspace           # 94 tests incl. randomized model test + wasm & graphql e2e
 ```
 
 On Linux the suite exercises the io_uring backend automatically. Under
@@ -134,5 +174,6 @@ the WASM layer (no wasmtime).
 crates/fluent31       the engine (lib)
 crates/fluent-guest   guest-side SDK for WASM modules
 crates/fluent-cli     interactive shell
+crates/fluent-graphql GraphQL server (axum + async-graphql)
 guests/               example WASM guests (separate workspace): agg, transfer
 ```

@@ -627,6 +627,13 @@ pub struct Snapshot {
     pub(crate) seq: SeqNo,
 }
 
+impl Snapshot {
+    /// The sequence number this snapshot reads at.
+    pub fn seqno(&self) -> SeqNo {
+        self.seq
+    }
+}
+
 impl Drop for Snapshot {
     fn drop(&mut self) {
         self.db.deregister_snapshot(self.seq);
