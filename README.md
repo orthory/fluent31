@@ -205,7 +205,7 @@ query    { topCustomers(limit: 3) { customer orders totalCents avgCents } }
 ## Testing
 
 ```sh
-cargo test --workspace           # 110+ tests incl. randomized model test + wasm & graphql e2e
+cargo test --workspace           # 130 tests incl. randomized model, group commit, wasm & graphql e2e
 ```
 
 On Linux the suite exercises the io_uring backend automatically. Under
