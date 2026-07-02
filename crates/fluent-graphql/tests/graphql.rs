@@ -1018,15 +1018,19 @@ async fn typed_executor_gets_json_args_and_commits() {
 async fn described_module_names_and_types_are_enforced() {
     let (schema, _dir) = open_schema();
 
-    // shadowing a built-in root field
+    // shadowing a built-in root field (either root: one shared namespace)
     let wat = wat_typed(r#"{"kind":"query","output":"Json"}"#, "1");
-    let errs = run_err(
-        &schema,
-        r#"mutation I($w: BytesInput!) { installModule(name: "scan", wasm: $w) { name } }"#,
-        json!({"w": {"text": wat.clone()}}),
-    )
-    .await;
-    assert!(errs[0].message.contains("shadows"), "{errs:?}");
+    for shadowed in ["scan", "reloadSchema"] {
+        let errs = run_err(
+            &schema,
+            &format!(
+                r#"mutation I($w: BytesInput!) {{ installModule(name: "{shadowed}", wasm: $w) {{ name }} }}"#
+            ),
+            json!({"w": {"text": wat.clone()}}),
+        )
+        .await;
+        assert!(errs[0].message.contains("shadows"), "{shadowed}: {errs:?}");
+    }
 
     // non-GraphQL module name: rejected when described...
     let errs = run_err(

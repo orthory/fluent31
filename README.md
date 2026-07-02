@@ -165,6 +165,7 @@ install time. Modules without `describe` stay reachable through the generic
 everything — the resync path after installing modules through the CLI (or
 after a failed post-install rebuild).
 
+The full authoring manual and ABI spec live in [`WASM.md`](WASM.md).
 In a Rust guest this is one macro next to `fluent_main!`:
 
 ```rust

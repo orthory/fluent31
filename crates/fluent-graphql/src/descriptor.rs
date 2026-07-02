@@ -62,6 +62,7 @@ pub const RESERVED_FIELDS: &[&str] = &[
     "flush",
     "compactAll",
     "gcVlog",
+    "reloadSchema",
 ];
 
 /// Type names owned by the built-in schema (plus GraphQL's own scalars).
