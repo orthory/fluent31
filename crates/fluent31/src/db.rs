@@ -843,6 +843,22 @@ impl Db {
         crate::wasm::execute(&self.inner, name, input)
     }
 
+    /// Run an installed module's optional `describe` export (read-only,
+    /// empty input) and return its output. `Ok(None)` when the module does
+    /// not export `describe`.
+    #[cfg(feature = "wasm")]
+    pub fn describe_module(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        crate::wasm::describe_module(&self.inner, name)
+    }
+
+    /// Like [`Db::describe_module`], but for candidate module bytes that
+    /// are not (yet) installed — used to validate a declared schema before
+    /// accepting an install.
+    #[cfg(feature = "wasm")]
+    pub fn describe_wasm(&self, wasm: &[u8]) -> Result<Option<Vec<u8>>> {
+        crate::wasm::describe_wasm(&self.inner, wasm)
+    }
+
     // -------------------------------------------------------- checkpoints
 
     pub fn checkpoint(&self, name: &str) -> Result<CheckpointInfo> {

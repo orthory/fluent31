@@ -6,16 +6,16 @@ use std::sync::Arc;
 
 use async_graphql::{Request, Variables};
 use fluent31::{Db, Options, SyncMode};
-use fluent_graphql::{build_schema, prepare, FluentSchema};
+use fluent_graphql::SchemaManager;
 use serde_json::{json, Value};
 
-fn open_schema_with(opts: Options) -> (FluentSchema, tempfile::TempDir) {
+fn open_schema_with(opts: Options) -> (Arc<SchemaManager>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts).unwrap();
-    (build_schema(Arc::new(db)), dir)
+    (SchemaManager::new(Arc::new(db)).unwrap(), dir)
 }
 
-fn open_schema() -> (FluentSchema, tempfile::TempDir) {
+fn open_schema() -> (Arc<SchemaManager>, tempfile::TempDir) {
     open_schema_with(Options {
         sync: SyncMode::Never, // macOS F_FULLFSYNC is ~15ms/op
         ..Options::default()
@@ -27,9 +27,9 @@ fn u64_field(v: &Value) -> u64 {
     v.as_str().unwrap().parse().unwrap()
 }
 
-async fn run(schema: &FluentSchema, query: &str, vars: Value) -> Value {
+async fn run(schema: &SchemaManager, query: &str, vars: Value) -> Value {
     let req = Request::new(query).variables(Variables::from_json(vars));
-    let resp = schema.execute(prepare(req)).await;
+    let resp = schema.execute(req).await;
     assert!(
         resp.errors.is_empty(),
         "unexpected errors for {query}: {:?}",
@@ -38,9 +38,9 @@ async fn run(schema: &FluentSchema, query: &str, vars: Value) -> Value {
     resp.data.into_json().unwrap()
 }
 
-async fn run_err(schema: &FluentSchema, query: &str, vars: Value) -> Vec<async_graphql::ServerError> {
+async fn run_err(schema: &SchemaManager, query: &str, vars: Value) -> Vec<async_graphql::ServerError> {
     let req = Request::new(query).variables(Variables::from_json(vars));
-    let resp = schema.execute(prepare(req)).await;
+    let resp = schema.execute(req).await;
     assert!(!resp.errors.is_empty(), "expected errors for {query}");
     resp.errors
 }
@@ -201,7 +201,7 @@ async fn invalid_key_rejects_whole_batch() {
 // scans
 // ---------------------------------------------------------------------------
 
-async fn seed_scan_data(schema: &FluentSchema) {
+async fn seed_scan_data(schema: &SchemaManager) {
     for i in 0..5 {
         run(
             schema,
@@ -615,7 +615,7 @@ async fn failed_mutation_field_keeps_siblings_visible() {
             c: put(key: {text: "y"}, value: {text: "v"})
         }"#,
     );
-    let resp = schema.execute(prepare(req)).await;
+    let resp = schema.execute(req).await;
     assert_eq!(resp.errors.len(), 1, "only field b fails: {:?}", resp.errors);
     let data = resp.data.into_json().unwrap();
     // nullable fields: the failed one is null, committed siblings visible
@@ -879,9 +879,9 @@ async fn concurrent_wasm_executors_do_not_lose_updates() {
     for _ in 0..N {
         let s = schema.clone();
         handles.push(tokio::spawn(async move {
-            s.execute(prepare(async_graphql::Request::new(
+            s.execute(async_graphql::Request::new(
                 r#"mutation { wasmExecute(module: "counter") { len } }"#,
-            )))
+            ))
             .await
         }));
     }
@@ -900,4 +900,406 @@ mod hex {
     pub fn encode(b: impl AsRef<[u8]>) -> String {
         b.as_ref().iter().map(|x| format!("{x:02x}")).collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// typed module schema (fluentabi v1 describe)
+// ---------------------------------------------------------------------------
+
+/// Emit `$json` from a `describe` export; `run` outputs `$out` (both static).
+fn wat_typed(describe_json: &str, run_out: &str) -> String {
+    let d_len = describe_json.len();
+    let r_off = d_len.next_multiple_of(4096);
+    let r_len = run_out.len();
+    let d_esc = describe_json.replace('\\', "\\\\").replace('"', "\\\"");
+    let r_esc = run_out.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"
+(module
+  (import "fluent" "output_write" (func $ow (param i32 i32) (result i32)))
+  (memory (export "memory") 4)
+  (data (i32.const 0) "{d_esc}")
+  (data (i32.const {r_off}) "{r_esc}")
+  (func (export "describe") (result i32)
+    (drop (call $ow (i32.const 0) (i32.const {d_len})))
+    (i32.const 0))
+  (func (export "run") (result i32)
+    (drop (call $ow (i32.const {r_off}) (i32.const {r_len})))
+    (i32.const 0)))
+"#
+    )
+}
+
+/// Typed executor: `describe` declares args; `run` puts the raw input JSON
+/// at key "targs" and echoes it (output type Json).
+const TYPED_EXEC_WAT: &str = r#"
+(module
+  (import "fluent" "input_len" (func $il (result i32)))
+  (import "fluent" "input_read" (func $ir (param i32 i32 i32) (result i32)))
+  (import "fluent" "output_write" (func $ow (param i32 i32) (result i32)))
+  (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 4)
+  (data (i32.const 0) "{\"kind\":\"execute\",\"args\":[{\"name\":\"key\",\"type\":\"String!\"},{\"name\":\"n\",\"type\":\"Int\"}],\"output\":\"Json\"}")
+  (data (i32.const 1024) "targs")
+  (func (export "describe") (result i32)
+    (drop (call $ow (i32.const 0) (i32.const 101)))
+    (i32.const 0))
+  (func (export "run") (result i32)
+    (local $len i32)
+    (local.set $len (call $il))
+    (drop (call $ir (i32.const 8192) (local.get $len) (i32.const 0)))
+    (drop (call $put (i32.const 1024) (i32.const 5) (i32.const 8192) (local.get $len)))
+    (drop (call $ow (i32.const 8192) (local.get $len)))
+    (i32.const 0)))
+"#;
+
+#[tokio::test]
+async fn typed_query_module_becomes_root_field() {
+    let (schema, _dir) = open_schema();
+    let wat = wat_typed(
+        r#"{"kind":"query","description":"the answer","types":[{"name":"Ans","fields":[{"name":"n","type":"Int!"},{"name":"tag","type":"String"}]}],"output":"Ans!"}"#,
+        r#"{"n":7,"tag":"x","junk":true}"#,
+    );
+    let d = run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "answer", wasm: $w) { name typed schemaError } }"#,
+        json!({"w": {"text": wat}}),
+    )
+    .await;
+    assert_eq!(d["installModule"]["typed"], json!(true));
+    assert_eq!(d["installModule"]["schemaError"], Value::Null);
+
+    // the typed root field exists, validates, and drops undeclared keys
+    let d = run(&schema, r#"{ answer { n tag } }"#, json!({})).await;
+    assert_eq!(d["answer"], json!({"n": 7, "tag": "x"}));
+    let errs = run_err(&schema, r#"{ answer { junk } }"#, json!({})).await;
+    assert!(errs[0].message.contains("junk"), "{errs:?}");
+
+    // SDL carries the module surface
+    let sdl = schema.schema().sdl();
+    assert!(sdl.contains("type Ans"), "{sdl}");
+    assert!(sdl.contains("answer(input: BytesInput): Ans"), "{sdl}");
+
+    // uninstall removes the root field (schema hot-swap)
+    run(&schema, r#"mutation { uninstallModule(name: "answer") }"#, json!({})).await;
+    let errs = run_err(&schema, r#"{ answer { n } }"#, json!({})).await;
+    assert!(errs[0].message.contains("answer"), "{errs:?}");
+}
+
+#[tokio::test]
+async fn typed_executor_gets_json_args_and_commits() {
+    let (schema, _dir) = open_schema();
+    run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "putArgs", wasm: $w) { typed } }"#,
+        json!({"w": {"text": TYPED_EXEC_WAT}}),
+    )
+    .await;
+
+    let d = run(
+        &schema,
+        r#"mutation { putArgs(key: "hello", n: 3) }"#,
+        json!({}),
+    )
+    .await;
+    assert_eq!(d["putArgs"], json!({"key": "hello", "n": 3}));
+
+    // omitted optional arg arrives as null; the write committed
+    let d = run(&schema, r#"mutation { putArgs(key: "again") }"#, json!({})).await;
+    assert_eq!(d["putArgs"], json!({"key": "again", "n": Value::Null}));
+    let d = run(&schema, r#"{ get(key: {text: "targs"}) { text } }"#, json!({})).await;
+    assert_eq!(d["get"]["text"], json!(r#"{"key":"again","n":null}"#));
+
+    // declared non-null arg is enforced by the schema
+    run_err(&schema, r#"mutation { putArgs(n: 1) }"#, json!({})).await;
+}
+
+#[tokio::test]
+async fn described_module_names_and_types_are_enforced() {
+    let (schema, _dir) = open_schema();
+
+    // shadowing a built-in root field (either root: one shared namespace)
+    let wat = wat_typed(r#"{"kind":"query","output":"Json"}"#, "1");
+    for shadowed in ["scan", "reloadSchema"] {
+        let errs = run_err(
+            &schema,
+            &format!(
+                r#"mutation I($w: BytesInput!) {{ installModule(name: "{shadowed}", wasm: $w) {{ name }} }}"#
+            ),
+            json!({"w": {"text": wat.clone()}}),
+        )
+        .await;
+        assert!(errs[0].message.contains("shadows"), "{shadowed}: {errs:?}");
+    }
+
+    // non-GraphQL module name: rejected when described...
+    let errs = run_err(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "my-mod", wasm: $w) { name } }"#,
+        json!({"w": {"text": wat}}),
+    )
+    .await;
+    assert!(errs[0].message.contains("GraphQL"), "{errs:?}");
+
+    // ...but a describe-less module keeps the engine's looser naming
+    let d = run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "my-mod", wasm: $w) { name typed } }"#,
+        json!({"w": {"text": ECHO_WAT}}),
+    )
+    .await;
+    assert_eq!(d["installModule"]["typed"], json!(false));
+
+    // reserved type name
+    let wat = wat_typed(
+        r#"{"kind":"query","types":[{"name":"Stats","fields":[{"name":"a","type":"Int"}]}],"output":"Stats"}"#,
+        "{}",
+    );
+    let errs = run_err(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "m1", wasm: $w) { name } }"#,
+        json!({"w": {"text": wat}}),
+    )
+    .await;
+    assert!(errs[0].message.contains("reserved"), "{errs:?}");
+
+    // duplicate type across modules
+    let wat_a = wat_typed(
+        r#"{"kind":"query","types":[{"name":"T1","fields":[{"name":"a","type":"Int"}]}],"output":"T1"}"#,
+        r#"{"a":1}"#,
+    );
+    let wat_b = wat_typed(
+        r#"{"kind":"query","types":[{"name":"T1","fields":[{"name":"b","type":"Int"}]}],"output":"T1"}"#,
+        r#"{"b":2}"#,
+    );
+    run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "mA", wasm: $w) { typed } }"#,
+        json!({"w": {"text": wat_a}}),
+    )
+    .await;
+    let errs = run_err(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "mB", wasm: $w) { name } }"#,
+        json!({"w": {"text": wat_b}}),
+    )
+    .await;
+    assert!(errs[0].message.contains("already declared"), "{errs:?}");
+}
+
+#[tokio::test]
+async fn invalid_descriptor_rejects_install() {
+    let (schema, _dir) = open_schema();
+    let wat = wat_typed(r#"{"kind":"nope"}"#, "1");
+    let errs = run_err(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "bad", wasm: $w) { name } }"#,
+        json!({"w": {"text": wat}}),
+    )
+    .await;
+    assert!(errs[0].message.contains("invalid module schema"), "{errs:?}");
+    // nothing installed
+    let d = run(&schema, r#"{ modules { name } }"#, json!({})).await;
+    assert_eq!(d["modules"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn typed_output_violation_is_an_error_not_garbage() {
+    let (schema, _dir) = open_schema();
+    // declares Int! but emits a string
+    let wat = wat_typed(
+        r#"{"kind":"query","types":[{"name":"Bad","fields":[{"name":"n","type":"Int!"}]}],"output":"Bad!"}"#,
+        r#"{"n":"seven"}"#,
+    );
+    run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "liar", wasm: $w) { typed } }"#,
+        json!({"w": {"text": wat}}),
+    )
+    .await;
+    let errs = run_err(&schema, r#"{ liar { n } }"#, json!({})).await;
+    assert!(errs[0].message.contains("expected 32-bit integer"), "{errs:?}");
+    // the failure is per-field: siblings still resolve
+    let req = async_graphql::Request::new(r#"{ liar { n } snapshotSeqno }"#);
+    let resp = schema.execute(req).await;
+    assert_eq!(resp.errors.len(), 1);
+    let data = resp.data.into_json().unwrap();
+    assert_eq!(data["liar"], Value::Null);
+    assert!(data["snapshotSeqno"].is_string());
+}
+
+#[tokio::test]
+async fn modules_query_reports_typed_status() {
+    let (schema, _dir) = open_schema();
+    run(
+        &schema,
+        r#"mutation I($e: BytesInput!) { installModule(name: "echo", wasm: $e) { name } }"#,
+        json!({"e": {"text": ECHO_WAT}}),
+    )
+    .await;
+    let wat = wat_typed(r#"{"kind":"query","output":"Json"}"#, r#"{"ok":true}"#);
+    run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "typedOne", wasm: $w) { name } }"#,
+        json!({"w": {"text": wat}}),
+    )
+    .await;
+    let d = run(
+        &schema,
+        r#"{ modules { name typed schemaError } }"#,
+        json!({}),
+    )
+    .await;
+    let mods = d["modules"].as_array().unwrap();
+    let by_name = |n: &str| mods.iter().find(|m| m["name"] == json!(n)).unwrap().clone();
+    assert_eq!(by_name("echo")["typed"], json!(false));
+    assert_eq!(by_name("typedOne")["typed"], json!(true));
+    // generic wasm() still reaches the typed module too
+    let d = run(&schema, r#"{ typedOne }"#, json!({})).await;
+    assert_eq!(d["typedOne"], json!({"ok": true}));
+}
+
+// ---------------------------------------------------------------------------
+// review round 2: replacement, startup, oversized descriptors, coercion
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn replacing_modules_reshapes_the_schema() {
+    let (schema, _dir) = open_schema();
+    let typed = wat_typed(
+        r#"{"kind":"query","types":[{"name":"Ans","fields":[{"name":"n","type":"Int!"}]}],"output":"Ans!"}"#,
+        r#"{"n":7}"#,
+    );
+    run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "answer", wasm: $w) { typed } }"#,
+        json!({"w": {"text": typed}}),
+    )
+    .await;
+    assert_eq!(run(&schema, r#"{ answer { n } }"#, json!({})).await["answer"]["n"], json!(7));
+
+    // typed -> typed replacement re-declaring its OWN type names is allowed
+    let typed_v2 = wat_typed(
+        r#"{"kind":"query","types":[{"name":"Ans","fields":[{"name":"n","type":"Int!"},{"name":"v","type":"Int!"}]}],"output":"Ans!"}"#,
+        r#"{"n":8,"v":2}"#,
+    );
+    let d = run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "answer", wasm: $w) { typed schemaError } }"#,
+        json!({"w": {"text": typed_v2}}),
+    )
+    .await;
+    assert_eq!(d["installModule"]["typed"], json!(true));
+    let d = run(&schema, r#"{ answer { n v } }"#, json!({})).await;
+    assert_eq!(d["answer"], json!({"n": 8, "v": 2}));
+
+    // typed -> untyped replacement: root field and type vanish, generic
+    // wasm() runs the new bytes
+    let d = run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "answer", wasm: $w) { typed } }"#,
+        json!({"w": {"text": ECHO_WAT}}),
+    )
+    .await;
+    assert_eq!(d["installModule"]["typed"], json!(false));
+    run_err(&schema, r#"{ answer { n } }"#, json!({})).await;
+    let sdl = schema.schema().sdl();
+    assert!(!sdl.contains("type Ans"), "replaced type must leave the SDL");
+    let d = run(
+        &schema,
+        r#"{ wasm(module: "answer", input: {text: "hi"}) { text } }"#,
+        json!({}),
+    )
+    .await;
+    assert_eq!(d["wasm"]["text"], json!("hi"));
+}
+
+#[tokio::test]
+async fn oversized_descriptor_rejected_and_degrades_out_of_band() {
+    let (schema, _dir) = open_schema();
+    // a descriptor > 64 KiB (huge description field)
+    let big = "x".repeat(70_000);
+    let desc = format!(r#"{{"kind":"query","description":"{big}","output":"Json"}}"#);
+    let wat = wat_typed(&desc, "1");
+    let errs = run_err(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "fat", wasm: $w) { name } }"#,
+        json!({"w": {"text": wat.clone()}}),
+    )
+    .await;
+    assert!(errs[0].message.contains("exceeds"), "{errs:?}");
+    let d = run(&schema, r#"{ modules { name } }"#, json!({})).await;
+    assert_eq!(d["modules"].as_array().unwrap().len(), 0, "nothing installed");
+
+    // installed out-of-band (engine API, bypassing the GraphQL gate): the
+    // next reloadSchema must degrade it to Invalid, not break the schema
+    schema.db_handle().install_module("fat", wat.as_bytes()).unwrap();
+    run(&schema, r#"mutation { reloadSchema }"#, json!({})).await;
+    let d = run(&schema, r#"{ modules { name typed schemaError } }"#, json!({})).await;
+    assert_eq!(d["modules"][0]["typed"], json!(false));
+    assert!(
+        d["modules"][0]["schemaError"].as_str().unwrap().contains("exceeds"),
+        "{d}"
+    );
+}
+
+#[tokio::test]
+async fn typed_int_args_enforce_32bit_range_and_singleton_lists_coerce() {
+    let (schema, _dir) = open_schema();
+    // module with an Int arg and a [U64!] arg, echoing its input JSON
+    let wat = r#"
+(module
+  (import "fluent" "input_len" (func $il (result i32)))
+  (import "fluent" "input_read" (func $ir (param i32 i32 i32) (result i32)))
+  (import "fluent" "output_write" (func $ow (param i32 i32) (result i32)))
+  (memory (export "memory") 4)
+  (data (i32.const 0) "{\"kind\":\"query\",\"args\":[{\"name\":\"n\",\"type\":\"Int\"},{\"name\":\"xs\",\"type\":\"[U64!]\"}],\"output\":\"Json\"}")
+  (func (export "describe") (result i32)
+    (drop (call $ow (i32.const 0) (i32.const 97)))
+    (i32.const 0))
+  (func (export "run") (result i32)
+    (local $len i32)
+    (local.set $len (call $il))
+    (drop (call $ir (i32.const 8192) (local.get $len) (i32.const 0)))
+    (drop (call $ow (i32.const 8192) (local.get $len)))
+    (i32.const 0)))
+"#;
+    run(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "echoArgs", wasm: $w) { typed schemaError } }"#,
+        json!({"w": {"text": wat}}),
+    )
+    .await;
+
+    // Int outside 32-bit range must be rejected (dynamic validator misses it)
+    let errs = run_err(
+        &schema,
+        r#"query Q($n: Int) { echoArgs(n: $n) }"#,
+        json!({"n": 3_000_000_000i64}),
+    )
+    .await;
+    assert!(errs[0].message.contains("32-bit"), "{errs:?}");
+
+    // spec input coercion: a single value serves as a 1-element list
+    let d = run(&schema, r#"{ echoArgs(xs: "5") }"#, json!({})).await;
+    assert_eq!(d["echoArgs"], json!({"n": Value::Null, "xs": [5]}));
+
+    // writeBatch singleton op
+    let d = run(
+        &schema,
+        r#"mutation { writeBatch(ops: {put: {key: {text: "solo"}, value: {text: "v"}}}) }"#,
+        json!({}),
+    )
+    .await;
+    assert_eq!(d["writeBatch"], json!(1));
+    let d = run(&schema, r#"{ get(key: {text: "solo"}) { text } }"#, json!({})).await;
+    assert_eq!(d["get"]["text"], json!("v"));
+}
+
+#[tokio::test]
+async fn modules_and_checkpoints_are_nonnull_item_lists() {
+    let (schema, _dir) = open_schema();
+    let sdl = schema.schema().sdl();
+    assert!(sdl.contains("modules: [Module!]"), "{sdl}");
+    assert!(sdl.contains("checkpoints: [Checkpoint!]"), "{sdl}");
 }

@@ -151,10 +151,61 @@ GraphQL's 32-bit `Int` or JS double precision. Engine failures map to
 `extensions.code` (`CONFLICT`, `INVALID_ARGUMENT`, `GUEST_FAILED` with the
 guest's exit code and output, ...).
 
+### Typed WASM root fields
+
+A module that exports `describe` (emitting a JSON schema descriptor — see
+`crates/fluent-graphql/src/descriptor.rs`) becomes its **own typed root
+field**: `kind: "query"` modules land on `Query`, `kind: "execute"` on
+`Mutation`. The GraphQL schema is rebuilt and hot-swapped on every
+`installModule`/`uninstallModule`, and at server startup for already-installed
+modules. Described modules must use a valid GraphQL field name and may not
+shadow built-in fields or redeclare reserved/claimed type names — enforced at
+install time. Modules without `describe` stay reachable through the generic
+`wasm`/`wasmExecute` fields. `mutation { reloadSchema }` re-describes
+everything — the resync path after installing modules through the CLI (or
+after a failed post-install rebuild).
+
+The full authoring manual and ABI spec live in [`WASM.md`](WASM.md).
+In a Rust guest this is one macro next to `fluent_main!`:
+
+```rust
+fluent_guest::fluent_describe!(r#"{
+  "kind": "execute",
+  "args": [{"name": "customer", "type": "String!"},
+           {"name": "amountCents", "type": "U64!"}],
+  "types": [{"name": "PlacedOrder", "fields": [
+    {"name": "id", "type": "U64!"},
+    {"name": "customerTotalCents", "type": "U64!"}]}],
+  "output": "PlacedOrder!"
+}"#);
+```
+
+Typed args arrive at the guest as one JSON object; the guest's output is
+parsed as JSON and validated against the declared type before it reaches the
+client.
+
+### Demo: the order pair
+
+`guests/place_order` (writer: id allocation + order record + customer stats,
+one transaction, OCC-retried) and `guests/top_customers` (reader: rank
+customers by lifetime spend at the operation's snapshot) show the full
+typed-module workflow. With a server running:
+
+```sh
+scripts/demo-orders.sh          # builds, installs both modules, seeds orders, ranks
+```
+
+Then in GraphiQL:
+
+```graphql
+mutation { placeOrder(customer: "you", amountCents: "4200") { id customerTotalCents } }
+query    { topCustomers(limit: 3) { customer orders totalCents avgCents } }
+```
+
 ## Testing
 
 ```sh
-cargo test --workspace           # 94 tests incl. randomized model test + wasm & graphql e2e
+cargo test --workspace           # 110+ tests incl. randomized model test + wasm & graphql e2e
 ```
 
 On Linux the suite exercises the io_uring backend automatically. Under
@@ -175,5 +226,6 @@ crates/fluent31       the engine (lib)
 crates/fluent-guest   guest-side SDK for WASM modules
 crates/fluent-cli     interactive shell
 crates/fluent-graphql GraphQL server (axum + async-graphql)
-guests/               example WASM guests (separate workspace): agg, transfer
+guests/               example WASM guests (separate workspace): agg, transfer,
+                      place_order + top_customers (typed GraphQL demo pair)
 ```

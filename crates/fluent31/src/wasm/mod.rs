@@ -37,6 +37,9 @@ use abi::{Access, HostCtx};
 pub struct ModuleInfo {
     pub name: String,
     pub size: usize,
+    /// Content fingerprint of the stored bytes (cache key, not a security
+    /// boundary): lets callers skip re-processing unchanged modules.
+    pub content_hash: u128,
 }
 
 fn content_hash(bytes: &[u8]) -> u128 {
@@ -123,12 +126,11 @@ fn validate_module_name(name: &str) -> Result<()> {
 
 pub(crate) fn install_module(db: &Arc<DbInner>, name: &str, wasm: &[u8]) -> Result<()> {
     validate_module_name(name)?;
-    // compile first: refuse to store bytes that can never run
-    let module = db
-        .wasm
-        .cache
-        .lock()
-        .get_or_compile(&db.wasm.engine, wasm)?;
+    // compile first: refuse to store bytes that can never run. Uncached:
+    // rejected candidates must not evict installed modules' artifacts (the
+    // shared cache fills at first invocation instead).
+    let module = Module::new(&db.wasm.engine, wasm)
+        .map_err(|e| Error::Wasm(format!("compile: {e}")))?;
     let has_run = module
         .get_export("run")
         .is_some_and(|e| e.func().is_some());
@@ -167,6 +169,7 @@ pub(crate) fn list_modules(db: &Arc<DbInner>) -> Result<Vec<ModuleInfo>> {
         out.push(ModuleInfo {
             name,
             size: v.len(),
+            content_hash: content_hash(&v),
         });
     }
     Ok(out)
@@ -194,7 +197,12 @@ impl Drop for SnapGuard {
     }
 }
 
-fn run_instance(db: &Arc<DbInner>, module: &Module, ctx: HostCtx) -> Result<(i32, HostCtx)> {
+fn run_instance(
+    db: &Arc<DbInner>,
+    module: &Module,
+    ctx: HostCtx,
+    entry: &str,
+) -> Result<(i32, HostCtx)> {
     let rt = &db.wasm;
     let mut store = Store::new(&rt.engine, ctx);
     store
@@ -206,8 +214,8 @@ fn run_instance(db: &Arc<DbInner>, module: &Module, ctx: HostCtx) -> Result<(i32
         .instantiate(&mut store, module)
         .map_err(|e| Error::Wasm(format!("instantiate: {e}")))?;
     let run = instance
-        .get_typed_func::<(), i32>(&mut store, "run")
-        .map_err(|e| Error::Wasm(format!("missing run(): {e}")))?;
+        .get_typed_func::<(), i32>(&mut store, entry)
+        .map_err(|e| Error::Wasm(format!("missing {entry}(): {e}")))?;
     match run.call(&mut store, ()) {
         Ok(code) => {
             let mut ctx = store.into_data();
@@ -258,7 +266,7 @@ pub(crate) fn query(
     };
     let module = load_module_at(db, name, guard.seq)?;
     let ctx = HostCtx::new(db.clone(), Access::ReadOnly(guard.seq), input.to_vec());
-    let (code, ctx) = run_instance(db, &module, ctx)?;
+    let (code, ctx) = run_instance(db, &module, ctx, "run")?;
     if code != 0 {
         return Err(Error::GuestFailed {
             code,
@@ -278,7 +286,7 @@ pub(crate) fn execute(db: &Arc<DbInner>, name: &str, input: &[u8]) -> Result<Vec
         let txn = Txn::new(db.clone());
         let module = load_module_at(db, name, txn.snapshot_seqno())?;
         let ctx = HostCtx::new(db.clone(), Access::Txn(Some(txn)), input.to_vec());
-        let (code, mut ctx) = run_instance(db, &module, ctx)?;
+        let (code, mut ctx) = run_instance(db, &module, ctx, "run")?;
         let txn = match ctx.access {
             Access::Txn(ref mut t) => t.take().expect("txn present"),
             _ => unreachable!(),
@@ -296,4 +304,51 @@ pub(crate) fn execute(db: &Arc<DbInner>, name: &str, input: &[u8]) -> Result<Vec
         }
     }
     Err(Error::Conflict)
+}
+
+/// Run a compiled module's optional `describe` export — same `() -> i32`
+/// ABI as `run`, read-only access at `seq`, empty input — and return its
+/// output bytes. `Ok(None)` when the module exports no `describe` function.
+fn describe_compiled(db: &Arc<DbInner>, module: &Module, seq: SeqNo) -> Result<Option<Vec<u8>>> {
+    let has_describe = module
+        .get_export("describe")
+        .is_some_and(|e| e.func().is_some());
+    if !has_describe {
+        return Ok(None);
+    }
+    let ctx = HostCtx::new(db.clone(), Access::ReadOnly(seq), Vec::new());
+    let (code, ctx) = run_instance(db, module, ctx, "describe")?;
+    if code != 0 {
+        return Err(Error::GuestFailed {
+            code,
+            output: ctx.output,
+        });
+    }
+    Ok(Some(ctx.output))
+}
+
+/// `describe` an installed module by name.
+pub(crate) fn describe_module(db: &Arc<DbInner>, name: &str) -> Result<Option<Vec<u8>>> {
+    let guard = SnapGuard {
+        db: db.clone(),
+        seq: db.register_snapshot(),
+        registered: true,
+    };
+    let module = load_module_at(db, name, guard.seq)?;
+    describe_compiled(db, &module, guard.seq)
+}
+
+/// `describe` candidate module bytes without installing them (install-time
+/// validation of the declared schema).
+pub(crate) fn describe_wasm(db: &Arc<DbInner>, wasm: &[u8]) -> Result<Option<Vec<u8>>> {
+    // compile WITHOUT touching the shared ModuleCache: candidate bytes may
+    // be rejected and must not evict installed modules' compiled artifacts
+    let module = Module::new(&db.wasm.engine, wasm)
+        .map_err(|e| Error::Wasm(format!("compile: {e}")))?;
+    let guard = SnapGuard {
+        db: db.clone(),
+        seq: db.register_snapshot(),
+        registered: true,
+    };
+    describe_compiled(db, &module, guard.seq)
 }
