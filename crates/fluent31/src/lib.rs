@@ -20,6 +20,8 @@ mod iter;
 mod manifest;
 mod memtable;
 mod table;
+#[cfg(feature = "wasm")]
+mod trigger;
 mod txn;
 mod types;
 mod version;
@@ -33,6 +35,8 @@ pub use config::{Compression, IoBackend, Options, SyncMode};
 pub use db::{Db, DbStats, Snapshot};
 pub use error::{Error, Result};
 pub use iter::DbIterator;
+#[cfg(feature = "wasm")]
+pub use trigger::TriggerInfo;
 pub use txn::Txn;
 #[cfg(feature = "wasm")]
 pub use wasm::ModuleInfo;

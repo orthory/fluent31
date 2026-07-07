@@ -290,8 +290,53 @@ scans clamped to the user keyspace.
 Guest SDK: `fluent-guest` (safe wrappers, growable scan batches, chunked
 big-value reads, `fluent_main!`). Example guests in `guests/`:
 **agg** (prefix count/sum/min/max — the `SELECT agg WHERE prefix`
-replacement) and **transfer** (balance transfer via `get_for_update` —
-the stored procedure replacement, exercised concurrently in tests).
+replacement), **transfer** (balance transfer via `get_for_update` —
+the stored procedure replacement, exercised concurrently in tests), and
+**customer_index** (a trigger-maintained secondary index — the
+`CREATE INDEX` replacement).
+
+### Write-range triggers (`trigger.rs`)
+
+The async fan-out from committed writes to executor modules — the
+schema-free replacement for SQL indexes/materialized views. A trigger is
+`(name, module, [lo, hi))`, persisted at `\x00trg\x00<name>` and mirrored
+in an in-memory registry (an `Arc<Vec<_>>` swapped whole on create/delete;
+the write path pays one read-lock clone per batch, nothing when empty).
+
+**Capture.** `write_batch` and `Txn::commit` match their *logical* write
+keys against the registry and append event records to the same batch —
+same WAL record, same seqno range, same crash atomicity: "the write
+happened" and "the trigger owes a run" are inseparable. Engine-internal
+writes bypass capture entirely (vlog-GC relocations rewrite placement, not
+state; system-txn commits — see below — enforce no-stacking).
+
+**Queue.** The event key is `\x00trgq\x00<name>\x00<touched user key>` with
+an empty value: the touched key IS the queue key, so a hot key coalesces
+to one pending event no matter how far the runner lags, and queue depth is
+bounded by distinct touched keys. This encodes the delivery semantic: an
+event means "reconcile this key against current state", not "replay this
+op" — modules read the key and converge, making replays and reordering
+harmless by construction.
+
+**Runner.** A dedicated thread (parked on a signal notified by capturing
+commits) discovers backlogged triggers by skip-seeking the queue prefix,
+then drains each in chunks of `trigger_batch`: it invokes the module as a
+normal executor whose transaction is pre-seeded — marked *system* and
+carrying deletes of the consumed queue entries. The module's writes and
+the queue consumption therefore commit atomically: invocation is
+at-least-once (a crash mid-run re-fires), effects are exactly-once. The
+consumed entries sit in the transaction's write set, so OCC closes the
+drain race for free: a re-touch after the drain snapshot rewrites the
+queue key, conflicts the commit, and the attempt re-runs against a fresh
+snapshot. System-txn commits skip capture, so a trigger's own writes never
+enqueue events — no cascades, no loops, by decree.
+
+**Failure.** A failing module (guest error, missing module, conflict
+exhaustion) never loses events: the batch stays queued, the runner backs
+off exponentially (100ms → 6.4s) per trigger, and `list_triggers` exposes
+`pending` + `last_error`. Queue entries whose trigger no longer exists
+(create/delete race, crash mid-delete) are garbage-collected by the
+runner. Recovery needs no machinery: events are ordinary durable keys.
 
 ## 10. Checkpoints / PITR (explicit, manual)
 

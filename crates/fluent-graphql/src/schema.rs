@@ -19,6 +19,9 @@ use crate::{DescribeOutcome, ModuleStatus, SchemaManager};
 /// Raw bytes flowing to `Bytes` field resolvers.
 pub(crate) struct BytesVal(pub Vec<u8>);
 
+/// Parent value for `Trigger`.
+pub(crate) struct TriggerVal(pub fluent31::TriggerInfo);
+
 /// Parent value for `ScanPage`.
 pub(crate) struct ScanPageVal {
     pub pairs: Vec<(Vec<u8>, Vec<u8>)>,
@@ -329,6 +332,61 @@ fn checkpoint_object() -> Object {
         .field(value_field("path", TypeRef::named_nn(TypeRef::STRING)))
 }
 
+fn trigger_object() -> Object {
+    Object::new("Trigger")
+        .description("A write-range trigger binding a key range to a WASM executor module.")
+        .field(Field::new("name", TypeRef::named_nn(TypeRef::STRING), |ctx| {
+            FieldFuture::new(async move {
+                let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                Ok(Some(FieldValue::value(t.0.name.clone())))
+            })
+        }))
+        .field(Field::new(
+            "module",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                    Ok(Some(FieldValue::value(t.0.module.clone())))
+                })
+            },
+        ))
+        .field(Field::new("lo", TypeRef::named("Bytes"), |ctx| {
+            FieldFuture::new(async move {
+                let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                Ok((!t.0.lo.is_empty())
+                    .then(|| FieldValue::owned_any(BytesVal(t.0.lo.clone()))))
+            })
+        })
+        .description("Inclusive range start; null = from the start of the keyspace."))
+        .field(Field::new("hi", TypeRef::named("Bytes"), |ctx| {
+            FieldFuture::new(async move {
+                let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                Ok((!t.0.hi.is_empty())
+                    .then(|| FieldValue::owned_any(BytesVal(t.0.hi.clone()))))
+            })
+        })
+        .description("Exclusive range end; null = unbounded."))
+        .field(Field::new("pending", TypeRef::named_nn("U64"), |ctx| {
+            FieldFuture::new(async move {
+                let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                Ok(Some(FieldValue::value(t.0.pending.to_string())))
+            })
+        })
+        .description("Queued events not yet consumed by a successful invocation."))
+        .field(Field::new(
+            "lastError",
+            TypeRef::named(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                    Ok(t.0.last_error.clone().map(FieldValue::value))
+                })
+            },
+        )
+        .description("Why the most recent drain attempt failed; null when healthy."))
+}
+
 fn gc_result_object() -> Object {
     Object::new("GcResult").field(value_field("retired", TypeRef::named("U64")))
 }
@@ -407,6 +465,7 @@ pub(crate) fn build(
         .register(scan_page_object())
         .register(module_object())
         .register(checkpoint_object())
+        .register(trigger_object())
         .register(gc_result_object())
         .register(level_stats_object())
         .register(stats_object())

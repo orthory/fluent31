@@ -14,6 +14,11 @@ An embedded key-value database engine in Rust:
   them as read-only **queries** or transactional **executors** against a
   kernel-style syscall ABI (`get`/`put`/`delete`, batched scans, input/output
   streams, fuel + memory limits).
+- **Write-range triggers** — bind an executor module to a key range and the
+  engine invokes it asynchronously whenever a committed write touches the
+  range: schema-free custom indexes and materialized views with no writer
+  cooperation. Events are durable (they commit atomically with the
+  triggering write), coalesced per key, and consumed exactly-once.
 - **PITR checkpoints** — `checkpoint("name")` hard-links the immutable files
   into `archive/name/`, which is itself a complete database directory:
   restore = open, and opening read-write forks copy-on-write.
@@ -82,6 +87,22 @@ aborts; commit conflicts re-run the module against a fresh snapshot
 automatically. Guests are sandboxed hard: fuel-metered, memory-capped,
 output/log/scan/write-set-capped, no WASI, reserved keyspace invisible.
 
+An executor can also be bound to a key range as a **trigger** — the engine
+then invokes it after every committed write into the range, with the
+touched keys as input:
+
+```rust
+db.create_trigger("customerIndex", "customer_index",
+                  Some(b"orders/"), Some(b"orders0"))?;
+db.put("orders/00000042", r#"{"customer":"acme","amountCents":500}"#)?;
+// moments later, with no writer cooperation:
+//   idx/customer/acme/00000042  (maintained by guests/customer_index)
+```
+
+A trigger event means "this key was touched — reconcile it": the module
+reads current state and converges, so replays and coalesced re-touches are
+harmless. See [WASM.md](WASM.md) §8 for the authoring contract.
+
 Build the bundled examples:
 
 ```sh
@@ -109,7 +130,8 @@ visible seqno  2
 ```
 
 Every command prints its wall-clock latency. `begin/tput/commit` drive
-transactions, `install/query/exec` drive WASM, `gc` runs value-log GC.
+transactions, `install/query/exec` drive WASM, `mktrig/deltrig/triggers`
+manage write-range triggers, `gc` runs value-log GC.
 
 ## The GraphQL server
 
@@ -141,6 +163,8 @@ mutation {
                    {delete: {text: "b"}}])                # atomic
   wasmExecute(module: "transfer", input: {base64: "..."}) { base64 }  # transactional
   installModule(name: "agg", wasm: {base64: "..."}) { name size }
+  createTrigger(name: "idx", module: "customer_index",
+                lo: {text: "orders/"}, hi: {text: "orders0"})
   checkpoint(name: "snap1") { lastSeqno }
 }
 ```
