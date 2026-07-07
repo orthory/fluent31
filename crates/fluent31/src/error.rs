@@ -20,6 +20,12 @@ pub enum Error {
     Wasm(String),
     /// A WASM executor/query ran fine but the guest returned a non-zero code.
     GuestFailed { code: i32, output: Vec<u8> },
+    /// Replicated/cached data does not descend from the expected store
+    /// instance (stale after a master restore/fork); re-sync required.
+    ProvenanceMismatch(String),
+    /// A referenced file left the current version (compacted/GC'd away);
+    /// the replica's view is stale — re-pull the slice and retry.
+    Gone(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -35,6 +41,8 @@ impl fmt::Display for Error {
             Error::Background(m) => write!(f, "background error: {m}"),
             Error::Wasm(m) => write!(f, "wasm: {m}"),
             Error::GuestFailed { code, .. } => write!(f, "guest module failed with code {code}"),
+            Error::ProvenanceMismatch(m) => write!(f, "provenance mismatch: {m}"),
+            Error::Gone(m) => write!(f, "gone: {m}"),
         }
     }
 }

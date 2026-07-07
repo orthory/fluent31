@@ -66,6 +66,10 @@ pub fn status_for(e: &fluent31::Error) -> u8 {
         E::Background(_) => ST_BACKGROUND,
         E::Wasm(_) => ST_WASM,
         E::GuestFailed { .. } => ST_GUEST_FAILED,
+        // replica-side staleness: the edge will re-sync; transient from the
+        // client's point of view
+        E::ProvenanceMismatch(_) => ST_CORRUPTION,
+        E::Gone(_) => ST_IO,
     }
 }
 

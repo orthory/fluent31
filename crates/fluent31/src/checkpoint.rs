@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::DbPaths;
 use crate::db::Db;
 use crate::error::{Error, Result};
+use crate::identity::{validate_store_name, PendingFork, StoreIdentity};
 use crate::io::{self, copy_prefix, hard_link_or_copy};
 use crate::manifest::{self, ManifestData, RunMeta};
 
@@ -158,6 +159,16 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<CheckpointInfo> {
             .filter(|(id, _)| vlog_live.contains(id))
             .copied()
             .collect(),
+        // an archive is not a store instance until opened read-write: it
+        // carries no identity of its own, only the fork it would mint (the
+        // archive name becomes the child's store name). Unnamed source
+        // stores fork namelessly — their archives stay unnamed too.
+        identity: None,
+        pending_fork: mdata.identity.as_ref().map(|id| PendingFork {
+            parent_instance_id: id.instance_id,
+            cut_seqno: cut,
+            name: name.to_string(),
+        }),
     };
     let tmp_paths = DbPaths::new(&tmp_dir);
     manifest::save(&tmp_paths, 1, &adata)?;
@@ -240,21 +251,63 @@ pub(crate) fn delete(paths: &DbPaths, name: &str) -> Result<()> {
 
 /// Re-link an archive into a fresh standalone directory (promote a
 /// checkpoint without mutating the archive).
-pub fn restore_to(archive: &Path, dest: &Path) -> Result<()> {
+///
+/// `new_name` names the fork the copy will mint on first open. It is
+/// REQUIRED when the archive descends from a named store: each restored
+/// copy must fork under its own name, or two copies of one archive would
+/// mint identical instance ids for histories about to diverge. For an
+/// unnamed lineage, `Some(name)` adopts a root identity onto the copy
+/// (same as opening it with `Options::store_name`).
+pub fn restore_to(archive: &Path, dest: &Path, new_name: Option<&str>) -> Result<()> {
     if dest.exists() {
         return Err(Error::InvalidArgument(format!(
             "destination {} already exists",
             dest.display()
         )));
     }
+    if let Some(name) = new_name {
+        validate_store_name(name)?;
+    }
+
+    // rewrite identity state BEFORE copying: the destination gets a fresh
+    // gen-1 manifest instead of a verbatim link of the archive's
+    let archive_paths = DbPaths::new(archive);
+    let (_, mut mdata) = manifest::load(&archive_paths)?;
+    // a minted identity means the archive was already opened read-write —
+    // it is a live store now, and copying it would duplicate its instance
+    // id across histories about to diverge
+    if let Some(id) = &mdata.identity {
+        return Err(Error::InvalidArgument(format!(
+            "source is a live store (instance {:?} already minted), not a \
+             pristine archive; create a checkpoint from it and restore that",
+            id.name
+        )));
+    }
+    match (&mut mdata.pending_fork, new_name) {
+        (Some(pf), Some(name)) => pf.name = name.to_string(),
+        (Some(pf), None) => {
+            return Err(Error::InvalidArgument(format!(
+                "archive descends from a named store (fork name {:?}); \
+                 restore_to requires a new_name so each copy forks uniquely",
+                pf.name
+            )));
+        }
+        (None, Some(name)) => mdata.identity = Some(StoreIdentity::root(name)),
+        (None, None) => {}
+    }
+
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(archive)?.flatten() {
         let name = entry.file_name();
-        if name == "LOCK" {
+        let is_manifest = name
+            .to_str()
+            .is_some_and(|n| n == "CURRENT" || n.starts_with("MANIFEST-"));
+        if name == "LOCK" || is_manifest {
             continue;
         }
         hard_link_or_copy(&entry.path(), &dest.join(&name))?;
     }
+    manifest::save(&DbPaths::new(dest), 1, &mdata)?;
     io::sync_dir(dest)?;
     Ok(())
 }

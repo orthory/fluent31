@@ -1,5 +1,7 @@
-//! Opcode → engine dispatch. Every engine call hops to the blocking pool
-//! behind the shared gates; payload codecs are defined in WIRE.md.
+//! Opcode → backend dispatch. Every engine call hops to the blocking pool
+//! behind the shared gates; payload codecs are defined in WIRE.md. The
+//! backend trait keeps this file engine-agnostic: a full `Db` and a
+//! read-only edge replica dispatch identically.
 
 use bytes::{BufMut, BytesMut};
 use fluent31::WriteBatch;
@@ -69,7 +71,7 @@ where
 }
 
 async fn run(srv: &WireServer, opcode: u8, payload: &[u8]) -> Result<(u8, Vec<u8>), HandleErr> {
-    let db = srv.db.clone();
+    let db = srv.backend.clone();
     match opcode {
         OP_HELLO => {
             let mut out = Vec::new();
@@ -117,7 +119,7 @@ async fn run(srv: &WireServer, opcode: u8, payload: &[u8]) -> Result<(u8, Vec<u8
             }
             rd.done()?;
             let n = batch.len() as u32;
-            write_call(srv, move || db.write(batch)).await?;
+            write_call(srv, move || db.write_batch(batch)).await?;
             Ok((ST_OK, n.to_le_bytes().to_vec()))
         }
 
@@ -155,18 +157,7 @@ async fn run(srv: &WireServer, opcode: u8, payload: &[u8]) -> Result<(u8, Vec<u8
                 }
             };
             let (pairs, has_more) = read_call(srv, move || {
-                let it = db.iter(lo.as_deref(), hi.as_deref(), reverse)?;
-                let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-                let mut has_more = false;
-                for item in it {
-                    let (k, v) = item?;
-                    if pairs.len() == limit {
-                        has_more = true;
-                        break;
-                    }
-                    pairs.push((k, v));
-                }
-                Ok((pairs, has_more))
+                db.scan(lo.as_deref(), hi.as_deref(), reverse, limit)
             })
             .await?;
             let mut out = BytesMut::new();
@@ -211,8 +202,8 @@ async fn run(srv: &WireServer, opcode: u8, payload: &[u8]) -> Result<(u8, Vec<u8
 
         OP_STATS => {
             // human-readable, format-unstable by design (WIRE.md)
-            let s = read_call(srv, move || Ok(db.stats())).await?;
-            Ok((ST_OK, format!("{s:#?}").into_bytes()))
+            let s = read_call(srv, move || db.stats_text()).await?;
+            Ok((ST_OK, s.into_bytes()))
         }
 
         other => Err(format!("unknown opcode {other:#04x}").into()),

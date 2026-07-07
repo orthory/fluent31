@@ -763,6 +763,17 @@ name = "fluent-guest"
 version = "0.1.0"
 
 [[package]]
+name = "fluent-replication"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "fluent-wire",
+ "fluent31",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fluent-wire"
 version = "0.1.0"
 dependencies = [
@@ -782,6 +793,7 @@ dependencies = [
  "libc",
  "lz4_flex",
  "parking_lot",
+ "sha2",
  "tempfile",
  "wasmtime",
 ]
