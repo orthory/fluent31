@@ -117,6 +117,36 @@ mod sys {
     }
 }
 
+/// The touched keys of a trigger invocation: parses the input blob's
+/// packing (`[klen uvarint][key bytes]` repeated). A trigger event means
+/// "this key was touched", not "here is what happened to it" — read the key
+/// to decide (present = upsert your derived state, absent = remove it).
+/// Returns None on malformed input (not invoked as a trigger).
+pub fn trigger_keys() -> Option<Vec<Vec<u8>>> {
+    let input = input();
+    let mut keys = Vec::new();
+    let mut pos = 0usize;
+    while pos < input.len() {
+        let (mut len, mut shift) = (0u64, 0u32);
+        loop {
+            let b = *input.get(pos)?;
+            pos += 1;
+            len |= u64::from(b & 0x7f) << shift;
+            if b < 0x80 {
+                break;
+            }
+            shift += 7;
+            if shift > 63 {
+                return None;
+            }
+        }
+        let len = usize::try_from(len).ok()?;
+        keys.push(input.get(pos..pos + len)?.to_vec());
+        pos += len;
+    }
+    Some(keys)
+}
+
 /// The input blob this invocation was called with.
 pub fn input() -> Vec<u8> {
     unsafe {

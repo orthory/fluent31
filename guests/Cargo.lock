@@ -10,6 +10,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "customer_index"
+version = "0.1.0"
+dependencies = [
+ "fluent-guest",
+ "serde_json",
+]
+
+[[package]]
 name = "fluent-guest"
 version = "0.1.0"
 

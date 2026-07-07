@@ -22,6 +22,8 @@ mod iter;
 mod manifest;
 mod memtable;
 mod table;
+#[cfg(feature = "wasm")]
+mod trigger;
 mod txn;
 mod types;
 mod version;
@@ -39,6 +41,8 @@ pub use db::{
 pub use error::{Error, Result};
 pub use identity::{InstanceId, StoreIdentity};
 pub use iter::DbIterator;
+#[cfg(feature = "wasm")]
+pub use trigger::TriggerInfo;
 pub use txn::Txn;
 pub use types::{SeqNo, ValueKind};
 #[cfg(feature = "wasm")]

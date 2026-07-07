@@ -1487,3 +1487,216 @@ fn edge_store_end_to_end() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// write-range triggers
+// ---------------------------------------------------------------------------
+
+/// Executor used as a trigger target: records the raw packed input under
+/// `idx/last` and mirrors every touched key `<k>` to `m/<k>` (value = the
+/// key bytes). Assumes single-byte uvarint key lengths (keys < 128 bytes),
+/// which every test key satisfies.
+#[cfg(feature = "wasm")]
+const MIRROR_WAT: &str = r#"
+(module
+  (import "fluent" "input_len" (func $ilen (result i32)))
+  (import "fluent" "input_read" (func $iread (param i32 i32 i32) (result i32)))
+  (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 0) "idx/last")
+  (func (export "run") (result i32)
+    (local $len i32) (local $off i32) (local $klen i32)
+    (local.set $len (call $ilen))
+    (drop (call $iread (i32.const 1024) (local.get $len) (i32.const 0)))
+    (drop (call $put (i32.const 0) (i32.const 8) (i32.const 1024) (local.get $len)))
+    (local.set $off (i32.const 0))
+    (block $done
+      (loop $next
+        (br_if $done (i32.ge_u (local.get $off) (local.get $len)))
+        (local.set $klen (i32.load8_u (i32.add (i32.const 1024) (local.get $off))))
+        (local.set $off (i32.add (local.get $off) (i32.const 1)))
+        (i32.store8 (i32.const 8192) (i32.const 109))
+        (i32.store8 (i32.const 8193) (i32.const 47))
+        (memory.copy (i32.const 8194)
+                     (i32.add (i32.const 1024) (local.get $off))
+                     (local.get $klen))
+        (drop (call $put (i32.const 8192) (i32.add (local.get $klen) (i32.const 2))
+                         (i32.add (i32.const 1024) (local.get $off)) (local.get $klen)))
+        (local.set $off (i32.add (local.get $off) (local.get $klen)))
+        (br $next)))
+    (i32.const 0)))
+"#;
+
+#[cfg(feature = "wasm")]
+fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !f() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not reached within 10s: {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(feature = "wasm")]
+fn pending(db: &Db, name: &str) -> u64 {
+    db.list_triggers()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.name == name)
+        .map(|t| t.pending)
+        .unwrap_or_else(|| panic!("no trigger named {name}"))
+}
+
+/// The full loop under SyncMode::Always: a put in the subscribed range
+/// fires the module (which indexes the key), the queue drains to zero, and
+/// out-of-range writes fire nothing. Batch and transaction write paths
+/// fire the same way.
+#[cfg(feature = "wasm")]
+#[test]
+fn trigger_fires_on_range_and_drains_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(
+        dir.path(),
+        Options {
+            sync: SyncMode::Always,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+
+    // plain put
+    db.put(b"u/a".to_vec(), b"1".to_vec()).unwrap();
+    wait_until("mirror of u/a", || db.get(b"m/u/a").unwrap().is_some());
+    assert_eq!(db.get(b"m/u/a").unwrap().unwrap(), b"u/a");
+
+    // batch and transaction writes fire too
+    let mut b = WriteBatch::new();
+    b.put(b"u/b".to_vec(), b"2".to_vec());
+    b.delete(b"u/c".to_vec()); // deletes are events as well
+    db.write(b).unwrap();
+    let mut t = db.begin();
+    t.put(b"u/d".to_vec(), b"3".to_vec()).unwrap();
+    t.commit().unwrap();
+    for key in [b"m/u/b".as_ref(), b"m/u/c".as_ref(), b"m/u/d".as_ref()] {
+        wait_until("mirrors of batch/txn writes", || db.get(key).unwrap().is_some());
+    }
+
+    // out-of-range writes fire nothing
+    db.put(b"w/out".to_vec(), b"x".to_vec()).unwrap();
+    wait_until("queue drained", || pending(&db, "t") == 0);
+    assert!(db.get(b"m/w/out").unwrap().is_none());
+
+    let info = &db.list_triggers().unwrap()[0];
+    assert_eq!(info.module, "mirror");
+    assert_eq!(info.last_error, None);
+}
+
+/// Events are durable and coalesced: with the target module uninstalled the
+/// runner cannot drain (it reports the error), re-touches of one key stay a
+/// single pending event, the backlog survives a reopen, and reinstalling
+/// the module drains it. delete_trigger discards the backlog.
+#[cfg(feature = "wasm")]
+#[test]
+fn trigger_backlog_coalesces_survives_reopen_and_clears_on_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Db::open(dir.path(), small_opts()).unwrap();
+        db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+        db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+        // no module -> the runner cannot drain; events accumulate durably
+        db.uninstall_module("mirror").unwrap();
+        for _ in 0..3 {
+            db.put(b"u/hot".to_vec(), b"v".to_vec()).unwrap();
+        }
+        db.put(b"u/other".to_vec(), b"v".to_vec()).unwrap();
+        db.put(b"zz/out-of-range".to_vec(), b"v".to_vec()).unwrap();
+        assert_eq!(pending(&db, "t"), 2, "coalesced: hot key counts once");
+        wait_until("drain failure surfaces", || {
+            pending(&db, "t") == 2
+                && db.list_triggers().unwrap()[0]
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("mirror"))
+        });
+    }
+
+    // the backlog survives a full close + reopen (events are ordinary
+    // durable keys), and a freshly installed module drains it
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    assert_eq!(pending(&db, "t"), 2, "backlog recovered");
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+    wait_until("recovered backlog drains", || pending(&db, "t") == 0);
+    assert_eq!(db.get(b"m/u/hot").unwrap().unwrap(), b"u/hot");
+    assert_eq!(db.get(b"m/u/other").unwrap().unwrap(), b"u/other");
+    assert!(db.get(b"m/zz/out-of-range").unwrap().is_none());
+
+    // a deleted trigger takes its backlog with it: accumulate one fresh
+    // event with the module gone again, delete the trigger, recreate it
+    db.uninstall_module("mirror").unwrap();
+    db.put(b"u/fresh".to_vec(), b"v".to_vec()).unwrap();
+    assert_eq!(pending(&db, "t"), 1);
+    db.delete_trigger("t").unwrap();
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+    assert_eq!(pending(&db, "t"), 0, "recreate starts with an empty queue");
+    // the discarded event's record is gone, so it can never fire
+    assert!(db.get(b"m/u/fresh").unwrap().is_none());
+}
+
+/// No stacking: writes committed by a trigger invocation never generate
+/// events, even when they land inside another trigger's subscribed range —
+/// while direct user writes into that range still fire it.
+#[cfg(feature = "wasm")]
+#[test]
+fn trigger_writes_do_not_fire_other_triggers() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+    db.create_trigger("a", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+    // b watches the range a's module writes into
+    db.create_trigger("b", "mirror", Some(b"m/"), Some(b"n")).unwrap();
+
+    db.put(b"u/1".to_vec(), b"x".to_vec()).unwrap();
+    wait_until("a fires", || db.get(b"m/u/1").unwrap().is_some());
+    // a's invocation committed m/u/1: had stacking existed, b's event would
+    // have been enqueued atomically with that commit — so this is exact
+    assert_eq!(pending(&db, "b"), 0, "no event from a trigger's own writes");
+    assert!(db.get(b"m/m/u/1").unwrap().is_none());
+
+    // a DIRECT user write into b's range does fire b
+    db.put(b"m/direct".to_vec(), b"x".to_vec()).unwrap();
+    wait_until("b fires on direct write", || {
+        db.get(b"m/m/direct").unwrap().is_some()
+    });
+}
+
+/// Admin validation: bad ranges, unknown modules, duplicate names, unknown
+/// deletes, and reserved-keyspace bounds are all rejected loudly.
+#[cfg(feature = "wasm")]
+#[test]
+fn trigger_admin_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+
+    let is_invalid = |r: fluent31::Result<()>| {
+        assert!(matches!(r, Err(Error::InvalidArgument(_))), "{r:?}");
+    };
+    is_invalid(db.create_trigger("t", "nope", None, None));
+    is_invalid(db.create_trigger("bad name", "mirror", None, None));
+    is_invalid(db.create_trigger("t", "mirror", Some(b"b"), Some(b"a")));
+    is_invalid(db.create_trigger("t", "mirror", Some(b"\x00sys"), None));
+    is_invalid(db.delete_trigger("t"));
+
+    db.create_trigger("t", "mirror", None, None).unwrap();
+    is_invalid(db.create_trigger("t", "mirror", None, None));
+    let infos = db.list_triggers().unwrap();
+    assert_eq!(infos.len(), 1);
+    assert!(infos[0].lo.is_empty() && infos[0].hi.is_empty());
+    db.delete_trigger("t").unwrap();
+    assert!(db.list_triggers().unwrap().is_empty());
+}

@@ -196,6 +196,32 @@ pub fn sys_wasm_key(name: &str) -> Vec<u8> {
     k
 }
 
+/// Registered trigger definition record: `\x00trg\x00<name>`.
+#[cfg(feature = "wasm")]
+pub fn sys_trigger_key(name: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(5 + name.len());
+    k.push(SYS_PREFIX);
+    k.extend_from_slice(b"trg");
+    k.push(0);
+    k.extend_from_slice(name.as_bytes());
+    k
+}
+
+/// Pending-event record: `\x00trgq\x00<name>\x00<user key>`. The touched
+/// user key IS the queue key, so re-touches coalesce to one pending event.
+/// (Trigger names cannot contain 0x00, so the layout is unambiguous.)
+#[cfg(feature = "wasm")]
+pub fn sys_trigger_event_key(name: &str, user_key: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(7 + name.len() + user_key.len());
+    k.push(SYS_PREFIX);
+    k.extend_from_slice(b"trgq");
+    k.push(0);
+    k.extend_from_slice(name.as_bytes());
+    k.push(0);
+    k.extend_from_slice(user_key);
+    k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
