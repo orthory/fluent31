@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
 
+use crate::backend::WireBackend;
 use crate::dispatch;
 use crate::proto::*;
 
@@ -57,15 +58,21 @@ pub(crate) struct EngineGate {
 }
 
 pub struct WireServer {
-    pub(crate) db: Arc<Db>,
+    pub(crate) backend: Arc<dyn WireBackend>,
     pub(crate) gate: EngineGate,
     cfg: ServerConfig,
 }
 
 impl WireServer {
     pub fn new(db: Arc<Db>, cfg: ServerConfig) -> Arc<WireServer> {
+        Self::with_backend(db, cfg)
+    }
+
+    /// Serve the wire protocol over any engine backend — the full `Db` or
+    /// a read-only `EdgeStore` (writes answer INVALID there).
+    pub fn with_backend(backend: Arc<impl WireBackend>, cfg: ServerConfig) -> Arc<WireServer> {
         Arc::new(WireServer {
-            db,
+            backend,
             gate: EngineGate {
                 read: Arc::new(Semaphore::new(128)),
                 write: Arc::new(Semaphore::new(32)),

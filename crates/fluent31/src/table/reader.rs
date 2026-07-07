@@ -78,6 +78,19 @@ impl Table {
         self.index.len()
     }
 
+    /// Raw byte range of the table file (replication chunk serving); `len`
+    /// is clamped to the file end.
+    pub fn read_chunk(&self, off: u64, len: usize) -> Result<Vec<u8>> {
+        let flen = self.file.len()?;
+        if off >= flen {
+            return Err(corrupt(format!("chunk offset {off} beyond table end {flen}")));
+        }
+        let n = (len as u64).min(flen - off) as usize;
+        let mut buf = vec![0u8; n];
+        self.file.read_exact_at(off, &mut buf)?;
+        Ok(buf)
+    }
+
     fn load_block(&self, idx: usize) -> Result<Arc<Block>> {
         let r = self.index[idx].block;
         let payload = match self.cache.get(self.id, r.off) {

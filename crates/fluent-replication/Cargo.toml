@@ -1,0 +1,22 @@
+[package]
+name = "fluent-replication"
+version.workspace = true
+edition.workspace = true
+description = "Edge replication channel for fluent31: scoped slice sync, lazy value fetch, and streamed writes to ephemeral read replicas"
+
+[lib]
+name = "fluent_replication"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fluent-replication"
+path = "src/main.rs"
+
+[dependencies]
+fluent31 = { path = "../fluent31" }
+fluent-wire = { path = "../fluent-wire" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal"] }
+bytes = "1"
+
+[dev-dependencies]
+tempfile = "3"

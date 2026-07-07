@@ -14,7 +14,9 @@ mod coding;
 mod compaction;
 mod config;
 mod db;
+pub mod edge;
 mod error;
+pub mod identity;
 mod io;
 mod iter;
 mod manifest;
@@ -32,12 +34,17 @@ mod wasm;
 
 pub use batch::WriteBatch;
 pub use config::{Compression, IoBackend, Options, SyncMode};
-pub use db::{Db, DbStats, Snapshot};
+pub use db::{
+    Db, DbStats, SliceManifest, SliceRun, SliceTable, Snapshot, StreamEntry, StreamEvent,
+    Subscription,
+};
 pub use error::{Error, Result};
+pub use identity::{InstanceId, StoreIdentity};
 pub use iter::DbIterator;
 #[cfg(feature = "wasm")]
 pub use trigger::TriggerInfo;
 pub use txn::Txn;
+pub use types::{SeqNo, ValueKind};
 #[cfg(feature = "wasm")]
 pub use wasm::ModuleInfo;
 

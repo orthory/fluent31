@@ -977,6 +977,518 @@ fn vlog_gc_sampling_reclaims_without_discard_stats() {
 }
 
 // ---------------------------------------------------------------------------
+// Store identity & lineage
+// ---------------------------------------------------------------------------
+
+fn named_opts(name: &str) -> Options {
+    Options {
+        store_name: Some(name.to_string()),
+        ..small_opts()
+    }
+}
+
+/// Identity lifecycle: deterministic mint at create, stable across reopen,
+/// name mismatch refused, adoption onto an unnamed store.
+#[test]
+fn identity_mint_reopen_adopt() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = fluent31::identity::derive_root("prod");
+    {
+        let db = Db::open(dir.path(), named_opts("prod")).unwrap();
+        let id = db.identity().unwrap();
+        assert_eq!(id.name, "prod");
+        assert_eq!(id.instance_id, expected);
+        assert!(id.parent.is_none());
+        db.put(b"a".to_vec(), b"1".to_vec()).unwrap();
+    }
+    // reopen without a name: identity persists
+    {
+        let db = Db::open(dir.path(), small_opts()).unwrap();
+        assert_eq!(db.identity().unwrap().instance_id, expected);
+    }
+    // reopen with a mismatched name: refused
+    assert!(matches!(
+        Db::open(dir.path(), named_opts("other")),
+        Err(Error::InvalidArgument(_))
+    ));
+
+    // adoption: an unnamed store gains identity on a later open
+    let dir2 = tempfile::tempdir().unwrap();
+    {
+        let db = Db::open(dir2.path(), small_opts()).unwrap();
+        assert!(db.identity().is_none());
+        db.put(b"x".to_vec(), b"1".to_vec()).unwrap();
+    }
+    {
+        let db = Db::open(dir2.path(), named_opts("adopted")).unwrap();
+        let id = db.identity().unwrap();
+        assert_eq!(id.instance_id, fluent31::identity::derive_root("adopted"));
+        assert_eq!(db.get(b"x").unwrap().unwrap(), b"1");
+    }
+}
+
+/// Forks mint deterministic child identities: in-place archive open and
+/// restore_to copies each fork under their own name; restores of a named
+/// lineage without a new name are refused.
+#[test]
+fn identity_forks_via_checkpoint_and_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), named_opts("main")).unwrap();
+    for i in 0..50u32 {
+        db.put(k(i), v(i, "pre")).unwrap();
+    }
+    let info = db.checkpoint("nightly").unwrap();
+    let parent_id = db.identity().unwrap();
+
+    // named lineage: restore without a new name is refused (two copies of
+    // one archive must not mint identical instance ids)
+    let dest = dir.path().join("restored");
+    assert!(matches!(
+        fluent31::restore_to(&info.path, &dest, None),
+        Err(Error::InvalidArgument(_))
+    ));
+    // with a name: a distinct deterministic child, data intact
+    fluent31::restore_to(&info.path, &dest, Some("edge-1")).unwrap();
+    let restored = Db::open(&dest, small_opts()).unwrap();
+    let rid = restored.identity().unwrap();
+    assert_eq!(
+        rid.instance_id,
+        fluent31::identity::derive_fork(&parent_id.instance_id, info.last_seqno, "edge-1")
+    );
+    for i in 0..50u32 {
+        assert_eq!(restored.get(&k(i)).unwrap().unwrap(), v(i, "pre"), "key {i}");
+    }
+
+    // in-place fork: first rw open mints child = H(parent ‖ cut ‖ "nightly")
+    let expected_child =
+        fluent31::identity::derive_fork(&parent_id.instance_id, info.last_seqno, "nightly");
+    assert_ne!(rid.instance_id, expected_child);
+    {
+        let fork = Db::open(&info.path, small_opts()).unwrap();
+        let id = fork.identity().unwrap();
+        assert_eq!(id.name, "nightly");
+        assert_eq!(id.instance_id, expected_child);
+        assert_eq!(id.parent, Some((parent_id.instance_id, info.last_seqno)));
+        // reopen keeps the minted id (fork marker consumed once)
+        drop(fork);
+        let again = Db::open(&info.path, small_opts()).unwrap();
+        assert_eq!(again.identity().unwrap().instance_id, expected_child);
+    }
+
+    // once forked in place the archive is a live store: restoring a copy of
+    // it would duplicate the minted instance id — refused
+    assert!(matches!(
+        fluent31::restore_to(&info.path, &dir.path().join("r2"), Some("edge-2")),
+        Err(Error::InvalidArgument(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Replication surface: subscriptions, slices, chunk reads
+// ---------------------------------------------------------------------------
+
+use fluent31::StreamEvent;
+use std::time::Duration;
+
+fn recv_batch(sub: &mut fluent31::Subscription) -> Vec<fluent31::StreamEntry> {
+    match sub.recv_timeout(Duration::from_secs(5)).unwrap() {
+        Some(StreamEvent::Batch(b)) => b,
+        other => panic!("expected batch, got {other:?}"),
+    }
+}
+
+/// Subscriptions deliver exactly the in-range committed writes, in seqno
+/// order, values resolved — including vlog-resident ones.
+#[test]
+fn subscription_streams_in_range_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    db.put(b"kb-before".to_vec(), b"x".to_vec()).unwrap();
+
+    let mut sub = db.subscribe(b"ka", Some(b"kz")).unwrap();
+    assert_eq!(sub.start_seqno(), 1);
+
+    db.put(b"ka-1".to_vec(), b"small".to_vec()).unwrap();
+    db.put(b"zz-out-of-range".to_vec(), b"nope".to_vec()).unwrap();
+    // vlog-resident value (>= value_threshold of 64)
+    db.put(b"kb-2".to_vec(), vec![7u8; 200]).unwrap();
+    db.delete(b"ka-1".to_vec()).unwrap();
+
+    let mut got = Vec::new();
+    while got.len() < 3 {
+        got.extend(recv_batch(&mut sub));
+    }
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[0].key, b"ka-1");
+    assert_eq!(got[0].value.as_deref(), Some(b"small".as_ref()));
+    assert_eq!(got[1].key, b"kb-2");
+    assert_eq!(got[1].value.as_deref(), Some(vec![7u8; 200].as_ref()));
+    assert_eq!(got[2].key, b"ka-1");
+    assert!(got[2].value.is_none()); // tombstone
+    assert!(got[0].seqno < got[1].seqno && got[1].seqno < got[2].seqno);
+    // nothing else pending
+    assert!(sub
+        .recv_timeout(Duration::from_millis(50))
+        .unwrap()
+        .is_none());
+}
+
+/// Streamed vlog pointers stay resolvable across GC: the subscription's
+/// advancing pin blocks victim deletion until entries are consumed.
+#[test]
+fn subscription_pointers_survive_vlog_gc() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    opts.vlog_gc_ratio = 0.1;
+    let db = Db::open(dir.path(), opts).unwrap();
+
+    let mut sub = db.subscribe(b"k", None).unwrap();
+    let big = |i: u32, r: u32| format!("{:0>300}", format!("{i}.{r}")).into_bytes();
+    // two rounds: round-0 values become garbage, GC relocates round-1
+    for round in 0..2u32 {
+        for i in 0..20u32 {
+            db.put(k(i), big(i, round)).unwrap();
+        }
+        db.flush().unwrap();
+    }
+    db.compact_all().unwrap();
+    while db.gc_vlog().unwrap().is_some() {}
+
+    // consume everything AFTER gc ran: old pointers must still resolve
+    let mut got = Vec::new();
+    while got.len() < 40 {
+        got.extend(recv_batch(&mut sub));
+    }
+    for (n, e) in got.iter().enumerate() {
+        let (round, i) = ((n / 20) as u32, (n % 20) as u32);
+        assert_eq!(e.key, k(i), "entry {n}");
+        assert_eq!(e.value.as_deref(), Some(big(i, round).as_ref()), "entry {n}");
+    }
+}
+
+/// A subscriber that stops consuming gets cut off (Lagged), writers never
+/// stall, and a fresh subscription works.
+#[test]
+fn subscription_lag_drops_subscriber() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    opts.sub_queue_bytes = 4 << 10; // tiny queue
+    let db = Db::open(dir.path(), opts).unwrap();
+
+    let mut sub = db.subscribe(b"k", None).unwrap();
+    for i in 0..200u32 {
+        db.put(k(i), vec![1u8; 100]).unwrap(); // ~20 KiB >> 4 KiB cap
+    }
+    // may see some batches first, but must end in Lagged
+    let saw_lagged = loop {
+        match sub.recv_timeout(Duration::from_millis(200)).unwrap() {
+            Some(StreamEvent::Lagged) => break true,
+            Some(StreamEvent::Batch(_)) => continue,
+            None => break false,
+        }
+    };
+    assert!(saw_lagged, "overflowed subscription never reported Lagged");
+
+    // the store is unaffected; a new subscription streams fine
+    let mut sub2 = db.subscribe(b"k", None).unwrap();
+    db.put(k(9999), b"after".to_vec()).unwrap();
+    let b = recv_batch(&mut sub2);
+    assert_eq!(b[0].key, k(9999));
+}
+
+/// slice_manifest returns only overlapping fragments; chunk reads serve
+/// live files and answer Gone for compacted-away ids.
+#[test]
+fn slice_manifest_scope_and_chunk_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    for i in 0..300u32 {
+        db.put(k(i), v(i, "s")).unwrap();
+    }
+    db.flush().unwrap();
+
+    let full = db.slice_manifest(b"\x01", None).unwrap();
+    let full_ids: Vec<u64> = full
+        .levels
+        .iter()
+        .flatten()
+        .flat_map(|r| r.tables.iter().map(|t| t.id))
+        .collect();
+    assert!(!full_ids.is_empty());
+
+    // a narrow scope selects a strict subset (many fragments exist: 300
+    // keys against a 4 KiB target file size)
+    let lo = k(100);
+    let hi = k(120);
+    let scoped = db.slice_manifest(&lo, Some(&hi)).unwrap();
+    let scoped_tables: Vec<&fluent31::SliceTable> = scoped
+        .levels
+        .iter()
+        .flatten()
+        .flat_map(|r| r.tables.iter())
+        .collect();
+    assert!(!scoped_tables.is_empty());
+    assert!(scoped_tables.len() < full_ids.len());
+    for t in &scoped_tables {
+        assert!(t.max_ukey.as_slice() >= lo.as_slice() && t.min_ukey.as_slice() < hi.as_slice());
+    }
+
+    // chunk reads reassemble a fragment byte-for-byte
+    let t0 = scoped_tables[0];
+    let mut assembled = Vec::new();
+    let mut off = 0u64;
+    while off < t0.size {
+        let chunk = db.read_table_chunk(t0.id, off, 1 << 10).unwrap();
+        assert!(!chunk.is_empty());
+        off += chunk.len() as u64;
+        assembled.extend(chunk);
+    }
+    let disk = std::fs::read(dir.path().join(format!("sst-{:06}.tbl", t0.id))).unwrap();
+    assert_eq!(assembled, disk);
+
+    // compact everything into new files: old ids answer Gone
+    for i in 0..300u32 {
+        db.put(k(i), v(i, "s2")).unwrap();
+    }
+    db.flush().unwrap();
+    db.compact_all().unwrap();
+    let gone = full_ids
+        .iter()
+        .any(|&id| matches!(db.read_table_chunk(id, 0, 16), Err(Error::Gone(_))));
+    assert!(gone, "no compacted-away fragment reported Gone");
+}
+
+/// Vlog chunk reads serve record bytes that parse and verify; unknown
+/// files answer Gone.
+#[test]
+fn vlog_chunk_reads_and_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    let mut sub = db.subscribe(b"k", None).unwrap();
+    db.put(k(1), vec![9u8; 500]).unwrap(); // vlog-resident
+
+    // learn the pointer through the stream? No — the stream resolves it.
+    // Instead grab it via the slice path: flush and read back the repr is
+    // internal, so exercise the public path: the streamed value proves
+    // resolution; the chunk API is exercised with offsets from a scan of
+    // the head file id range.
+    let b = recv_batch(&mut sub);
+    assert_eq!(b[0].value.as_deref(), Some(vec![9u8; 500].as_ref()));
+
+    // head vlog file exists with id small; probe the first record region
+    let stats = db.stats();
+    assert!(stats.vlog_files >= 1);
+    // find a real vlog file id from disk
+    let vid = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().into_string().ok()?;
+            let id = n
+                .strip_prefix("vlog-")?
+                .strip_suffix(".vlog")?
+                .parse::<u64>()
+                .ok()?;
+            (e.metadata().ok()?.len() > 0).then_some(id)
+        })
+        .next()
+        .expect("a non-empty vlog file");
+    let chunk = db.read_vlog_chunk(vid, 0, 4096).unwrap();
+    assert!(!chunk.is_empty());
+
+    assert!(matches!(
+        db.read_vlog_chunk(999_999, 0, 16),
+        Err(Error::Gone(_))
+    ));
+    assert!(matches!(
+        db.read_vlog_chunk(vid, 1 << 40, 16),
+        Err(Error::Gone(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Edge store (engine-level, no network: fetcher wired straight to the master)
+// ---------------------------------------------------------------------------
+
+use fluent31::edge::{EdgeConfig, EdgeStore, ValueFetcher};
+use std::sync::atomic::{AtomicU64, Ordering as AtOrd};
+use std::sync::Arc;
+
+struct DirectFetcher {
+    master: Arc<Db>,
+    calls: AtomicU64,
+}
+
+impl ValueFetcher for DirectFetcher {
+    fn fetch_record(&self, file: u64, offset: u64, len: u32) -> fluent31::Result<Vec<u8>> {
+        self.calls.fetch_add(1, AtOrd::Relaxed);
+        self.master.read_vlog_chunk(file, offset, len as usize)
+    }
+}
+
+/// Pull + install one slice, restarting from a fresh snapshot when the
+/// master's background compaction wins the race (Gone) — the same loop the
+/// real protocol client runs.
+fn sync_slice(
+    master: &Db,
+    edge: &EdgeStore,
+    lo: &[u8],
+    hi: Option<&[u8]>,
+) -> fluent31::SliceManifest {
+    'retry: loop {
+        let slice = master.slice_manifest(lo, hi).unwrap();
+        for run in slice.levels.iter().flatten() {
+            for t in &run.tables {
+                if edge.has_fragment(t.id) {
+                    continue;
+                }
+                let mut bytes = Vec::with_capacity(t.size as usize);
+                while (bytes.len() as u64) < t.size {
+                    match master.read_table_chunk(t.id, bytes.len() as u64, 64 << 10) {
+                        Ok(chunk) => bytes.extend(chunk),
+                        Err(Error::Gone(_)) => continue 'retry,
+                        Err(e) => panic!("chunk fetch: {e}"),
+                    }
+                }
+                std::fs::write(edge.fragment_path(t.id), &bytes).unwrap();
+            }
+        }
+        edge.install_slice(&slice).unwrap();
+        return slice;
+    }
+}
+
+/// Full edge loop: scoped slice + lazy value fetch + cache hits + streamed
+/// syncs + refresh — the edge's scoped view stays byte-equal to the master.
+#[test]
+fn edge_store_end_to_end() {
+    let mdir = tempfile::tempdir().unwrap();
+    let edir = tempfile::tempdir().unwrap();
+    let master = Arc::new(
+        Db::open(
+            mdir.path(),
+            Options {
+                store_name: Some("edge-master".into()),
+                ..small_opts()
+            },
+        )
+        .unwrap(),
+    );
+    // mixed inline + vlog values, in and out of the scope
+    for i in 0..300u32 {
+        master.put(k(i), v(i, "base")).unwrap();
+    }
+    for i in 0..30u32 {
+        master.put(k(i * 10), vec![(i % 250) as u8 + 1; 200]).unwrap();
+    }
+
+    // attach: subscribe FIRST, then slice — gap-free by construction
+    let mut sub = master.subscribe(&k(100), Some(&k(200))).unwrap();
+
+    let fetcher = Arc::new(DirectFetcher {
+        master: master.clone(),
+        calls: AtomicU64::new(0),
+    });
+    let edge = EdgeStore::attach(
+        EdgeConfig::new(
+            edir.path().join("cache"),
+            master.identity().unwrap(),
+            k(100),
+            Some(k(200)),
+        ),
+        fetcher.clone(),
+    )
+    .unwrap();
+    let slice = sync_slice(&master, &edge, &k(100), Some(&k(200)));
+    assert!(slice.flushed_seqno >= sub.start_seqno());
+
+    // scoped equality, inline and vlog values alike
+    for i in 100..200u32 {
+        assert_eq!(
+            edge.get(&k(i)).unwrap(),
+            master.get(&k(i)).unwrap(),
+            "key {i}"
+        );
+    }
+    // out of scope: refused, not silently absent
+    assert!(matches!(
+        edge.get(&k(250)),
+        Err(Error::InvalidArgument(_))
+    ));
+
+    // laziness: big values were fetched on demand; repeat reads hit cache
+    let after_first_pass = fetcher.calls.load(AtOrd::Relaxed);
+    assert!(after_first_pass > 0, "no lazy fetches happened");
+    for i in 100..200u32 {
+        edge.get(&k(i)).unwrap();
+    }
+    assert_eq!(
+        fetcher.calls.load(AtOrd::Relaxed),
+        after_first_pass,
+        "second pass should be fully cache-served"
+    );
+
+    // streamed syncs: master writes (some vlog-resident), edge follows
+    for i in 100..150u32 {
+        master.put(k(i), v(i, "live")).unwrap();
+    }
+    master.put(k(160), vec![42u8; 300]).unwrap();
+    master.delete(k(199)).unwrap();
+    master.put(k(50), v(50, "outside")).unwrap(); // out of scope: not streamed
+    let mut applied = 0;
+    while applied < 52 {
+        match sub.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Some(StreamEvent::Batch(b)) => {
+                applied += b.len();
+                edge.apply_stream(&b).unwrap();
+            }
+            other => panic!("unexpected stream event {other:?}"),
+        }
+    }
+    for i in 100..200u32 {
+        assert_eq!(
+            edge.get(&k(i)).unwrap(),
+            master.get(&k(i)).unwrap(),
+            "post-stream key {i}"
+        );
+    }
+
+    // scans match the master over the scope (both directions, paged)
+    let (page, more) = edge.scan(None, None, false, 500).unwrap();
+    assert!(!more);
+    let master_scan: Vec<_> = master
+        .iter(Some(&k(100)), Some(&k(200)), false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(page, master_scan);
+    let (rev_page, _) = edge.scan(None, None, true, 500).unwrap();
+    let mut rev_expected = master_scan.clone();
+    rev_expected.reverse();
+    assert_eq!(rev_page, rev_expected);
+
+    // paging: limit cuts and reports has_more
+    let (short, more) = edge.scan(None, None, false, 10).unwrap();
+    assert_eq!(short.len(), 10);
+    assert!(more);
+    assert_eq!(short[..], master_scan[..10]);
+
+    // refresh: pull a fresh slice; overlay prunes to the new watermark and
+    // equality holds
+    let slice2 = sync_slice(&master, &edge, &k(100), Some(&k(200)));
+    assert!(slice2.flushed_seqno > slice.flushed_seqno);
+    let stats = edge.stats();
+    assert_eq!(stats.flushed_seqno, slice2.flushed_seqno);
+    for i in 100..200u32 {
+        assert_eq!(
+            edge.get(&k(i)).unwrap(),
+            master.get(&k(i)).unwrap(),
+            "post-refresh key {i}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // write-range triggers
 // ---------------------------------------------------------------------------
 

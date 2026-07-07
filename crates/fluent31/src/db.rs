@@ -22,6 +22,7 @@ use crate::cache::BlockCache;
 use crate::checkpoint::CheckpointInfo;
 use crate::config::{DbPaths, Options, SyncMode};
 use crate::error::{corrupt, Error, Result};
+use crate::identity::StoreIdentity;
 use crate::io::{self, Io};
 use crate::iter::DbIterator;
 use crate::manifest::{self, ManifestData, RunMeta};
@@ -171,6 +172,9 @@ pub(crate) struct DbInner {
     pub io: Arc<dyn Io>,
     pub backend_name: &'static str,
     pub cache: Arc<BlockCache>,
+    /// Resolved at open (verified / adopted / fork-minted), immutable for
+    /// the process lifetime; also persisted inside the manifest data.
+    pub identity: Option<StoreIdentity>,
 
     pub state: RwLock<DbState>,
     pub write_mu: Mutex<WriteState>,
@@ -198,6 +202,14 @@ pub(crate) struct DbInner {
     /// `compact_all` must never pick/merge concurrently (both would grab the
     /// same input runs).
     pub compaction_mu: Mutex<()>,
+
+    /// Replication stream subscribers (see the replication-surface section
+    /// at the bottom of this file). Lock order: a leaf taken under
+    /// `write_mu` by the publisher; each subscriber's queue mutex nests
+    /// inside it. `subs_active` lets the write path skip the lock entirely
+    /// when nothing is subscribed.
+    pub subs: Mutex<Vec<Arc<SubShared>>>,
+    pub subs_active: AtomicBool,
 
     pub shutdown: AtomicBool,
     pub commit_signal: Signal,
@@ -625,6 +637,7 @@ impl DbInner {
         }
         self.visible_seqno
             .store(base + entries.len() as u64 - 1, Ordering::Release);
+        self.publish_stream(base, &entries);
 
         // 4. rotations. The write is durable and published: the ack stands
         // even if rotation fails — the store degrades instead.
@@ -852,6 +865,9 @@ impl DbInner {
                 last_base + last_entries.len() as u64 - 1,
                 Ordering::Release,
             );
+            for (_, base, entries) in &appended {
+                self.publish_stream(*base, entries);
+            }
 
             // ---- phase 6: rotations, once per group ----------------------
             // skipped after a mid-group hard failure: rotating would seal a
@@ -1248,6 +1264,14 @@ impl Db {
 
     pub fn begin(&self) -> Txn {
         Txn::new(self.inner.clone())
+    }
+
+    // ------------------------------------------------------------ identity
+
+    /// The store's identity (name, deterministic instance id, lineage), or
+    /// `None` for an unnamed store. Fixed for the process lifetime.
+    pub fn identity(&self) -> Option<StoreIdentity> {
+        self.inner.identity.clone()
     }
 
     // --------------------------------------------------------- maintenance
@@ -1682,6 +1706,12 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
     let nlevels = opts.max_levels.max(mdata.levels.len()).max(1);
     mdata.levels.resize(nlevels, Vec::new());
 
+    // ---- store identity: verify / adopt / mint a pending fork --------------
+    // (persisted by the open-completion manifest write below; deterministic
+    // derivation makes a crash before that write harmless — the next open
+    // re-mints the exact same id)
+    resolve_identity(&mut mdata, opts.store_name.as_deref())?;
+
     // remove orphaned manifests (older gens and pre-flip crashed newer gens)
     if let Ok(rd) = std::fs::read_dir(dir) {
         for entry in rd.flatten() {
@@ -1897,6 +1927,7 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
     let wasm = WasmRuntime::new(&opts)?;
 
     let inner = Arc::new(DbInner {
+        identity: mdata.identity.clone(),
         opts,
         paths: paths.clone(),
         io: io_backend,
@@ -1928,6 +1959,8 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
         gc_mu: Mutex::new(()),
         gc_sampled_at: Mutex::new(std::collections::HashMap::new()),
         compaction_mu: Mutex::new(()),
+        subs: Mutex::new(Vec::new()),
+        subs_active: AtomicBool::new(false),
         shutdown: AtomicBool::new(false),
         commit_signal: Signal::new(),
         flush_signal: Signal::new(),
@@ -2014,9 +2047,47 @@ fn init_fresh(paths: &DbPaths, _io: &dyn Io) -> Result<()> {
         vlog_head: 0,
         vlog_retired: Vec::new(),
         discard: Vec::new(),
+        identity: None,
+        pending_fork: None,
     };
     manifest::save(paths, 1, &data)?;
     Ok(())
+}
+
+/// Resolve the store identity at open: verify a persisted name against
+/// `Options::store_name`, adopt a name onto an unnamed store, or mint a
+/// pending fork (first read-write open of a checkpoint archive or restored
+/// copy). See identity.rs for why derivation being deterministic makes this
+/// crash-safe without any extra commit ordering.
+fn resolve_identity(mdata: &mut ManifestData, requested: Option<&str>) -> Result<()> {
+    if let Some(name) = requested {
+        crate::identity::validate_store_name(name)?;
+    }
+    if let Some(pf) = mdata.pending_fork.take() {
+        // the fork name was fixed at checkpoint/restore time; an explicit
+        // store_name must agree with it
+        if requested.is_some_and(|r| r != pf.name) {
+            return Err(Error::InvalidArgument(format!(
+                "store_name {:?} conflicts with fork name {:?} fixed at checkpoint/restore",
+                requested.unwrap_or_default(),
+                pf.name
+            )));
+        }
+        mdata.identity = Some(pf.mint());
+        return Ok(());
+    }
+    match (&mdata.identity, requested) {
+        (Some(id), Some(req)) if id.name != req => Err(Error::InvalidArgument(format!(
+            "store is named {:?}; store_name {req:?} does not match",
+            id.name
+        ))),
+        (None, Some(req)) => {
+            // adoption: an existing unnamed store gains its identity once
+            mdata.identity = Some(StoreIdentity::root(req));
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Delete files no durable state references. Runs once at open, after
@@ -2066,6 +2137,375 @@ fn group_byte_cap(first_bytes: usize) -> usize {
         first_bytes + (128 << 10)
     } else {
         1 << 20
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replication surface: range subscriptions (stream tap) + scoped slices
+// ---------------------------------------------------------------------------
+//
+// The master side of edge replication. A `Subscription` delivers committed
+// writes in a key range, values resolved; `slice_manifest` +
+// `read_table_chunk`/`read_vlog_chunk` let a replica copy the scoped part
+// of the flushed tree. Files are NOT pinned for slice readers (a stale
+// reference answers `Error::Gone` and the replica re-pulls); the one pin a
+// subscription holds is a registered snapshot that advances as batches are
+// consumed, which keeps streamed vlog pointers resolvable against GC: a
+// victim retired at seqno S can only be deleted once the watermark passes
+// S, and the pin sits at-or-below the oldest unconsumed entry's seqno.
+
+/// One committed op as published to subscribers (repr unresolved — pointer
+/// resolution happens at consume time, off the write path).
+struct RawEntry {
+    key: Vec<u8>,
+    seqno: SeqNo,
+    kind: ValueKind,
+    repr: Vec<u8>,
+}
+
+struct SubQueue {
+    entries: std::collections::VecDeque<RawEntry>,
+    bytes: usize,
+}
+
+/// Publisher-facing half of a subscription, registered in `DbInner::subs`.
+pub(crate) struct SubShared {
+    lo: Vec<u8>,
+    hi: Option<Vec<u8>>,
+    max_bytes: usize,
+    queue: Mutex<SubQueue>,
+    signal: Signal,
+    /// Set on queue overflow (subscriber lagged) or consumer drop; the
+    /// publisher prunes flagged subscriptions on its next pass.
+    dropped: AtomicBool,
+}
+
+impl SubShared {
+    fn in_range(&self, key: &[u8]) -> bool {
+        key >= self.lo.as_slice() && self.hi.as_deref().is_none_or(|h| key < h)
+    }
+
+    /// Called under `write_mu`, right after the batch became visible.
+    fn offer(&self, base: SeqNo, entries: &[EncEntry]) {
+        let mut pushed = false;
+        let mut q = self.queue.lock();
+        for (i, e) in entries.iter().enumerate() {
+            if !self.in_range(&e.key) {
+                continue;
+            }
+            q.bytes += e.key.len() + e.repr.len() + 32;
+            q.entries.push_back(RawEntry {
+                key: e.key.clone(),
+                seqno: base + i as u64,
+                kind: e.kind,
+                repr: e.repr.clone(),
+            });
+            pushed = true;
+        }
+        if q.bytes > self.max_bytes {
+            // lag policy: cut the subscriber loose, never stall the writer —
+            // a gapped stream is useless, so drop everything buffered too
+            q.entries.clear();
+            q.bytes = 0;
+            self.dropped.store(true, Ordering::Release);
+        }
+        drop(q);
+        if pushed {
+            self.signal.notify();
+        }
+    }
+}
+
+impl DbInner {
+    /// Fan a committed batch out to stream subscribers. Called under
+    /// `write_mu` in both apply paths, immediately after `visible_seqno`
+    /// publication — subscribers therefore observe batches in seqno order
+    /// with no gaps past their start point.
+    pub(crate) fn publish_stream(&self, base: SeqNo, entries: &[EncEntry]) {
+        if !self.subs_active.load(Ordering::Acquire) {
+            return;
+        }
+        let mut subs = self.subs.lock();
+        subs.retain(|s| !s.dropped.load(Ordering::Acquire));
+        for s in subs.iter() {
+            s.offer(base, entries);
+        }
+        self.subs_active.store(!subs.is_empty(), Ordering::Release);
+    }
+}
+
+/// One streamed op, value resolved (`None` for deletes).
+#[derive(Debug, Clone)]
+pub struct StreamEntry {
+    pub key: Vec<u8>,
+    pub seqno: SeqNo,
+    pub kind: ValueKind,
+    pub value: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+pub enum StreamEvent {
+    /// Committed in-range ops, seqno-ascending, gap-free past
+    /// `Subscription::start_seqno`.
+    Batch(Vec<StreamEntry>),
+    /// The subscriber fell behind its queue cap and was cut off; its view
+    /// now has a gap — a fresh subscribe + slice pull is required.
+    Lagged,
+}
+
+/// Consumer half of a range subscription (see `Db::subscribe`).
+pub struct Subscription {
+    db: Arc<DbInner>,
+    shared: Arc<SubShared>,
+    start: SeqNo,
+    pinned: SeqNo,
+}
+
+impl Subscription {
+    /// Every committed write with seqno strictly above this flows through
+    /// the subscription. Pair with a slice pull (whose `flushed_seqno` is
+    /// at least this, guaranteed by subscribing FIRST) for gap-free attach.
+    pub fn start_seqno(&self) -> SeqNo {
+        self.start
+    }
+
+    /// Next batch of streamed entries; `Ok(None)` on timeout. After
+    /// `StreamEvent::Lagged` (or any `Err`) the stream is dead and the
+    /// consumer must re-sync from a fresh subscription.
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<StreamEvent>> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.shared.dropped.load(Ordering::Acquire) {
+                return Ok(Some(StreamEvent::Lagged));
+            }
+            self.db.check_bg_error()?;
+            let raws: Vec<RawEntry> = {
+                let mut q = self.shared.queue.lock();
+                q.bytes = 0;
+                q.entries.drain(..).collect()
+            };
+            if !raws.is_empty() {
+                return Ok(Some(StreamEvent::Batch(self.resolve(raws)?)));
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            self.shared.signal.wait_timeout(deadline - now);
+        }
+    }
+
+    fn resolve(&mut self, raws: Vec<RawEntry>) -> Result<Vec<StreamEntry>> {
+        let view = self.db.read_view();
+        let last = raws.last().map(|r| r.seqno).expect("non-empty batch");
+        let mut out = Vec::with_capacity(raws.len());
+        for r in raws {
+            let value = match r.kind {
+                ValueKind::Put => match self.db.resolve_repr(&view, &r.key, &r.repr) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        // the pin makes this unreachable short of real
+                        // corruption; kill the stream so the consumer
+                        // re-syncs instead of silently missing entries
+                        self.shared.dropped.store(true, Ordering::Release);
+                        return Err(e);
+                    }
+                },
+                ValueKind::Delete => None,
+            };
+            out.push(StreamEntry {
+                key: r.key,
+                seqno: r.seqno,
+                kind: r.kind,
+                value,
+            });
+        }
+        // advance the GC pin: everything <= last is resolved and delivered.
+        // Register the new pin before releasing the old one so the
+        // watermark can never leap past both.
+        self.db.register_snapshot_at(last);
+        self.db.deregister_snapshot(self.pinned);
+        self.pinned = last;
+        Ok(out)
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.shared.dropped.store(true, Ordering::Release);
+        let mut subs = self.db.subs.lock();
+        subs.retain(|s| !Arc::ptr_eq(s, &self.shared));
+        self.db.subs_active.store(!subs.is_empty(), Ordering::Release);
+        drop(subs);
+        self.db.deregister_snapshot(self.pinned);
+    }
+}
+
+/// A table fragment as advertised to replicas: id + key bounds + size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceTable {
+    pub id: u64,
+    pub size: u64,
+    pub min_ukey: Vec<u8>,
+    pub max_ukey: Vec<u8>,
+}
+
+/// A run restricted to the fragments overlapping the requested range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceRun {
+    pub id: u64,
+    pub tables: Vec<SliceTable>,
+}
+
+/// Scoped snapshot of the flushed tree (levels hold runs newest-first,
+/// fragments key-ordered — same shape as the live version).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceManifest {
+    pub flushed_seqno: SeqNo,
+    pub levels: Vec<Vec<SliceRun>>,
+}
+
+impl Db {
+    /// Subscribe to committed writes in `[lo, hi)` (`hi = None` →
+    /// unbounded; `lo` is clamped to the user keyspace). Installation
+    /// holds the write mutex, so delivery is gap-free past
+    /// `start_seqno()`. The subscription's advancing snapshot pin delays
+    /// vlog deletion while entries are in flight — an abandoned but
+    /// undropped subscription holds that pin, so drop what you stop
+    /// consuming.
+    pub fn subscribe(&self, lo: &[u8], hi: Option<&[u8]>) -> Result<Subscription> {
+        let lo = if lo >= USER_KEYSPACE_START {
+            lo.to_vec()
+        } else {
+            USER_KEYSPACE_START.to_vec()
+        };
+        if let Some(h) = hi {
+            if h <= lo.as_slice() {
+                return Err(Error::InvalidArgument(
+                    "subscription range [lo, hi) is empty".into(),
+                ));
+            }
+        }
+        let inner = self.inner.clone();
+        inner.check_bg_error()?;
+        let shared = Arc::new(SubShared {
+            lo,
+            hi: hi.map(|h| h.to_vec()),
+            max_bytes: inner.opts.sub_queue_bytes,
+            queue: Mutex::new(SubQueue {
+                entries: std::collections::VecDeque::new(),
+                bytes: 0,
+            }),
+            signal: Signal::new(),
+            dropped: AtomicBool::new(false),
+        });
+        let start = {
+            // excluding writers makes install atomic: no write can commit
+            // between the seqno read and the registry insert
+            let _ws = inner.write_mu.lock();
+            let v0 = inner.visible_seqno.load(Ordering::Acquire);
+            inner.register_snapshot_at(v0);
+            let mut subs = inner.subs.lock();
+            subs.push(shared.clone());
+            inner.subs_active.store(true, Ordering::Release);
+            v0
+        };
+        Ok(Subscription {
+            db: inner,
+            shared,
+            start,
+            pinned: start,
+        })
+    }
+
+    /// Scoped snapshot of the flushed tree: per run, only the fragments
+    /// overlapping `[lo, hi)`. Flushes first, so every write acked before
+    /// this call is covered — subscribe FIRST, then pull the slice, and
+    /// the (slice, stream) pair covers everything exactly (overlap is
+    /// harmless: entries carry seqnos).
+    pub fn slice_manifest(&self, lo: &[u8], hi: Option<&[u8]>) -> Result<SliceManifest> {
+        self.flush()?;
+        let inner = &self.inner;
+        let (flushed, view) = {
+            let m = inner.manifest.lock();
+            (m.data.last_flushed_seqno, inner.read_view())
+        };
+        let levels = view
+            .version
+            .levels
+            .iter()
+            .map(|runs| {
+                runs.iter()
+                    .filter_map(|r| {
+                        let tables: Vec<SliceTable> = r
+                            .tables
+                            .iter()
+                            .filter(|t| {
+                                t.table.stats.max_ukey() >= lo
+                                    && hi.is_none_or(|h| t.table.stats.min_ukey() < h)
+                            })
+                            .map(|t| SliceTable {
+                                id: t.id,
+                                size: t.size,
+                                min_ukey: t.table.stats.min_ukey().to_vec(),
+                                max_ukey: t.table.stats.max_ukey().to_vec(),
+                            })
+                            .collect();
+                        (!tables.is_empty()).then_some(SliceRun { id: r.id, tables })
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(SliceManifest {
+            flushed_seqno: flushed,
+            levels,
+        })
+    }
+
+    /// Raw bytes of a table fragment still referenced by the live version;
+    /// `Error::Gone` once compaction dropped it (replica: re-pull the
+    /// slice). Nothing is pinned between calls — by design, a replica
+    /// never burdens the master's file lifecycle.
+    pub fn read_table_chunk(&self, table_id: u64, off: u64, len: usize) -> Result<Vec<u8>> {
+        let handle = {
+            let s = self.inner.state.read();
+            let found = s
+                .version
+                .runs_newest_first()
+                .flat_map(|r| r.tables.iter())
+                .find(|t| t.id == table_id)
+                .cloned();
+            found
+        };
+        match handle {
+            Some(t) => t.table.read_chunk(off, len),
+            None => Err(Error::Gone(format!(
+                "table {table_id} left the live version"
+            ))),
+        }
+    }
+
+    /// Raw bytes of a vlog record region. Retired-but-gated victims still
+    /// resolve (they stay in the version map until their deletion gates
+    /// pass); a deleted file is `Gone`.
+    pub fn read_vlog_chunk(&self, file_id: u64, off: u64, len: usize) -> Result<Vec<u8>> {
+        let handle = {
+            let s = self.inner.state.read();
+            s.version.vlogs.get(&file_id).cloned()
+        };
+        let Some(h) = handle else {
+            return Err(Error::Gone(format!("vlog {file_id} left the live version")));
+        };
+        let flen = h.file.len()?;
+        if off >= flen {
+            return Err(Error::Gone(format!(
+                "vlog {file_id} offset {off} beyond end {flen}"
+            )));
+        }
+        let n = (len as u64).min(flen - off) as usize;
+        let mut buf = vec![0u8; n];
+        h.file.read_exact_at(off, &mut buf)?;
+        Ok(buf)
     }
 }
 

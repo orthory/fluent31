@@ -18,6 +18,8 @@ pub fn engine_err(e: fluent31::Error) -> async_graphql::Error {
         E::Background(_) => "BACKGROUND",
         E::Wasm(_) => "WASM",
         E::GuestFailed { .. } => "GUEST_FAILED",
+        E::ProvenanceMismatch(_) => "PROVENANCE_MISMATCH",
+        E::Gone(_) => "GONE",
     };
     let err = async_graphql::Error::new(e.to_string()).extend_with(|_, x| x.set("code", code));
     if let E::GuestFailed { code, output } = e {

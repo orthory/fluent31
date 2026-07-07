@@ -12,7 +12,7 @@ fixes are baked in below and called out where the reasoning is subtle.
 Contents: §1 on-disk layout · §2 write path · §3 tables · §4 LSM shape ·
 §5 manifest/recovery · §6 MVCC & transactions · §7 IO backends · §8 value
 log · §9 WASM layer · §10 checkpoints/PITR · §11 concurrency & locks ·
-§12 testing · §13 tooling & limits.
+§12 testing · §13 tooling & limits · §14 identity & edge replication.
 
 ---
 
@@ -436,3 +436,55 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
   GC relocations bump seqnos, so a hot large-value key can cost a user txn
   a retry; fixed `max_levels` (no dynamic depth); bottom merges rewrite the
   whole bottom level (fragments bound file sizes, not total merge work).
+
+## 14. Store identity & edge replication
+
+**Identity** (`identity.rs`, manifest format 2). A store carries an
+operator-chosen name and a deterministic 128-bit `instance_id`:
+`H(name)` at creation, `H(parent_id ‖ cut_seqno ‖ name)` when a
+checkpoint forks (first read-write open of an archive consumes a
+`pending_fork` marker; `restore_to` requires a fresh name per copy so
+two restores of one archive can never mint the same id). Determinism
+makes minting crash-safe with no commit ordering — a crash before the
+persisting manifest write re-mints the identical id — and makes the
+lineage chain verifiable from metadata. Uniqueness is an operator
+contract (fleet-unique names), like hostnames. Normal restarts keep the
+id: file ids are monotonic and recovery never appends to a pre-crash
+vlog file, so `(file, offset)` never aliases within one lifetime.
+Unnamed stores stay on manifest format 1, readable by older binaries.
+
+**Why identity matters**: replication copies bytes across machines and
+names them by `(file id, offset)` — coordinates unique only within one
+store lifetime. The instance id is the outer qualifier; every replica
+connection verifies it by equality, and a re-minted master (restore,
+fork, replacement) invalidates every remote cache wholesale instead of
+silently serving a divergent history.
+
+**Master surface** (db.rs replication section). `Db::subscribe(lo, hi)`
+taps both apply paths under `write_mu` right after `visible_seqno`
+publication: delivery is seqno-ordered and gap-free past the
+subscription's start (installation also holds `write_mu`). Entries
+carry unresolved reprs; the consumer resolves values off the write path
+against a `ReadView`, protected by an **advancing registered-snapshot
+pin** — a vlog GC victim retired at seqno S is deletable only once the
+watermark passes S, and the pin sits at-or-below the oldest unconsumed
+entry, so streamed pointers always resolve. A subscriber that exceeds
+`sub_queue_bytes` is cut off (Lagged) rather than stalling writers.
+`Db::slice_manifest(lo, hi)` flushes, then reports per run only the
+fragments overlapping the range (id, size, key bounds from pinned
+stats); `read_table_chunk`/`read_vlog_chunk` serve raw bytes from the
+live version and answer `Error::Gone` once compaction/GC dropped the
+file — slice readers pin nothing on the master, by design.
+
+**Edge store** (`edge.rs`) + **channel** (`fluent-replication`,
+REPLICATION.md). The edge copies overlapping fragments locally (bounds +
+size cross-checked at install, blocks CRC-verified as always), applies
+the stream into an in-memory overlay memtable, and resolves values
+inline → local record cache → `ValueFetcher` reach-back; every record
+re-verifies CRC + embedded key before serving or caching. Reads reuse
+the engine's merge/MVCC iterator stack at `MAX_SEQNO` over
+overlay + scoped runs. Slice refreshes prune the overlay to the new
+flush watermark. The replica serves standard wire-v1 reads through
+`fluent_wire::WireBackend`; writes answer INVALID. Re-sync after
+lag/disconnect keeps all local caches (same instance id); a provenance
+mismatch wipes and re-attaches behind an atomic store swap.

@@ -240,10 +240,28 @@ cargo run -p fluent-wire -- ./data --sync periodic:50    # tcp 127.0.0.1:8427
 Spec in [`WIRE.md`](WIRE.md); reference client `fluent_wire::WireClient`.
 GraphQL stays the general/typed/admin plane.
 
+## Edge replication
+
+Small ephemeral read replicas that hold only a key-range slice of one
+master: the overlapping index fragments copied locally, values fetched
+lazily and cached, committed writes streamed in. Provenance is anchored
+on a deterministic store identity — a restored/forked master re-mints
+its instance id and every edge invalidates wholesale instead of serving
+a divergent history.
+
+```sh
+cargo run -p fluent-replication -- master ./data --store-name prod       # tcp 127.0.0.1:8428
+cargo run -p fluent-replication -- edge --master 127.0.0.1:8428 \
+    --dir /tmp/edge-cache --lo user/ --hi user0 --serve 127.0.0.1:8427   # wire-v1 reads
+```
+
+Spec in [`REPLICATION.md`](REPLICATION.md); identity model in
+[`DESIGN.md`](DESIGN.md) §14.
+
 ## Testing
 
 ```sh
-cargo test --workspace           # 130 tests incl. randomized model, group commit, wasm & graphql e2e
+cargo test --workspace           # 178 tests incl. randomized model, group commit, wasm, graphql & replication e2e
 ```
 
 On Linux the suite exercises the io_uring backend automatically. Under
@@ -260,11 +278,12 @@ the WASM layer (no wasmtime).
 ## Crate layout
 
 ```
-crates/fluent31       the engine (lib)
-crates/fluent-guest   guest-side SDK for WASM modules
-crates/fluent-cli     interactive shell
-crates/fluent-graphql GraphQL server (axum + async-graphql)
-crates/fluent-wire    binary wire-protocol server + reference client
+crates/fluent31           the engine (lib), incl. store identity + edge store
+crates/fluent-guest       guest-side SDK for WASM modules
+crates/fluent-cli         interactive shell
+crates/fluent-graphql     GraphQL server (axum + async-graphql)
+crates/fluent-wire        binary wire-protocol server + reference client
+crates/fluent-replication edge replication channel: master server + replica driver
 guests/               example WASM guests (separate workspace): agg, transfer,
                       place_order + top_customers (typed GraphQL demo pair)
 ```

@@ -2,17 +2,25 @@
 //! CURRENT (tmp + fsync + rename + dir fsync at every step).
 //!
 //! `MANIFEST-<gen>`: `[magic u64][format u32][payload][crc32c u32]`.
+//!
+//! Format 2 appends the optional store identity + pending-fork sections;
+//! a manifest carrying neither is written as format 1, so unnamed stores
+//! stay readable by pre-identity binaries.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::coding::{crc32, put_u32, put_u64, put_uvarint, Reader};
+use crate::coding::{crc32, put_len_prefixed, put_u32, put_u64, put_uvarint, Reader};
 use crate::config::DbPaths;
 use crate::error::{corrupt, Error, Result};
+use crate::identity::{InstanceId, PendingFork, StoreIdentity, INSTANCE_ID_LEN};
 use crate::io::{atomic_write, sync_dir};
 
 const MANIFEST_MAGIC: u64 = 0xf115_e731_3aa1_0001;
+/// Base format: structure only.
 const MANIFEST_FORMAT: u32 = 1;
+/// Adds the identity + pending-fork sections after the discard list.
+const MANIFEST_FORMAT_IDENTITY: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RunMeta {
@@ -42,6 +50,12 @@ pub(crate) struct ManifestData {
     pub vlog_retired: Vec<(u64, u64)>,
     /// Discard stats: (vlog_file_id, dead_bytes).
     pub discard: Vec<(u64, u64)>,
+    /// Store identity (name, instance id, lineage); `None` for an unnamed
+    /// store. Immutable once set except through a pending fork.
+    pub identity: Option<StoreIdentity>,
+    /// A fork recorded by checkpoint/restore, consumed (minted into
+    /// `identity`) by the first read-write open. See `identity.rs`.
+    pub pending_fork: Option<PendingFork>,
 }
 
 impl ManifestData {
@@ -81,9 +95,44 @@ impl ManifestData {
             put_u64(&mut p, *b);
         }
 
+        // identity sections only exist in format 2; unnamed stores keep
+        // writing format 1 so pre-identity binaries can still open them
+        let format = if self.identity.is_some() || self.pending_fork.is_some() {
+            MANIFEST_FORMAT_IDENTITY
+        } else {
+            MANIFEST_FORMAT
+        };
+        if format == MANIFEST_FORMAT_IDENTITY {
+            match &self.identity {
+                Some(id) => {
+                    p.push(1);
+                    put_len_prefixed(&mut p, id.name.as_bytes());
+                    p.extend_from_slice(&id.instance_id);
+                    match &id.parent {
+                        Some((pid, cut)) => {
+                            p.push(1);
+                            p.extend_from_slice(pid);
+                            put_u64(&mut p, *cut);
+                        }
+                        None => p.push(0),
+                    }
+                }
+                None => p.push(0),
+            }
+            match &self.pending_fork {
+                Some(pf) => {
+                    p.push(1);
+                    put_len_prefixed(&mut p, pf.name.as_bytes());
+                    p.extend_from_slice(&pf.parent_instance_id);
+                    put_u64(&mut p, pf.cut_seqno);
+                }
+                None => p.push(0),
+            }
+        }
+
         let mut out = Vec::with_capacity(p.len() + 16);
         put_u64(&mut out, MANIFEST_MAGIC);
-        put_u32(&mut out, MANIFEST_FORMAT);
+        put_u32(&mut out, format);
         out.extend_from_slice(&p);
         let crc = crc32(&out);
         put_u32(&mut out, crc);
@@ -104,7 +153,7 @@ impl ManifestData {
             return Err(corrupt("bad manifest magic"));
         }
         let format = r.u32()?;
-        if format != MANIFEST_FORMAT {
+        if !(MANIFEST_FORMAT..=MANIFEST_FORMAT_IDENTITY).contains(&format) {
             return Err(corrupt(format!("unsupported manifest format {format}")));
         }
         let next_file_id = r.u64()?;
@@ -142,6 +191,36 @@ impl ManifestData {
         for _ in 0..nd {
             discard.push((r.u64()?, r.u64()?));
         }
+        let mut identity = None;
+        let mut pending_fork = None;
+        if format >= MANIFEST_FORMAT_IDENTITY {
+            let read_id = |r: &mut Reader| -> Result<InstanceId> {
+                Ok(r.bytes(INSTANCE_ID_LEN)?.try_into().unwrap())
+            };
+            if r.u8()? == 1 {
+                let name = String::from_utf8(r.len_prefixed()?.to_vec())
+                    .map_err(|_| corrupt("store name is not UTF-8"))?;
+                let instance_id = read_id(&mut r)?;
+                let parent = match r.u8()? {
+                    0 => None,
+                    _ => Some((read_id(&mut r)?, r.u64()?)),
+                };
+                identity = Some(StoreIdentity {
+                    name,
+                    instance_id,
+                    parent,
+                });
+            }
+            if r.u8()? == 1 {
+                let name = String::from_utf8(r.len_prefixed()?.to_vec())
+                    .map_err(|_| corrupt("fork name is not UTF-8"))?;
+                pending_fork = Some(PendingFork {
+                    parent_instance_id: read_id(&mut r)?,
+                    cut_seqno: r.u64()?,
+                    name,
+                });
+            }
+        }
         Ok(ManifestData {
             next_file_id,
             last_flushed_seqno,
@@ -151,6 +230,8 @@ impl ManifestData {
             vlog_head,
             vlog_retired,
             discard,
+            identity,
+            pending_fork,
         })
     }
 }
@@ -217,12 +298,44 @@ mod tests {
             vlog_head: 13,
             vlog_retired: vec![(1, 900)],
             discard: vec![(2, 4096)],
+            identity: None,
+            pending_fork: None,
         }
     }
 
     #[test]
     fn encode_decode_roundtrip() {
         let d = sample();
+        let enc = d.encode();
+        assert_eq!(ManifestData::decode(&enc).unwrap(), d);
+    }
+
+    /// A manifest without identity stays format 1 (readable by pre-identity
+    /// binaries); identity/fork sections bump it to format 2 and roundtrip.
+    #[test]
+    fn identity_sections_roundtrip_and_format_gate() {
+        let plain = sample().encode();
+        assert_eq!(u32::from_le_bytes(plain[8..12].try_into().unwrap()), 1);
+
+        let mut d = sample();
+        d.identity = Some(StoreIdentity::root("prod"));
+        let enc = d.encode();
+        assert_eq!(u32::from_le_bytes(enc[8..12].try_into().unwrap()), 2);
+        assert_eq!(ManifestData::decode(&enc).unwrap(), d);
+
+        // fork lineage + pending fork together (a forked store checkpointing)
+        let parent = StoreIdentity::root("main");
+        d.identity = Some(PendingFork {
+            parent_instance_id: parent.instance_id,
+            cut_seqno: 7,
+            name: "fork1".into(),
+        }
+        .mint());
+        d.pending_fork = Some(PendingFork {
+            parent_instance_id: d.identity.as_ref().unwrap().instance_id,
+            cut_seqno: 900,
+            name: "fork2".into(),
+        });
         let enc = d.encode();
         assert_eq!(ManifestData::decode(&enc).unwrap(), d);
     }

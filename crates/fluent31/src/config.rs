@@ -48,6 +48,13 @@ pub struct Options {
     pub sync: SyncMode,
     pub io_backend: IoBackend,
 
+    /// Operator-chosen, fleet-unique store name. Fixes the deterministic
+    /// store identity (see `identity.rs`): used at creation to mint it, on
+    /// reopen it must match the persisted name, and an existing unnamed
+    /// store adopts it once. Replication requires a named store; purely
+    /// embedded use can leave this `None`.
+    pub store_name: Option<String>,
+
     /// Freeze + flush the memtable once its in-memory footprint passes this.
     pub memtable_size: usize,
     /// Max frozen (unflushed) memtables before writers stall.
@@ -92,6 +99,11 @@ pub struct Options {
     /// executor writes).
     pub max_txn_write_bytes: usize,
 
+    /// Cap on buffered, not-yet-consumed bytes per replication
+    /// subscription; a subscriber that falls further behind is dropped
+    /// (it must re-sync) instead of growing an unbounded queue.
+    pub sub_queue_bytes: usize,
+
     /// Fuel budget per WASM invocation (roughly: abstract instructions).
     pub wasm_fuel: u64,
     /// Max linear memory a WASM invocation may grow to, in bytes.
@@ -119,6 +131,7 @@ impl Default for Options {
             create_if_missing: true,
             sync: SyncMode::Always,
             io_backend: IoBackend::Auto,
+            store_name: None,
             memtable_size: 8 << 20,
             max_immutable_memtables: 2,
             block_size: 8 << 10,
@@ -136,6 +149,7 @@ impl Default for Options {
             max_key_size: 16 << 10,
             max_value_size: 256 << 20,
             max_txn_write_bytes: 256 << 20,
+            sub_queue_bytes: 8 << 20,
             wasm_fuel: 1_000_000_000,
             wasm_memory_limit: 64 << 20,
             execute_retries: 3,

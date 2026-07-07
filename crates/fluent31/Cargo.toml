@@ -8,6 +8,8 @@ description = "LSM key-value engine with MVCC, io_uring IO, and in-database WASM
 crossbeam-skiplist = "0.1"
 parking_lot = "0.12"
 crc32fast = "1"
+# deterministic store identity (identity.rs): truncated SHA-256 lineage hash
+sha2 = "0.10"
 lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 wasmtime = { version = "46.0.1", default-features = false, features = ["runtime", "cranelift", "wat"], optional = true }
 
