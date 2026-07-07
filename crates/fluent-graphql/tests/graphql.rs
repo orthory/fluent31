@@ -1308,3 +1308,111 @@ async fn modules_and_checkpoints_are_nonnull_item_lists() {
     assert!(sdl.contains("modules: [Module!]"), "{sdl}");
     assert!(sdl.contains("checkpoints: [Checkpoint!]"), "{sdl}");
 }
+
+// ---------------------------------------------------------------------------
+// write-range triggers
+// ---------------------------------------------------------------------------
+
+/// Trigger target: mirrors every touched key `<k>` (single-byte uvarint
+/// lengths) to `m/<k>` with the key bytes as value.
+const MIRROR_WAT: &str = r#"
+(module
+  (import "fluent" "input_len" (func $ilen (result i32)))
+  (import "fluent" "input_read" (func $iread (param i32 i32 i32) (result i32)))
+  (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (func (export "run") (result i32)
+    (local $len i32) (local $off i32) (local $klen i32)
+    (local.set $len (call $ilen))
+    (drop (call $iread (i32.const 1024) (local.get $len) (i32.const 0)))
+    (local.set $off (i32.const 0))
+    (block $done
+      (loop $next
+        (br_if $done (i32.ge_u (local.get $off) (local.get $len)))
+        (local.set $klen (i32.load8_u (i32.add (i32.const 1024) (local.get $off))))
+        (local.set $off (i32.add (local.get $off) (i32.const 1)))
+        (i32.store8 (i32.const 8192) (i32.const 109))
+        (i32.store8 (i32.const 8193) (i32.const 47))
+        (memory.copy (i32.const 8194)
+                     (i32.add (i32.const 1024) (local.get $off))
+                     (local.get $klen))
+        (drop (call $put (i32.const 8192) (i32.add (local.get $klen) (i32.const 2))
+                         (i32.add (i32.const 1024) (local.get $off)) (local.get $klen)))
+        (local.set $off (i32.add (local.get $off) (local.get $klen)))
+        (br $next)))
+    (i32.const 0)))
+"#;
+
+#[tokio::test]
+async fn trigger_lifecycle_and_async_fire() {
+    let (schema, _dir) = open_schema();
+    run(
+        &schema,
+        r#"mutation Install($w: BytesInput!) { installModule(name: "mirror", wasm: $w) { name } }"#,
+        json!({"w": {"text": MIRROR_WAT}}),
+    )
+    .await;
+    run(
+        &schema,
+        r#"mutation { createTrigger(name: "t", module: "mirror",
+                                    lo: {text: "u/"}, hi: {text: "v"}) }"#,
+        json!({}),
+    )
+    .await;
+
+    let d = run(
+        &schema,
+        r#"{ triggers { name module lo { text } hi { text } pending lastError } }"#,
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        d["triggers"],
+        json!([{"name": "t", "module": "mirror", "lo": {"text": "u/"},
+                "hi": {"text": "v"}, "pending": "0", "lastError": null}])
+    );
+
+    run(
+        &schema,
+        r#"mutation { put(key: {text: "u/a"}, value: {text: "1"}) }"#,
+        json!({}),
+    )
+    .await;
+    // the trigger fires asynchronously behind the write: poll for its effect
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let d = run(&schema, r#"{ get(key: {text: "m/u/a"}) { text } }"#, json!({})).await;
+        if !d["get"].is_null() {
+            assert_eq!(d["get"]["text"], json!("u/a"));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "trigger did not fire within 10s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    run(&schema, r#"mutation { deleteTrigger(name: "t") }"#, json!({})).await;
+    let d = run(&schema, r#"{ triggers { name } }"#, json!({})).await;
+    assert_eq!(d["triggers"], json!([]));
+}
+
+#[tokio::test]
+async fn trigger_admin_errors_carry_engine_codes() {
+    let (schema, _dir) = open_schema();
+    let errs = run_err(
+        &schema,
+        r#"mutation { createTrigger(name: "t", module: "missing") }"#,
+        json!({}),
+    )
+    .await;
+    assert_eq!(ext_code(&errs).as_deref(), Some("INVALID_ARGUMENT"));
+    let errs = run_err(
+        &schema,
+        r#"mutation { deleteTrigger(name: "nope") }"#,
+        json!({}),
+    )
+    .await;
+    assert_eq!(ext_code(&errs).as_deref(), Some("INVALID_ARGUMENT"));
+}

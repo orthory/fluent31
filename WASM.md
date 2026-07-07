@@ -19,7 +19,7 @@ two modes:
 | Mode | Entry | Access | Invoked via |
 |---|---|---|---|
 | **query** | `run` | read-only at a pinned MVCC snapshot; `put`/`delete` return `EROFS` | `Db::query`, GraphQL `wasm(module:, input:)`, or its own typed Query field |
-| **executor** | `run` | a fresh optimistic transaction; guest exit `0` commits, anything else aborts | `Db::execute`, GraphQL `wasmExecute(module:, input:)`, or its own typed Mutation field |
+| **executor** | `run` | a fresh optimistic transaction; guest exit `0` commits, anything else aborts | `Db::execute`, GraphQL `wasmExecute(module:, input:)`, its own typed Mutation field — or by the engine itself as a **write-range trigger** (section 8) |
 
 **Executor retry semantics (critical):** on commit conflict the WHOLE
 attempt is discarded and re-run against a fresh snapshot — fresh Store,
@@ -281,10 +281,11 @@ reference scalars only. `output` may reference a declared type.
   starting with `__` (only relevant for described modules; undescribed
   ones keep the engine's looser `[A-Za-z0-9._-]` rule);
 - module name must not shadow a built-in root field (`get`, `scan`,
-  `wasm`, `modules`, `stats`, `checkpoints`, `snapshotSeqno`, `put`,
-  `delete`, `writeBatch`, `wasmExecute`, `installModule`,
-  `uninstallModule`, `checkpoint`, `deleteCheckpoint`, `flush`,
-  `compactAll`, `gcVlog`, `reloadSchema`, `syncWal`);
+  `wasm`, `modules`, `stats`, `checkpoints`, `triggers`, `snapshotSeqno`,
+  `put`, `delete`, `writeBatch`, `wasmExecute`, `installModule`,
+  `uninstallModule`, `createTrigger`, `deleteTrigger`, `checkpoint`,
+  `deleteCheckpoint`, `flush`, `compactAll`, `gcVlog`, `reloadSchema`,
+  `syncWal`);
 - declared type names must not be reserved (`Query`, `Mutation`,
   `Subscription`, `Bytes`, `BytesInput`, `U64`, `Json`, `Pair`,
   `ScanPage`, `Module`, `Checkpoint`, `GcResult`, `LevelStats`, `Stats`,
@@ -350,6 +351,7 @@ declaration.
 | `guests/top_customers` | query | typed output list, `scan_prefix` aggregation at a snapshot, limit clamping |
 | `guests/agg` | query (untyped) | raw-bytes input/output, chunked scan aggregation |
 | `guests/transfer` | execute (untyped) | OCC transfer with conflict retries |
+| `guests/customer_index` | execute (trigger) | trigger-maintained secondary index: `trigger_keys()`, reconcile-against-current-state, the back-pointer pattern for updates/deletes |
 | `crates/fluent-graphql/tests/graphql.rs` | — | minimal WAT modules incl. `describe` exports (`wat_typed`) |
 
 Demo end-to-end (server running): `scripts/demo-orders.sh` builds,
@@ -373,3 +375,66 @@ installs, seeds, and queries the typed pair.
 8. Test: happy path, each failure exit, concurrency if executor
    (`tokio::spawn` N parallel calls; assert no lost updates), and restart
    (typed field must reappear — the server re-describes at startup).
+
+## 8. Write-range triggers
+
+A trigger binds an installed **executor** module to a user-key range: the
+engine invokes it asynchronously after every committed write (put OR
+delete, from any writer — plain puts, batches, transactions, other
+executors) that touches `[lo, hi)`. This is the schema-free way to build
+custom indexes and materialized views: no declared columns, just a key
+range and code.
+
+```
+Db::create_trigger(name, module, lo, hi)   # None/omitted bound = open end
+Db::delete_trigger(name)                   # discards pending events
+Db::list_triggers()                        # pending count + lastError
+
+CLI:      mktrig NAME MODULE [LO|-] [HI|-] | deltrig NAME | triggers
+GraphQL:  createTrigger(name:, module:, lo:, hi:)  deleteTrigger(name:)
+          triggers { name module lo{..} hi{..} pending lastError }
+```
+
+Trigger names follow module-name rules (`[A-Za-z0-9._-]`, max 64). The
+module must exist at registration. One module may back many triggers.
+
+### The contract your `run` must satisfy
+
+- **Input is packed touched keys**: `[klen uvarint][key bytes]` repeated —
+  `fluent_guest::trigger_keys()` parses it. Up to `trigger_batch`
+  (default 512) keys per invocation.
+- **An event means "this key was touched", not "here is what happened".**
+  Events carry no values, no op kind, no order: re-touches of one key
+  coalesce into a single pending event while a backlog exists. Read the
+  key at your snapshot and reconcile: present → upsert your derived state,
+  absent → remove it. Written this way your module is convergent — safe
+  under replay, coalescing, and reordering.
+- **Updates and deletes need a back-pointer.** The event doesn't tell you
+  the OLD value, so you cannot find a stale index entry from the record
+  alone. Maintain your own reverse mapping (e.g. `idx/order/<id>` →
+  customer) and use it to unindex — see `guests/customer_index`.
+- **Normal executor rules apply**: your writes buffer in a transaction
+  that commits on exit 0 and retries on conflict, so tolerate
+  re-execution. Non-zero exits abort (nothing is consumed) and surface in
+  `triggers { lastError }`.
+
+### Delivery semantics (what the engine guarantees)
+
+- **Durable capture**: event records commit in the SAME atomic batch as
+  the triggering write — a write that survives a crash fires its trigger
+  after recovery; a write that doesn't, doesn't.
+- **At-least-once invocation, exactly-once effects**: the consumed events
+  are deleted inside your module's own transaction. A crash or conflict
+  re-runs the whole attempt; your committed writes and the events'
+  consumption are inseparable.
+- **No stacking**: writes made by a trigger invocation never generate
+  events — for any trigger, including its own. Trigger chains and loops
+  are impossible; derive everything you need from the one event.
+- **Async lag is real**: the index trails the base data by the backlog.
+  A failing module never loses events — the queue holds, the runner backs
+  off (100ms → 6.4s), and `triggers { pending lastError }` shows both the
+  depth and the reason.
+
+Registered triggers, their queues, and their backlogs are engine state
+(reserved keyspace): versioned, recovered, and checkpoint-archived like
+everything else.

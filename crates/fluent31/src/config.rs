@@ -108,6 +108,9 @@ pub struct Options {
     pub max_wasm_scans: usize,
     /// Cap on compiled modules kept in the in-memory cache.
     pub wasm_module_cache: usize,
+    /// Max touched keys handed to one trigger invocation (the runner drains
+    /// a backlog in chunks of this many events).
+    pub trigger_batch: usize,
 }
 
 impl Default for Options {
@@ -141,6 +144,7 @@ impl Default for Options {
             max_wasm_log: 1 << 20,
             max_wasm_scans: 64,
             wasm_module_cache: 32,
+            trigger_batch: 512,
         }
     }
 }

@@ -18,7 +18,7 @@ use async_graphql::{Error, Name, Value};
 use fluent31::WriteBatch;
 
 use crate::bytes::decode_bytes_input;
-use crate::schema::{manager, pinned_snap, BytesVal, ScanPageVal};
+use crate::schema::{manager, pinned_snap, BytesVal, ScanPageVal, TriggerVal};
 use crate::ModuleStatus;
 
 const DEFAULT_SCAN_LIMIT: i64 = 100;
@@ -313,6 +313,22 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             .description("Point-in-time checkpoint archives (current state, not snapshot-bound)."),
         )
         .field(
+            Field::new("triggers", TypeRef::named_nn_list("Trigger"), |ctx| {
+                FieldFuture::new(async move {
+                    let mgr = manager(&ctx)?;
+                    let db = mgr.db.clone();
+                    let infos = mgr.blocking_read(move || db.list_triggers()).await?;
+                    Ok(Some(FieldValue::list(
+                        infos.into_iter().map(|t| FieldValue::owned_any(TriggerVal(t))),
+                    )))
+                })
+            })
+            .description(
+                "Registered write-range triggers with queue depth and last drain error \
+                 (current state, not snapshot-bound).",
+            ),
+        )
+        .field(
             Field::new("snapshotSeqno", TypeRef::named("U64"), |ctx| {
                 FieldFuture::new(async move {
                     let mgr = manager(&ctx)?;
@@ -454,6 +470,47 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             })
             .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
             .description("Uninstall a WASM module; its typed root field (if any) is removed."),
+        )
+        .field(
+            Field::new("createTrigger", TypeRef::named(TypeRef::BOOLEAN), |ctx| {
+                FieldFuture::new(async move {
+                    let name = arg_string(&ctx, "name")?;
+                    let module = arg_string(&ctx, "module")?;
+                    let lo = opt_arg_bytes(&ctx, "lo")?;
+                    let hi = opt_arg_bytes(&ctx, "hi")?;
+                    let mgr = manager(&ctx)?;
+                    let db = mgr.db.clone();
+                    mgr.blocking_write(move || {
+                        db.create_trigger(&name, &module, lo.as_deref(), hi.as_deref())
+                    })
+                    .await?;
+                    Ok(Some(FieldValue::value(true)))
+                })
+            })
+            .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
+            .argument(InputValue::new("module", TypeRef::named_nn(TypeRef::STRING)))
+            .argument(InputValue::new("lo", TypeRef::named("BytesInput")))
+            .argument(InputValue::new("hi", TypeRef::named("BytesInput")))
+            .description(
+                "Register a write-range trigger: whenever a committed write touches a \
+                 key in [lo, hi) (omit either bound for an open end), the given WASM \
+                 executor module is asynchronously invoked with the touched keys as \
+                 input. Events are durable and consumed exactly once; the module's \
+                 writes never fire further triggers.",
+            ),
+        )
+        .field(
+            Field::new("deleteTrigger", TypeRef::named(TypeRef::BOOLEAN), |ctx| {
+                FieldFuture::new(async move {
+                    let name = arg_string(&ctx, "name")?;
+                    let mgr = manager(&ctx)?;
+                    let db = mgr.db.clone();
+                    mgr.blocking_write(move || db.delete_trigger(&name)).await?;
+                    Ok(Some(FieldValue::value(true)))
+                })
+            })
+            .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
+            .description("Unregister a trigger and discard its pending events."),
         )
         .field(
             Field::new("reloadSchema", TypeRef::named(TypeRef::BOOLEAN), |ctx| {

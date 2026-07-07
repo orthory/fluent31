@@ -85,7 +85,7 @@ pub(crate) struct Signal {
 }
 
 impl Signal {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Signal {
             mu: Mutex::new(false),
             cv: Condvar::new(),
@@ -209,6 +209,9 @@ pub(crate) struct DbInner {
 
     #[cfg(feature = "wasm")]
     pub wasm: WasmRuntime,
+    /// Trigger registry, runner wake signal, and drain status.
+    #[cfg(feature = "wasm")]
+    pub triggers: crate::trigger::TriggerState,
 
     /// Held for the process lifetime to exclude concurrent opens.
     _lock_file: std::fs::File,
@@ -403,6 +406,27 @@ impl DbInner {
 
     pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
         self.validate_batch(&batch)?;
+        // trigger events ride the same batch (atomic through WAL, memtable,
+        // and crash recovery); capture runs after user-key validation so
+        // only accepted logical writes can fire
+        #[cfg(feature = "wasm")]
+        {
+            let mut batch = batch;
+            let events = self.triggers.event_keys(batch.ops.iter().map(|op| match op {
+                BatchOp::Put { key, .. } => key.as_slice(),
+                BatchOp::Delete { key } => key.as_slice(),
+            }));
+            let fired = !events.is_empty();
+            for key in events {
+                batch.put(key, Vec::new());
+            }
+            let r = self.write_batch_unchecked(batch);
+            if fired && r.is_ok() {
+                self.triggers.signal.notify();
+            }
+            r
+        }
+        #[cfg(not(feature = "wasm"))]
         self.write_batch_unchecked(batch)
     }
 
@@ -1149,6 +1173,16 @@ impl Db {
                     .expect("spawn compaction thread"),
             );
         }
+        #[cfg(feature = "wasm")]
+        {
+            let i = inner.clone();
+            threads.push(
+                std::thread::Builder::new()
+                    .name("fluent31-trigger".into())
+                    .spawn(move || crate::trigger::trigger_thread(i))
+                    .expect("spawn trigger thread"),
+            );
+        }
         Ok(Db { inner, threads })
     }
 
@@ -1342,6 +1376,37 @@ impl Db {
         crate::wasm::describe_wasm(&self.inner, wasm)
     }
 
+    // ------------------------------------------------------------ triggers
+
+    /// Register a write-range trigger: whenever a committed write touches a
+    /// user key in `[lo, hi)` (None = unbounded end), the executor module
+    /// `module` is asynchronously invoked with the touched keys as input.
+    /// Events are durable (they commit atomically with the triggering
+    /// write) and consumption is exactly-once — see `Db::list_triggers` for
+    /// backlog and failure visibility.
+    #[cfg(feature = "wasm")]
+    pub fn create_trigger(
+        &self,
+        name: &str,
+        module: &str,
+        lo: Option<&[u8]>,
+        hi: Option<&[u8]>,
+    ) -> Result<()> {
+        crate::trigger::create_trigger(&self.inner, name, module, lo, hi)
+    }
+
+    /// Unregister a trigger and discard its pending events.
+    #[cfg(feature = "wasm")]
+    pub fn delete_trigger(&self, name: &str) -> Result<()> {
+        crate::trigger::delete_trigger(&self.inner, name)
+    }
+
+    /// Registered triggers with queue depth and last drain error.
+    #[cfg(feature = "wasm")]
+    pub fn list_triggers(&self) -> Result<Vec<crate::trigger::TriggerInfo>> {
+        crate::trigger::list_triggers(&self.inner)
+    }
+
     // -------------------------------------------------------- checkpoints
 
     pub fn checkpoint(&self, name: &str) -> Result<CheckpointInfo> {
@@ -1364,6 +1429,8 @@ impl Drop for Db {
         self.inner.flush_signal.notify();
         self.inner.compact_signal.notify();
         self.inner.progress_signal.notify();
+        #[cfg(feature = "wasm")]
+        self.inner.triggers.signal.notify();
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
@@ -1869,6 +1936,8 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
         bg_error: Mutex::new(None),
         #[cfg(feature = "wasm")]
         wasm,
+        #[cfg(feature = "wasm")]
+        triggers: crate::trigger::TriggerState::new(),
         _lock_file: lock_file,
     });
 
@@ -1926,6 +1995,11 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
             }
         }
     }
+
+    // recovered state is fully readable from here: load persisted trigger
+    // definitions so capture is active before the first user write
+    #[cfg(feature = "wasm")]
+    crate::trigger::load_registry(&inner)?;
 
     Ok(inner)
 }
