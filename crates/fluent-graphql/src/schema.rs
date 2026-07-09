@@ -368,6 +368,22 @@ fn trigger_object() -> Object {
             })
         })
         .description("Exclusive range end; null = unbounded."))
+        .field(Field::new(
+            "mode",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                    Ok(Some(FieldValue::value(t.0.mode.as_str())))
+                })
+            },
+        )
+        .description(
+            "How the trigger consumes committed writes: \"keys\" (coalesced \
+             touched keys to the module's `run`) or \"changes\" (the ordered \
+             per-op change feed to its `on_apply`). Detected from the \
+             module's exports at registration.",
+        ))
         .field(Field::new("pending", TypeRef::named_nn("U64"), |ctx| {
             FieldFuture::new(async move {
                 let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;

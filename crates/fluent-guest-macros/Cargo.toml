@@ -1,0 +1,9 @@
+[package]
+name = "fluent-guest-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Attribute macros for fluent31 WASM guest entry points (#[fluent_guest::main], #[fluent_guest::on_apply])"
+
+[lib]
+proc-macro = true

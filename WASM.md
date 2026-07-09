@@ -6,6 +6,7 @@ and a Rust (or WAT) toolchain can produce a working, typed module.
 
 Source of truth if this file ever drifts: `crates/fluent31/src/wasm/abi.rs`
 (host ABI), `crates/fluent-graphql/src/descriptor.rs` (describe spec),
+`crates/fluent31/src/trigger.rs` (trigger event/input encodings),
 `crates/fluent-guest/src/lib.rs` (Rust SDK).
 
 ---
@@ -19,7 +20,8 @@ two modes:
 | Mode | Entry | Access | Invoked via |
 |---|---|---|---|
 | **query** | `run` | read-only at a pinned MVCC snapshot; `put`/`delete` return `EROFS` | `Db::query`, GraphQL `wasm(module:, input:)`, or its own typed Query field |
-| **executor** | `run` | a fresh optimistic transaction; guest exit `0` commits, anything else aborts | `Db::execute`, GraphQL `wasmExecute(module:, input:)`, its own typed Mutation field — or by the engine itself as a **write-range trigger** (section 8) |
+| **executor** | `run` | a fresh optimistic transaction; guest exit `0` commits, anything else aborts | `Db::execute`, GraphQL `wasmExecute(module:, input:)`, its own typed Mutation field — or by the engine itself as a **keys-mode write-range trigger** (section 8) |
+| **change consumer** | `on_apply` | same as executor | ONLY by the engine, as a **changes-mode write-range trigger** (section 8): the input is the ordered list of committed changes |
 
 **Executor retry semantics (critical):** on commit conflict the WHOLE
 attempt is discarded and re-run against a fresh snapshot — fresh Store,
@@ -43,14 +45,17 @@ need entropy or time, take it as input.
 
 ```
 memory   : (export "memory" (memory ...))       — REQUIRED
-run      : (export "run" (func (result i32)))   — REQUIRED, no params
+run      : (export "run" (func (result i32)))   — no params
+on_apply : (export "on_apply" (func (result i32))) — same shape as run
 describe : (export "describe" (func (result i32))) — OPTIONAL, same shape as run
 ```
 
-Install is rejected unless `run` + `memory` exist. `describe`, when
-present, is executed by the GraphQL server (read-only, empty input) at
-install / schema-build time; its output bytes must be a descriptor
-(section 5).
+Install is rejected unless `memory` plus at least one of `run` /
+`on_apply` exist. `run` serves queries, executors, and keys-mode
+triggers; `on_apply` is the changes-mode trigger entry (section 8) — a
+module may export either or both. `describe`, when present, is executed
+by the GraphQL server (read-only, empty input) at install / schema-build
+time; its output bytes must be a descriptor (section 5).
 
 **Exit codes:** `0` = success (and, for executors, commit). Any non-zero
 exit aborts the transaction and surfaces to callers as
@@ -192,21 +197,45 @@ fluent_guest::scan_prefix(&[u8]) -> Result<Scan, i32>
 // Scan: Iterator<Item = (Vec<u8>, Vec<u8>)>, plus .skip_pending()
 ```
 
-Skeleton:
+### Typed entry points (the primary interface)
+
+Annotate a plain function taking one [`FromInput`] value and returning
+`Result<impl IntoOutput, Fail>`; the attribute macro exports the entry
+point and maps the result — `Ok` → exit 0 with the encoded output,
+`Err(Fail { code, message })` → non-zero exit with the message in the
+output buffer (a `Fail` code of 0 is coerced to 1: exit 0 must always
+mean success).
 
 ```rust
-fn my_main() -> i32 {
-    let input = fluent_guest::input();
+use fluent_guest::Fail;
+
+#[fluent_guest::main]                       // exports `run`
+fn my_module(input: Vec<u8>) -> Result<String, Fail> {
     // ... validate, read, write ...
-    fluent_guest::output(b"result bytes");
-    0 // commit (executor) / success (query)
+    Err(Fail::new(2, "distinct code per failure class"))
 }
-fluent_guest::fluent_main!(my_main);       // exports `run`
+
+#[fluent_guest::on_apply]                   // exports `on_apply` (section 8)
+fn my_feed(changes: Vec<fluent_guest::Change>) -> Result<(), Fail> {
+    for c in changes { /* filter, then index/materialize */ }
+    Ok(())
+}
+
 fluent_guest::fluent_describe!(r#"{...}"#); // optional: exports `describe` (section 5)
 ```
 
-NOTE: `fluent_main!(f)` generates `pub extern "C" fn run()` — your inner
-function must NOT itself be named `run` (duplicate definition).
+`FromInput` is implemented for `Vec<u8>` (raw bytes), `String` (UTF-8,
+code-3 `Fail` on invalid), and `Vec<Change>` (the changes-mode trigger
+input; code-3 `Fail` on anything else). `IntoOutput` covers `Vec<u8>`,
+`String`, and `()`.
+
+The declarative raw layer remains for modules that want to speak exit
+codes directly: `fluent_main!(f)` / `fluent_on_apply!(f)` export an
+`fn() -> i32` unchanged (pair the latter with `fluent_guest::changes()`).
+
+NOTE: both macro styles generate the exported symbol themselves — the
+annotated/inner function must NOT itself be named `run` / `on_apply`
+(duplicate definition).
 
 Build:
 
@@ -347,11 +376,12 @@ declaration.
 
 | Module | Kind | Shows |
 |---|---|---|
-| `guests/place_order` | execute | typed args, multi-key transaction (counter + record + stats fold), `get_for_update` locking, input validation with distinct exit codes, corruption checks that fail loudly |
+| `guests/place_order` | execute | typed args, multi-key transaction (counter + record + stats fold), `get_for_update` locking, input validation with distinct `Fail` codes, corruption checks that fail loudly |
 | `guests/top_customers` | query | typed output list, `scan_prefix` aggregation at a snapshot, limit clamping |
 | `guests/agg` | query (untyped) | raw-bytes input/output, chunked scan aggregation |
 | `guests/transfer` | execute (untyped) | OCC transfer with conflict retries |
-| `guests/customer_index` | execute (trigger) | trigger-maintained secondary index: `trigger_keys()`, reconcile-against-current-state, the back-pointer pattern for updates/deletes |
+| `guests/customer_index` | execute (keys-mode trigger) | trigger-maintained secondary index: `parse_trigger_keys()`, reconcile-against-current-state, the back-pointer pattern for updates/deletes |
+| `guests/order_feed` | change consumer (changes-mode trigger) | ordered changefeed materialization: `#[fluent_guest::on_apply]`, per-op kinds/values/seqnos, in-code filtering, elided-value handling |
 | `crates/fluent-graphql/tests/graphql.rs` | — | minimal WAT modules incl. `describe` exports (`wat_typed`) |
 
 Demo end-to-end (server running): `scripts/demo-orders.sh` builds,
@@ -378,31 +408,44 @@ installs, seeds, and queries the typed pair.
 
 ## 8. Write-range triggers
 
-A trigger binds an installed **executor** module to a user-key range: the
-engine invokes it asynchronously after every committed write (put OR
-delete, from any writer — plain puts, batches, transactions, other
-executors) that touches `[lo, hi)`. This is the schema-free way to build
-custom indexes and materialized views: no declared columns, just a key
-range and code.
+A trigger binds an installed module to a user-key range: the engine
+invokes it asynchronously after every committed write (put OR delete,
+from any writer — plain puts, batches, transactions, other executors)
+that touches `[lo, hi)`. This is the schema-free way to build custom
+indexes, materialized views, and changefeeds: no declared columns, just a
+key range and code.
+
+A trigger consumes writes in one of two **modes**, detected from the
+module's exports at registration (and fixed for the trigger's lifetime):
+
+| Mode | Module exports | Entry | Input | Coalescing |
+|---|---|---|---|---|
+| **keys** | `run` only | `run` | touched keys, no values/kinds/order | re-touches coalesce to one pending event |
+| **changes** | `on_apply` | `on_apply` | the ordered list of committed changes: seqno + kind + key + value | none — one event per committed op |
 
 ```
-Db::create_trigger(name, module, lo, hi)   # None/omitted bound = open end
+Db::create_trigger(name, module, lo, hi)   # None/omitted bound = open end;
+                                           # returns the detected mode
 Db::delete_trigger(name)                   # discards pending events
-Db::list_triggers()                        # pending count + lastError
+Db::list_triggers()                        # mode + pending count + lastError
 
 CLI:      mktrig NAME MODULE [LO|-] [HI|-] | deltrig NAME | triggers
 GraphQL:  createTrigger(name:, module:, lo:, hi:)  deleteTrigger(name:)
-          triggers { name module lo{..} hi{..} pending lastError }
+          triggers { name module lo{..} hi{..} mode pending lastError }
 ```
 
 Trigger names follow module-name rules (`[A-Za-z0-9._-]`, max 64). The
 module must exist at registration. One module may back many triggers.
+Replacing a module's bytes does NOT change existing triggers' modes: a
+changes-mode trigger whose module loses its `on_apply` export fails
+drains loudly (`lastError`) and holds its events until the module is
+repaired.
 
-### The contract your `run` must satisfy
+### Keys mode — the contract your `run` must satisfy
 
 - **Input is packed touched keys**: `[klen uvarint][key bytes]` repeated —
-  `fluent_guest::trigger_keys()` parses it. Up to `trigger_batch`
-  (default 512) keys per invocation.
+  `fluent_guest::trigger_keys()` / `parse_trigger_keys()` parses it. Up
+  to `trigger_batch` (default 512) keys per invocation.
 - **An event means "this key was touched", not "here is what happened".**
   Events carry no values, no op kind, no order: re-touches of one key
   coalesce into a single pending event while a backlog exists. Read the
@@ -413,12 +456,51 @@ module must exist at registration. One module may back many triggers.
   the OLD value, so you cannot find a stale index entry from the record
   alone. Maintain your own reverse mapping (e.g. `idx/order/<id>` →
   customer) and use it to unindex — see `guests/customer_index`.
-- **Normal executor rules apply**: your writes buffer in a transaction
-  that commits on exit 0 and retries on conflict, so tolerate
-  re-execution. Non-zero exits abort (nothing is consumed) and surface in
-  `triggers { lastError }`.
 
-### Delivery semantics (what the engine guarantees)
+### Changes mode — the post-apply change feed (`on_apply`)
+
+Where keys mode answers "which keys need reconciling", changes mode
+delivers **the list of changes that were committed**, in commit order —
+what an audit log, event-sourced projection, or value-driven index
+generator needs and coalescing would destroy. Your `on_apply` receives
+(little-endian, `u32` lengths — wire-style framing):
+
+```
+[u32 count]
+per change:
+  [u64 seqno]      the op's commit seqno: unique, strictly increasing
+  [u8  kind]       0 = put (value inline)  1 = delete  2 = put, value elided
+  [u32 klen][key]
+  [u32 vlen][value]        — kind 0 only
+```
+
+`fluent_guest::parse_changes()` / the `Vec<Change>` input of
+`#[fluent_guest::on_apply]` decodes it. Per invocation: up to
+`trigger_batch` changes, bounded by `max_wasm_input`.
+
+- **One event per committed op, in commit order.** A key written three
+  times yields three changes in exactly the order the engine applied
+  them; the seqno is the op's real commit seqno (capture happens inside
+  the commit critical section, so the feed can never disagree with the
+  store about which write won a key). Two batches' changes never
+  interleave out of order.
+- **Values ride the event up to `trigger_inline_value`** (default
+  64 KiB): above it the change arrives as kind 2 (key only) — read the
+  key if you need the payload, remembering the read reflects CURRENT
+  state, which may already be newer than the change. Inlining also costs
+  write amplification on the watched range (the value is written twice);
+  size the knob to your records.
+- **Filter in code.** The range does the coarse cut; your module drops
+  what it doesn't care about (see `guests/order_feed` skipping the
+  counter key that shares its range) — the "post-apply filter".
+- **Exactly-once, ordered effects**: derive idempotent output keys from
+  the seqno (e.g. `feed/<seqno, zero-padded>`) and replays after a
+  conflict or crash overwrite instead of duplicating.
+- **Old values are still your job.** A delete/update carries no
+  before-image; keep a back-pointer if you need to unindex, exactly as in
+  keys mode.
+
+### Delivery semantics (both modes)
 
 - **Durable capture**: event records commit in the SAME atomic batch as
   the triggering write — a write that survives a crash fires its trigger
@@ -426,14 +508,18 @@ module must exist at registration. One module may back many triggers.
 - **At-least-once invocation, exactly-once effects**: the consumed events
   are deleted inside your module's own transaction. A crash or conflict
   re-runs the whole attempt; your committed writes and the events'
-  consumption are inseparable.
+  consumption are inseparable. Tolerate re-execution.
 - **No stacking**: writes made by a trigger invocation never generate
   events — for any trigger, including its own. Trigger chains and loops
   are impossible; derive everything you need from the one event.
-- **Async lag is real**: the index trails the base data by the backlog.
-  A failing module never loses events — the queue holds, the runner backs
-  off (100ms → 6.4s), and `triggers { pending lastError }` shows both the
-  depth and the reason.
+- **Async lag is real**: derived state trails the base data by the
+  backlog. A failing module never loses events — the queue holds, the
+  runner backs off (100ms → 6.4s), and `triggers { pending lastError }`
+  shows both the depth and the reason. (Changes-mode queues are per-op,
+  so a hot key grows the backlog where keys mode would coalesce it —
+  the price of a complete feed.)
+- Non-zero exits abort (nothing is consumed) and surface in
+  `triggers { lastError }`.
 
 Registered triggers, their queues, and their backlogs are engine state
 (reserved keyspace): versioned, recovered, and checkpoint-archived like

@@ -1,21 +1,35 @@
 //! Guest-side SDK for fluent31 WASM modules ("fluentabi v1").
 //!
-//! Write a function returning an exit code (0 = success/commit) and export
-//! it with [`fluent_main!`]:
+//! Write a typed function returning `Result` and annotate it — the
+//! attribute macro exports the entry point and maps `Ok` to exit 0 (output
+//! encoded via [`IntoOutput`]) and `Err(Fail)` to a non-zero exit with the
+//! message in the output buffer:
 //!
 //! ```ignore
-//! fn run() -> i32 {
-//!     let who = fluent_guest::input();
-//!     match fluent_guest::get(&who) {
-//!         Some(v) => { fluent_guest::output(&v); 0 }
-//!         None => 1,
-//!     }
+//! #[fluent_guest::main]                       // exports `run`
+//! fn lookup(who: Vec<u8>) -> Result<Vec<u8>, fluent_guest::Fail> {
+//!     fluent_guest::get(&who).ok_or(fluent_guest::Fail::new(1, "no such key"))
 //! }
-//! fluent_guest::fluent_main!(run);
 //! ```
+//!
+//! A changes-mode trigger module consumes the ordered list of committed
+//! changes instead (see [`Change`]):
+//!
+//! ```ignore
+//! #[fluent_guest::on_apply]                   // exports `on_apply`
+//! fn feed(changes: Vec<fluent_guest::Change>) -> Result<(), fluent_guest::Fail> {
+//!     for c in changes { /* filter, then index/materialize */ }
+//!     Ok(())
+//! }
+//! ```
+//!
+//! The declarative [`fluent_main!`] macro remains as the raw layer for
+//! modules that want to speak exit codes directly.
 //!
 //! Build with `--target wasm32-unknown-unknown` as a `cdylib`, then install
 //! the artifact with `db.install_module(name, bytes)`.
+
+pub use fluent_guest_macros::{main, on_apply};
 
 pub mod errno {
     pub const NOT_FOUND: i32 = -1;
@@ -117,13 +131,19 @@ mod sys {
     }
 }
 
-/// The touched keys of a trigger invocation: parses the input blob's
-/// packing (`[klen uvarint][key bytes]` repeated). A trigger event means
-/// "this key was touched", not "here is what happened to it" — read the key
-/// to decide (present = upsert your derived state, absent = remove it).
-/// Returns None on malformed input (not invoked as a trigger).
+/// The touched keys of a keys-mode trigger invocation: parses the input
+/// blob's packing (`[klen uvarint][key bytes]` repeated). A trigger event
+/// means "this key was touched", not "here is what happened to it" — read
+/// the key to decide (present = upsert your derived state, absent = remove
+/// it). Returns None on malformed input (not invoked as a trigger).
 pub fn trigger_keys() -> Option<Vec<Vec<u8>>> {
-    let input = input();
+    parse_trigger_keys(&input())
+}
+
+/// [`trigger_keys`] over an explicit buffer (the form typed
+/// `#[fluent_guest::main]` functions use, having already received the
+/// input as their argument).
+pub fn parse_trigger_keys(input: &[u8]) -> Option<Vec<Vec<u8>>> {
     let mut keys = Vec::new();
     let mut pos = 0usize;
     while pos < input.len() {
@@ -145,6 +165,200 @@ pub fn trigger_keys() -> Option<Vec<Vec<u8>>> {
         pos += len;
     }
     Some(keys)
+}
+
+// ---------------------------------------------------------------------------
+// typed entry points (the #[fluent_guest::main] / #[fluent_guest::on_apply]
+// layer): Result-returning functions over FromInput/IntoOutput values
+// ---------------------------------------------------------------------------
+
+/// A guest failure: a non-zero exit code plus a human-readable message
+/// (written to the output buffer, where callers surface it as
+/// `guestOutputText`). Use distinct codes per failure class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fail {
+    pub code: i32,
+    pub message: String,
+}
+
+impl Fail {
+    pub fn new(code: i32, message: impl Into<String>) -> Fail {
+        Fail {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// `?` on string errors: exit code 1.
+impl From<String> for Fail {
+    fn from(message: String) -> Fail {
+        Fail { code: 1, message }
+    }
+}
+
+impl From<&str> for Fail {
+    fn from(message: &str) -> Fail {
+        Fail::new(1, message)
+    }
+}
+
+/// Decode a typed value from the invocation's input blob.
+pub trait FromInput: Sized {
+    fn from_input(bytes: Vec<u8>) -> Result<Self, Fail>;
+}
+
+impl FromInput for Vec<u8> {
+    fn from_input(bytes: Vec<u8>) -> Result<Self, Fail> {
+        Ok(bytes)
+    }
+}
+
+impl FromInput for String {
+    fn from_input(bytes: Vec<u8>) -> Result<Self, Fail> {
+        String::from_utf8(bytes).map_err(|_| Fail::new(3, "input is not utf-8"))
+    }
+}
+
+/// One committed change, as delivered to a changes-mode trigger's
+/// `on_apply` in commit order (see the engine's WASM.md, section 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// A committed put. `value` is the written value, or `None` when it
+    /// exceeded the engine's `trigger_inline_value` — read the key if you
+    /// need it (the read reflects CURRENT state, which may already be
+    /// newer than this change).
+    Put {
+        seqno: u64,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    },
+    /// A committed delete of `key`.
+    Delete { seqno: u64, key: Vec<u8> },
+}
+
+impl Change {
+    /// The commit seqno of the op this change describes: unique, and
+    /// strictly increasing across the feed.
+    pub fn seqno(&self) -> u64 {
+        match self {
+            Change::Put { seqno, .. } | Change::Delete { seqno, .. } => *seqno,
+        }
+    }
+
+    pub fn key(&self) -> &[u8] {
+        match self {
+            Change::Put { key, .. } | Change::Delete { key, .. } => key,
+        }
+    }
+}
+
+/// Parse a changes-mode trigger input: little-endian wire framing,
+/// `[u32 count]` then per change `[u64 seqno][u8 kind][u32 klen][key]`
+/// plus `[u32 vlen][value]` when kind = put (0). Kinds: 0 = put with
+/// inline value, 1 = delete, 2 = put with the value elided.
+/// Returns None on malformed input (not an on_apply invocation).
+pub fn parse_changes(input: &[u8]) -> Option<Vec<Change>> {
+    let u32_at = |pos: usize| -> Option<(u32, usize)> {
+        let b: [u8; 4] = input.get(pos..pos + 4)?.try_into().ok()?;
+        Some((u32::from_le_bytes(b), pos + 4))
+    };
+    let (count, mut pos) = u32_at(0)?;
+    let mut out = Vec::with_capacity(count.min(4096) as usize);
+    for _ in 0..count {
+        let seq: [u8; 8] = input.get(pos..pos + 8)?.try_into().ok()?;
+        let seqno = u64::from_le_bytes(seq);
+        let kind = *input.get(pos + 8)?;
+        let (klen, kstart) = u32_at(pos + 9)?;
+        let key = input.get(kstart..kstart + klen as usize)?.to_vec();
+        pos = kstart + klen as usize;
+        out.push(match kind {
+            0 => {
+                let (vlen, vstart) = u32_at(pos)?;
+                let value = input.get(vstart..vstart + vlen as usize)?.to_vec();
+                pos = vstart + vlen as usize;
+                Change::Put {
+                    seqno,
+                    key,
+                    value: Some(value),
+                }
+            }
+            2 => Change::Put {
+                seqno,
+                key,
+                value: None,
+            },
+            1 => Change::Delete { seqno, key },
+            _ => return None,
+        });
+    }
+    (pos == input.len()).then_some(out)
+}
+
+/// The change list of an `on_apply` invocation; None when the input is not
+/// one (symmetric with [`trigger_keys`] for keys-mode modules).
+pub fn changes() -> Option<Vec<Change>> {
+    parse_changes(&input())
+}
+
+impl FromInput for Vec<Change> {
+    fn from_input(bytes: Vec<u8>) -> Result<Self, Fail> {
+        parse_changes(&bytes).ok_or_else(|| Fail::new(3, "input is not a fluent change list"))
+    }
+}
+
+/// Encode a typed value into the invocation's output bytes.
+pub trait IntoOutput {
+    fn into_output(self) -> Vec<u8>;
+}
+
+impl IntoOutput for Vec<u8> {
+    fn into_output(self) -> Vec<u8> {
+        self
+    }
+}
+
+impl IntoOutput for String {
+    fn into_output(self) -> Vec<u8> {
+        self.into_bytes()
+    }
+}
+
+/// No output (trigger modules usually have nothing to say on success).
+impl IntoOutput for () {
+    fn into_output(self) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
+/// Glue behind the attribute macros: decode, call, encode, exit.
+/// Not part of the public contract.
+#[doc(hidden)]
+pub fn __entry<T: FromInput, O: IntoOutput>(f: fn(T) -> Result<O, Fail>) -> i32 {
+    let value = match T::from_input(input()) {
+        Ok(value) => value,
+        Err(fail) => return report(fail),
+    };
+    match f(value) {
+        Ok(out) => {
+            let bytes = out.into_output();
+            if !bytes.is_empty() {
+                output(&bytes);
+            }
+            0
+        }
+        Err(fail) => report(fail),
+    }
+}
+
+fn report(fail: Fail) -> i32 {
+    output(fail.message.as_bytes());
+    // exit 0 means success/commit — a Fail must never map to it
+    if fail.code == 0 {
+        1
+    } else {
+        fail.code
+    }
 }
 
 /// The input blob this invocation was called with.
@@ -408,6 +622,19 @@ macro_rules! fluent_main {
     ($f:path) => {
         #[no_mangle]
         pub extern "C" fn run() -> i32 {
+            $f()
+        }
+    };
+}
+
+/// Export `$f` as the module's raw `on_apply` entry point (changes-mode
+/// triggers). Prefer `#[fluent_guest::on_apply]` on a typed function;
+/// this is the exit-code-speaking escape hatch, paired with [`changes`].
+#[macro_export]
+macro_rules! fluent_on_apply {
+    ($f:path) => {
+        #[no_mangle]
+        pub extern "C" fn on_apply() -> i32 {
             $f()
         }
     };

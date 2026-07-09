@@ -288,10 +288,11 @@ impl Shell {
                     }
                 };
                 let (lo, hi) = (bound(3)?, bound(4)?);
-                self.db
+                let mode = self
+                    .db
                     .create_trigger(name, module, lo.as_deref(), hi.as_deref())
                     .map_err(err)?;
-                Ok(format!("trigger {name} -> {module}"))
+                Ok(format!("trigger {name} -> {module} mode={}", mode.as_str()))
             }
             "deltrig" => {
                 self.db
@@ -315,11 +316,12 @@ impl Shell {
                             }
                         };
                         let mut line = format!(
-                            "{} -> {} [{}, {}) pending={}",
+                            "{} -> {} [{}, {}) mode={} pending={}",
                             t.name,
                             t.module,
                             range(&t.lo),
                             range(&t.hi),
+                            t.mode.as_str(),
                             t.pending
                         );
                         if let Some(e) = &t.last_error {

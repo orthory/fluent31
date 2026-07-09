@@ -131,15 +131,17 @@ pub(crate) fn install_module(db: &Arc<DbInner>, name: &str, wasm: &[u8]) -> Resu
     // shared cache fills at first invocation instead).
     let module = Module::new(&db.wasm.engine, wasm)
         .map_err(|e| Error::Wasm(format!("compile: {e}")))?;
-    let has_run = module
-        .get_export("run")
-        .is_some_and(|e| e.func().is_some());
+    let has_entry = ["run", "on_apply"]
+        .iter()
+        .any(|f| module.get_export(f).is_some_and(|e| e.func().is_some()));
     let has_memory = module
         .get_export("memory")
         .is_some_and(|e| e.memory().is_some());
-    if !has_run || !has_memory {
+    if !has_entry || !has_memory {
         return Err(Error::Wasm(
-            "module must export `run: () -> i32` and `memory`".into(),
+            "module must export `memory` and `run: () -> i32` \
+             (or `on_apply` for a changes-mode trigger module)"
+                .into(),
         ));
     }
     let mut b = WriteBatch::new();
@@ -277,7 +279,14 @@ pub(crate) fn query(
 }
 
 pub(crate) fn execute(db: &Arc<DbInner>, name: &str, input: &[u8]) -> Result<Vec<u8>> {
-    execute_impl(db, name, input, &[], false)
+    execute_impl(db, name, input, &[], false, "run")
+}
+
+/// Whether an installed module exports a function named `func` (probes the
+/// current module bytes; errors if no such module is installed).
+pub(crate) fn module_exports_func(db: &Arc<DbInner>, name: &str, func: &str) -> Result<bool> {
+    let module = load_module_at(db, name, crate::types::MAX_SEQNO)?;
+    Ok(module.get_export(func).is_some_and(|e| e.func().is_some()))
 }
 
 /// Trigger-runner executor: the transaction is *system* (its commit fires
@@ -285,13 +294,16 @@ pub(crate) fn execute(db: &Arc<DbInner>, name: &str, input: &[u8]) -> Result<Vec
 /// atomically with whatever the module writes. Re-seeding per attempt is
 /// sound: the module reconciles against each attempt's fresh snapshot, and
 /// a queue entry re-written after that snapshot conflicts the commit.
+/// `entry` selects the export to run (`run` for keys-mode triggers,
+/// `on_apply` for changes-mode).
 pub(crate) fn execute_system(
     db: &Arc<DbInner>,
     name: &str,
     input: &[u8],
     consume: &[Vec<u8>],
+    entry: &str,
 ) -> Result<Vec<u8>> {
-    execute_impl(db, name, input, consume, true)
+    execute_impl(db, name, input, consume, true, entry)
 }
 
 fn execute_impl(
@@ -300,6 +312,7 @@ fn execute_impl(
     input: &[u8],
     consume: &[Vec<u8>],
     system: bool,
+    entry: &str,
 ) -> Result<Vec<u8>> {
     if input.len() > db.opts.max_wasm_input {
         return Err(Error::InvalidArgument("input exceeds max_wasm_input".into()));
@@ -316,7 +329,7 @@ fn execute_impl(
         }
         let module = load_module_at(db, name, txn.snapshot_seqno())?;
         let ctx = HostCtx::new(db.clone(), Access::Txn(Some(txn)), input.to_vec());
-        let (code, mut ctx) = run_instance(db, &module, ctx, "run")?;
+        let (code, mut ctx) = run_instance(db, &module, ctx, entry)?;
         let txn = match ctx.access {
             Access::Txn(ref mut t) => t.take().expect("txn present"),
             _ => unreachable!(),

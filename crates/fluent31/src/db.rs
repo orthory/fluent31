@@ -113,9 +113,10 @@ pub(crate) struct RetiredVlog {
     pub handle: Arc<VlogFileHandle>,
 }
 
-/// A commit-queue entry as the committer consumes it: the batch plus the
-/// optional OCC validation spec (snapshot, conflict keys).
-type QueuedEntry = (Vec<BatchOp>, Option<(SeqNo, Vec<Vec<u8>>)>);
+/// A commit-queue entry as the committer consumes it: the batch, the
+/// optional OCC validation spec (snapshot, conflict keys), and whether the
+/// batch is trigger-capture eligible (user-originated logical writes).
+type QueuedEntry = (Vec<BatchOp>, Option<(SeqNo, Vec<Vec<u8>>)>, bool);
 
 /// One enqueued write awaiting group commit. `ops` is taken by the leader;
 /// `result` is set when the group completes.
@@ -131,6 +132,8 @@ pub(crate) struct WaiterInner {
     /// committed version newer than the snapshot — neither in the store
     /// nor written by an earlier batch of the same group.
     validate: Option<(SeqNo, Vec<Vec<u8>>)>,
+    /// Trigger-capture eligibility (user-originated logical writes).
+    capture: bool,
     result: Option<Result<()>>,
 }
 
@@ -418,39 +421,26 @@ impl DbInner {
 
     pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
         self.validate_batch(&batch)?;
-        // trigger events ride the same batch (atomic through WAL, memtable,
-        // and crash recovery); capture runs after user-key validation so
-        // only accepted logical writes can fire
-        #[cfg(feature = "wasm")]
-        {
-            let mut batch = batch;
-            let events = self.triggers.event_keys(batch.ops.iter().map(|op| match op {
-                BatchOp::Put { key, .. } => key.as_slice(),
-                BatchOp::Delete { key } => key.as_slice(),
-            }));
-            let fired = !events.is_empty();
-            for key in events {
-                batch.put(key, Vec::new());
-            }
-            let r = self.write_batch_unchecked(batch);
-            if fired && r.is_ok() {
-                self.triggers.signal.notify();
-            }
-            r
-        }
-        #[cfg(not(feature = "wasm"))]
-        self.write_batch_unchecked(batch)
+        // capture=true: user-originated logical writes are the only
+        // trigger-capture source, and only after user-key validation so
+        // just accepted writes can fire. The events themselves materialize
+        // inside the apply critical section (see capture_events).
+        self.write_batch_inner(batch, true)
     }
 
-    /// Write path without user-key validation (system keys, transaction
-    /// commits that already validated). Group commit, LevelDB-style: the
-    /// caller enqueues its batch and the writer at the queue front becomes
-    /// the leader — it drains a bounded group, applies every batch under
-    /// one `write_mu` critical section with ONE vlog fsync and ONE WAL
-    /// fsync for the whole group, then hands each waiter its result.
-    /// Concurrent writers therefore amortize fsync latency instead of
-    /// serializing on it.
+    /// Write path without user-key validation and without trigger capture
+    /// (system keys, engine-internal rewrites).
     pub fn write_batch_unchecked(&self, batch: WriteBatch) -> Result<()> {
+        self.write_batch_inner(batch, false)
+    }
+
+    /// Group commit, LevelDB-style: the caller enqueues its batch and the
+    /// writer at the queue front becomes the leader — it drains a bounded
+    /// group, applies every batch under one `write_mu` critical section
+    /// with ONE vlog fsync and ONE WAL fsync for the whole group, then
+    /// hands each waiter its result. Concurrent writers therefore amortize
+    /// fsync latency instead of serializing on it.
+    fn write_batch_inner(&self, batch: WriteBatch, capture: bool) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -463,7 +453,7 @@ impl DbInner {
         // the direct path.
         if self.opts.sync != SyncMode::Always {
             let mut ws = self.write_mu.lock();
-            let r = self.apply_locked(&mut ws, &batch.ops);
+            let r = self.apply_locked(&mut ws, &batch.ops, capture);
             self.commit_groups.fetch_add(1, Ordering::Relaxed);
             self.commit_batches.fetch_add(1, Ordering::Relaxed);
             return r;
@@ -475,7 +465,7 @@ impl DbInner {
         // and halve 4-thread throughput. The queue handoff costs ~µs
         // against an fsync; every sync write goes through the committer.
         let bytes = batch.byte_size();
-        self.queue_commit(batch.ops, bytes, None)
+        self.queue_commit(batch.ops, bytes, None, capture)
     }
 
     /// Enqueue a batch (optionally OCC-validated) on the commit queue and
@@ -485,12 +475,14 @@ impl DbInner {
         ops: Vec<BatchOp>,
         bytes: usize,
         validate: Option<(SeqNo, Vec<Vec<u8>>)>,
+        capture: bool,
     ) -> Result<()> {
         let waiter = Arc::new(CommitWaiter {
             inner: Mutex::new(WaiterInner {
                 ops: Some(ops),
                 bytes,
                 validate,
+                capture,
                 result: None,
             }),
             cv: Condvar::new(),
@@ -553,14 +545,27 @@ impl DbInner {
     /// `apply_group_locked` — same phases, same error semantics (hard IO
     /// failures degrade the store; rotation failure after publish keeps
     /// the ack). Any change here must be mirrored there.
-    pub(crate) fn apply_locked(&self, ws: &mut WriteState, ops: &[BatchOp]) -> Result<()> {
+    pub(crate) fn apply_locked(
+        &self,
+        ws: &mut WriteState,
+        ops: &[BatchOp],
+        capture: bool,
+    ) -> Result<()> {
         let base = self.visible_seqno.load(Ordering::Acquire) + 1;
-        if base + ops.len() as u64 >= MAX_SEQNO {
+        // trigger events ride the same batch (atomic through WAL, memtable,
+        // and crash recovery). Materialized HERE, after the base seqno is
+        // fixed and under write_mu: changes-mode queue keys embed per-op
+        // commit seqnos, so capture outside the critical section could
+        // order the feed differently from the commits it describes.
+        let events = self.capture_events(ops, base, capture);
+        let total = ops.len() + events.len();
+        if base + total as u64 >= MAX_SEQNO {
             return Err(Error::InvalidArgument("seqno space exhausted".into()));
         }
         // size-check BEFORE vlog placement (see apply_group_locked)
         let approx: u64 = ops
             .iter()
+            .chain(events.iter())
             .map(|op| match op {
                 BatchOp::Put { key, value } => (key.len() + value.len() + 32) as u64,
                 BatchOp::Delete { key } => (key.len() + 16) as u64,
@@ -573,9 +578,9 @@ impl DbInner {
         }
 
         // 1. place large values in the vlog
-        let mut entries = Vec::with_capacity(ops.len());
+        let mut entries = Vec::with_capacity(total);
         let mut any_vlog = false;
-        for op in ops {
+        for op in ops.iter().chain(events.iter()) {
             let e = match op {
                 BatchOp::Put { key, value } => {
                     let repr = if value.len() >= self.opts.value_threshold {
@@ -655,7 +660,32 @@ impl DbInner {
         if let Err(e) = rotate() {
             self.set_bg_error(format!("post-write rotation failed: {e}"));
         }
+        // the write is durable and published: wake the trigger runner even
+        // though rotation may have degraded the store (harmless wakeup)
+        if !events.is_empty() {
+            self.notify_triggers();
+        }
         Ok(())
+    }
+
+    /// Trigger events to append to a capture-eligible batch committing at
+    /// `base` (empty without the wasm feature or when no trigger matches).
+    /// Must be called under `write_mu` with `base` freshly allocated — see
+    /// `TriggerState::capture_ops` for why.
+    #[inline]
+    fn capture_events(&self, ops: &[BatchOp], base: SeqNo, capture: bool) -> Vec<BatchOp> {
+        #[cfg(feature = "wasm")]
+        if capture {
+            return self.triggers.capture_ops(ops, base, &self.opts);
+        }
+        let _ = (ops, base, capture);
+        Vec::new()
+    }
+
+    #[inline]
+    fn notify_triggers(&self) {
+        #[cfg(feature = "wasm")]
+        self.triggers.signal.notify();
     }
 
     /// Apply a group of batches under one `write_mu` critical section
@@ -673,23 +703,29 @@ impl DbInner {
     pub(crate) fn apply_group_locked(
         &self,
         ws: &mut WriteState,
-        batches: &[&[BatchOp]],
+        batches: &[(&[BatchOp], bool)],
     ) -> Vec<Result<()>> {
         let mut results: Vec<Option<Result<()>>> = Vec::new();
         results.resize_with(batches.len(), || None);
 
         // ---- phase 0: per-batch validation + seqno assignment ----------
         // (validation failures consume no seqnos, so accepted batches form
-        // a contiguous seqno range starting at visible+1)
+        // a contiguous seqno range starting at visible+1). Trigger events
+        // materialize here — the batch's base seqno is fixed at this point
+        // and write_mu is held, which is exactly what commit-ordered
+        // changes-mode queue keys require — and each batch's events ride
+        // its own WAL record (same crash atomicity as the writes).
         let mut next = self.visible_seqno.load(Ordering::Acquire) + 1;
-        let mut accepted: Vec<(usize, u64)> = Vec::with_capacity(batches.len());
-        for (i, ops) in batches.iter().enumerate() {
+        let mut accepted: Vec<(usize, u64, Vec<BatchOp>)> = Vec::with_capacity(batches.len());
+        for (i, (ops, capture)) in batches.iter().enumerate() {
+            let events = self.capture_events(ops, next, *capture);
             // size-check BEFORE vlog placement: rejecting afterwards would
             // orphan already-appended vlog records that no discard
             // accounting ever reclaims (pointer reprs only shrink the
             // encoded batch, so this bound is conservative)
             let approx: u64 = ops
                 .iter()
+                .chain(events.iter())
                 .map(|op| match op {
                     BatchOp::Put { key, value } => (key.len() + value.len() + 32) as u64,
                     BatchOp::Delete { key } => (key.len() + 16) as u64,
@@ -701,14 +737,15 @@ impl DbInner {
                 )));
                 continue;
             }
-            if next + ops.len() as u64 >= MAX_SEQNO {
+            let total = (ops.len() + events.len()) as u64;
+            if next + total >= MAX_SEQNO {
                 results[i] = Some(Err(Error::InvalidArgument(
                     "seqno space exhausted".into(),
                 )));
                 continue;
             }
-            accepted.push((i, next));
-            next += ops.len() as u64;
+            accepted.push((i, next, events));
+            next += total;
         }
 
         // fail every accepted batch from `from` onward: their writes were
@@ -721,12 +758,12 @@ impl DbInner {
             )))
         };
         let fail_tail = |results: &mut Vec<Option<Result<()>>>,
-                         accepted: &[(usize, u64)],
+                         accepted: &[(usize, u64, Vec<BatchOp>)],
                          from: usize,
                          msg: &str| {
-            for &(j, _) in &accepted[from..] {
-                if results[j].is_none() {
-                    results[j] = Some(Err(aborted(msg)));
+            for (j, _, _) in &accepted[from..] {
+                if results[*j].is_none() {
+                    results[*j] = Some(Err(aborted(msg)));
                 }
             }
         };
@@ -743,9 +780,10 @@ impl DbInner {
         // ---- phase 1: place large values in the vlog --------------------
         let mut placed: Vec<(usize, u64, Vec<EncEntry>)> = Vec::with_capacity(accepted.len());
         let mut any_vlog = false;
-        'place: for (gi, &(i, base)) in accepted.iter().enumerate() {
-            let mut entries = Vec::with_capacity(batches[i].len());
-            for op in batches[i] {
+        'place: for (gi, (i, base, events)) in accepted.iter().enumerate() {
+            let (i, base) = (*i, *base);
+            let mut entries = Vec::with_capacity(batches[i].0.len() + events.len());
+            for op in batches[i].0.iter().chain(events.iter()) {
                 let e = match op {
                     BatchOp::Put { key, value } => {
                         let repr = if value.len() >= self.opts.value_threshold {
@@ -802,10 +840,10 @@ impl DbInner {
         // ---- phase 3: WAL append, one record per batch -------------------
         let mut appended: Vec<(usize, u64, Vec<EncEntry>)> = Vec::with_capacity(placed.len());
         for (i, base, entries) in placed.into_iter() {
-            let from_tail = |accepted: &[(usize, u64)]| {
+            let from_tail = |accepted: &[(usize, u64, Vec<BatchOp>)]| {
                 accepted
                     .iter()
-                    .position(|&(j, _)| j == i)
+                    .position(|(j, _, _)| *j == i)
                     .map(|p| p + 1)
                     .unwrap_or(accepted.len())
             };
@@ -867,6 +905,12 @@ impl DbInner {
             );
             for (_, base, entries) in &appended {
                 self.publish_stream(*base, entries);
+            }
+            // durable + published: wake the trigger runner if any surviving
+            // batch enqueued events (spurious wakeups are harmless, so the
+            // check is deliberately coarse)
+            if accepted.iter().any(|(_, _, events)| !events.is_empty()) {
+                self.notify_triggers();
             }
 
             // ---- phase 6: rotations, once per group ----------------------
@@ -1423,7 +1467,10 @@ impl Db {
 
     /// Register a write-range trigger: whenever a committed write touches a
     /// user key in `[lo, hi)` (None = unbounded end), the executor module
-    /// `module` is asynchronously invoked with the touched keys as input.
+    /// `module` is asynchronously invoked. The module's exports pick the
+    /// consumption mode, returned for confirmation: `on_apply` present →
+    /// [`TriggerMode::Changes`], the ordered per-op change feed; otherwise
+    /// [`TriggerMode::Keys`], the coalesced touched keys handed to `run`.
     /// Events are durable (they commit atomically with the triggering
     /// write) and consumption is exactly-once — see `Db::list_triggers` for
     /// backlog and failure visibility.
@@ -1434,7 +1481,7 @@ impl Db {
         module: &str,
         lo: Option<&[u8]>,
         hi: Option<&[u8]>,
-    ) -> Result<()> {
+    ) -> Result<crate::trigger::TriggerMode> {
         crate::trigger::create_trigger(&self.inner, name, module, lo, hi)
     }
 
@@ -1571,7 +1618,11 @@ fn commit_thread(db: Arc<DbInner>) {
                 .iter()
                 .map(|w| {
                     let mut g = w.inner.lock();
-                    (g.ops.take().expect("ops present"), g.validate.take())
+                    (
+                        g.ops.take().expect("ops present"),
+                        g.validate.take(),
+                        g.capture,
+                    )
                 })
                 .collect();
 
@@ -1588,7 +1639,7 @@ fn commit_thread(db: Arc<DbInner>) {
                 let mut written: std::collections::HashSet<&[u8]> =
                     std::collections::HashSet::new();
                 let mut included: Vec<usize> = Vec::with_capacity(entries.len());
-                for (i, (ops, validate)) in entries.iter().enumerate() {
+                for (i, (ops, validate, _)) in entries.iter().enumerate() {
                     if let Some((snap, keys)) = validate {
                         let conflict = keys.iter().try_fold(false, |hit, key| {
                             if hit || written.contains(key.as_slice()) {
@@ -1624,8 +1675,10 @@ fn commit_thread(db: Arc<DbInner>) {
                         results[i] = Some(Ok(()));
                     }
                 }
-                let refs: Vec<&[BatchOp]> =
-                    included.iter().map(|&i| entries[i].0.as_slice()).collect();
+                let refs: Vec<(&[BatchOp], bool)> = included
+                    .iter()
+                    .map(|&i| (entries[i].0.as_slice(), entries[i].2))
+                    .collect();
                 if !refs.is_empty() {
                     let applied = db.apply_group_locked(&mut ws, &refs);
                     for (&i, r) in included.iter().zip(applied) {
@@ -2765,7 +2818,11 @@ mod group_commit_tests {
         let mut ws = inner.write_mu.lock();
         let results = inner.apply_group_locked(
             &mut ws,
-            &[one_a.as_slice(), three.as_slice(), one_b.as_slice()],
+            &[
+                (one_a.as_slice(), false),
+                (three.as_slice(), false),
+                (one_b.as_slice(), false),
+            ],
         );
         drop(ws);
 

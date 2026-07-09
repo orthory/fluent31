@@ -49,7 +49,7 @@ pub use journal::{Journal, JournalStats, RebuildReport};
 #[cfg(feature = "fault-injection")]
 pub use io::{DbFile, Io, ReadReq};
 #[cfg(feature = "wasm")]
-pub use trigger::TriggerInfo;
+pub use trigger::{TriggerInfo, TriggerMode};
 pub use txn::Txn;
 pub use types::{SeqNo, ValueKind};
 #[cfg(feature = "wasm")]

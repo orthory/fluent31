@@ -207,9 +207,9 @@ pub fn sys_trigger_key(name: &str) -> Vec<u8> {
     k
 }
 
-/// Pending-event record: `\x00trgq\x00<name>\x00<user key>`. The touched
-/// user key IS the queue key, so re-touches coalesce to one pending event.
-/// (Trigger names cannot contain 0x00, so the layout is unambiguous.)
+/// Keys-mode pending-event record: `\x00trgq\x00<name>\x00<user key>`. The
+/// touched user key IS the queue key, so re-touches coalesce to one pending
+/// event. (Trigger names cannot contain 0x00, so the layout is unambiguous.)
 #[cfg(feature = "wasm")]
 pub fn sys_trigger_event_key(name: &str, user_key: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(7 + name.len() + user_key.len());
@@ -219,6 +219,22 @@ pub fn sys_trigger_event_key(name: &str, user_key: &[u8]) -> Vec<u8> {
     k.extend_from_slice(name.as_bytes());
     k.push(0);
     k.extend_from_slice(user_key);
+    k
+}
+
+/// Changes-mode pending-event record: `\x00trgq\x00<name>\x00<be64 seqno>`.
+/// The queue key is the triggering op's commit seqno, so events are unique
+/// per committed op and iterate in commit order — the opposite of keys-mode
+/// coalescing, by design (the record value carries the change itself).
+#[cfg(feature = "wasm")]
+pub fn sys_trigger_change_key(name: &str, seqno: SeqNo) -> Vec<u8> {
+    let mut k = Vec::with_capacity(15 + name.len());
+    k.push(SYS_PREFIX);
+    k.extend_from_slice(b"trgq");
+    k.push(0);
+    k.extend_from_slice(name.as_bytes());
+    k.push(0);
+    k.extend_from_slice(&seqno.to_be_bytes());
     k
 }
 
