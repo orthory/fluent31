@@ -5,7 +5,7 @@
 //! `(file id, offset)` — coordinates unique only within one store lifetime.
 //! The instance id is the outer qualifier: minted at creation, re-minted at
 //! every point where history can diverge (first read-write open of a
-//! checkpoint archive, `restore_to`), compared by pure equality. It is
+//! fork archive, `restore_to`), compared by pure equality. It is
 //! *derived*, not random — `H(name)` for a root store, `H(parent ‖ cut ‖
 //! name)` for a fork — so the chain is reproducible from lineage metadata
 //! and uniqueness is an operator contract (fleet-unique store names), like
@@ -30,7 +30,7 @@ pub struct StoreIdentity {
     pub name: String,
     pub instance_id: InstanceId,
     /// Fork lineage: `(parent instance, cut seqno)` when this store began
-    /// as a checkpoint fork or restore; `None` for a root store.
+    /// as a fork or restore; `None` for a root store.
     pub parent: Option<(InstanceId, SeqNo)>,
 }
 
@@ -48,7 +48,7 @@ impl StoreIdentity {
     }
 }
 
-/// A fork recorded by checkpoint/restore but not yet minted. The first
+/// A fork recorded by fork creation or restore but not yet minted. The first
 /// read-write open consumes it: derives the child id and persists the new
 /// identity, so one archive can fork in place at most once (and each
 /// `restore_to` copy names its own fork).
@@ -56,7 +56,7 @@ impl StoreIdentity {
 pub struct PendingFork {
     pub parent_instance_id: InstanceId,
     pub cut_seqno: SeqNo,
-    /// The child's store name, fixed at checkpoint/restore time.
+    /// The child's store name, fixed at fork/restore time.
     pub name: String,
 }
 
@@ -99,7 +99,7 @@ pub fn hex(id: &InstanceId) -> String {
     id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Store names share the checkpoint-name charset: they become fork names
+/// Store names share the fork-name charset: they become fork names
 /// for archives (directory names) and travel in replication handshakes.
 pub fn validate_store_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()

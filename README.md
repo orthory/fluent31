@@ -19,9 +19,12 @@ An embedded key-value database engine in Rust:
   range: schema-free custom indexes and materialized views with no writer
   cooperation. Events are durable (they commit atomically with the
   triggering write), coalesced per key, and consumed exactly-once.
-- **PITR checkpoints** — `checkpoint("name")` hard-links the immutable files
-  into `archive/name/`, which is itself a complete database directory:
-  restore = open, and opening read-write forks copy-on-write.
+- **Database forks** — not PITR (no log archiving, no
+  restore-to-arbitrary-time; a fork is a named cut): `fork("name")` pins an
+  MVCC snapshot and hard-links the immutable files into `archive/name/`, so
+  creation copies almost nothing and leaves live readers/writers
+  undisturbed. Each fork is itself a complete database directory — open it
+  read-write and it's a live, copy-on-write clone of the parent.
 
 See [DESIGN.md](DESIGN.md) for the full architecture.
 
@@ -50,9 +53,9 @@ for kv in db.iter(Some(b"user/"), Some(b"user0"), false)? {
     let (k, v) = kv?;
 }
 
-// point-in-time checkpoint; restore by just opening the archive dir
-let cp = db.checkpoint("before-migration")?;
-let frozen = Db::open(&cp.path, Options::default())?;
+// fork — an MVCC cut, hard-linked; open it for a writable CoW clone
+let fork = db.fork("before-migration")?;
+let clone = Db::open(&fork.path, Options::default())?;
 ```
 
 ## WASM instead of SQL
@@ -121,8 +124,8 @@ fluent31> get hello
 "world"  (28.7 µs)
 fluent31> scan - - --limit 10
    1) "hello" => "world"  (237.6 µs)
-fluent31> checkpoint snap1
-checkpoint snap1 @ seq 2 -> ./data/archive/snap1  (61.20 ms)
+fluent31> fork snap1
+fork snap1 @ seq 2 -> ./data/archive/snap1  (61.20 ms)
 fluent31> stats
 backend        std
 visible seqno  2
@@ -143,7 +146,15 @@ cargo run -p fluent-graphql -- --print-schema    # dump the SDL
 
 One schema covers both the direct operations and the registered WASM
 programs. Every field of a single GraphQL query operation executes at one
-pinned MVCC snapshot, so multi-field reads are mutually consistent:
+pinned MVCC snapshot, so multi-field reads are mutually consistent.
+
+The server routes by instance: the primary database answers at
+`/graphql`, and every fork answers at `/graphql/<instanceId>` with the
+same full surface (its own schema, modules, even its own forks). The
+`fork` mutation returns the new branch's `instanceId`; instances open
+lazily on first request and idle ones close automatically. The id is an
+address, not a credential — put real access control in front if you need
+isolation.
 
 ```graphql
 query {
@@ -165,7 +176,7 @@ mutation {
   installModule(name: "agg", wasm: {base64: "..."}) { name size }
   createTrigger(name: "idx", module: "customer_index",
                 lo: {text: "orders/"}, hi: {text: "orders0"})
-  checkpoint(name: "snap1") { lastSeqno }
+  fork(name: "snap1") { instanceId }   # branch this instance
 }
 ```
 

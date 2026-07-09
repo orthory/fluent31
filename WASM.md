@@ -281,14 +281,14 @@ reference scalars only. `output` may reference a declared type.
   starting with `__` (only relevant for described modules; undescribed
   ones keep the engine's looser `[A-Za-z0-9._-]` rule);
 - module name must not shadow a built-in root field (`get`, `scan`,
-  `wasm`, `modules`, `stats`, `checkpoints`, `triggers`, `snapshotSeqno`,
+  `wasm`, `modules`, `stats`, `forks`, `triggers`, `snapshotSeqno`,
   `put`, `delete`, `writeBatch`, `wasmExecute`, `installModule`,
-  `uninstallModule`, `createTrigger`, `deleteTrigger`, `checkpoint`,
-  `deleteCheckpoint`, `flush`, `compactAll`, `gcVlog`, `reloadSchema`,
+  `uninstallModule`, `fork`, `deleteFork`, `createTrigger`,
+  `deleteTrigger`, `flush`, `compactAll`, `gcVlog`, `reloadSchema`,
   `syncWal`);
 - declared type names must not be reserved (`Query`, `Mutation`,
   `Subscription`, `Bytes`, `BytesInput`, `U64`, `Json`, `Pair`,
-  `ScanPage`, `Module`, `Checkpoint`, `GcResult`, `LevelStats`, `Stats`,
+  `ScanPage`, `Module`, `Fork`, `Trigger`, `GcResult`, `LevelStats`, `Stats`,
   `WriteOp`, `PutOp`, `String`, `Int`, `Float`, `Boolean`, `ID`) and must
   not collide with a type another installed module already declares —
   prefix yours (`PlacedOrder`, not `Order`... think `MyModX`);

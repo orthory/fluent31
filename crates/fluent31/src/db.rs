@@ -19,7 +19,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::batch::{decode_batch, encode_batch, BatchOp, EncEntry, WriteBatch};
 use crate::cache::BlockCache;
-use crate::checkpoint::CheckpointInfo;
+use crate::fork::ForkInfo;
 use crate::config::{DbPaths, Options, SyncMode};
 use crate::error::{corrupt, Error, Result};
 use crate::identity::StoreIdentity;
@@ -317,7 +317,7 @@ impl DbInner {
     }
 
     /// Register a snapshot at an explicit (already-visible) seqno — used by
-    /// checkpoints to pin their cut.
+    /// forks to pin their cut.
     pub fn register_snapshot_at(&self, seq: SeqNo) {
         debug_assert!(seq <= self.visible_seqno.load(Ordering::Acquire));
         self.snapshots.lock().register(seq);
@@ -939,7 +939,7 @@ impl DbInner {
     }
 
     /// Rotate the memtable even below the size threshold (flush(),
-    /// checkpoints). No-op when the memtable is empty.
+    /// forks). No-op when the memtable is empty.
     pub fn force_rotate(&self) -> Result<()> {
         let mut ws = self.write_mu.lock();
         let non_empty = !self.state.read().mem.is_empty();
@@ -1431,18 +1431,23 @@ impl Db {
         crate::trigger::list_triggers(&self.inner)
     }
 
-    // -------------------------------------------------------- checkpoints
+    // -------------------------------------------------------- forks
 
-    pub fn checkpoint(&self, name: &str) -> Result<CheckpointInfo> {
-        crate::checkpoint::create(self, name)
+    /// The directory this database was opened at.
+    pub fn path(&self) -> &std::path::Path {
+        &self.inner.paths.dir
     }
 
-    pub fn list_checkpoints(&self) -> Result<Vec<CheckpointInfo>> {
-        crate::checkpoint::list(&self.inner.paths)
+    pub fn fork(&self, name: &str) -> Result<ForkInfo> {
+        crate::fork::create(self, name)
     }
 
-    pub fn delete_checkpoint(&self, name: &str) -> Result<()> {
-        crate::checkpoint::delete(&self.inner.paths, name)
+    pub fn list_forks(&self) -> Result<Vec<ForkInfo>> {
+        crate::fork::list(&self.inner.paths)
+    }
+
+    pub fn delete_fork(&self, name: &str) -> Result<()> {
+        crate::fork::delete(&self.inner.paths, name)
     }
 }
 
@@ -2018,7 +2023,7 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
     // ---- startup GC of unreferenced files ----------------------------------
     startup_gc(&inner)?;
 
-    // sweep checkpoint builds that crashed mid-creation (we hold the LOCK,
+    // sweep fork builds that crashed mid-creation (we hold the LOCK,
     // so nothing can be legitimately building right now)
     if let Ok(rd) = std::fs::read_dir(inner.paths.archive_root()) {
         for entry in rd.flatten() {
@@ -2056,7 +2061,7 @@ fn init_fresh(paths: &DbPaths, _io: &dyn Io) -> Result<()> {
 
 /// Resolve the store identity at open: verify a persisted name against
 /// `Options::store_name`, adopt a name onto an unnamed store, or mint a
-/// pending fork (first read-write open of a checkpoint archive or restored
+/// pending fork (first read-write open of a fork archive or restored
 /// copy). See identity.rs for why derivation being deterministic makes this
 /// crash-safe without any extra commit ordering.
 fn resolve_identity(mdata: &mut ManifestData, requested: Option<&str>) -> Result<()> {
@@ -2064,11 +2069,11 @@ fn resolve_identity(mdata: &mut ManifestData, requested: Option<&str>) -> Result
         crate::identity::validate_store_name(name)?;
     }
     if let Some(pf) = mdata.pending_fork.take() {
-        // the fork name was fixed at checkpoint/restore time; an explicit
+        // the fork name was fixed at fork/restore time; an explicit
         // store_name must agree with it
         if requested.is_some_and(|r| r != pf.name) {
             return Err(Error::InvalidArgument(format!(
-                "store_name {:?} conflicts with fork name {:?} fixed at checkpoint/restore",
+                "store_name {:?} conflicts with fork name {:?} fixed at fork/restore",
                 requested.unwrap_or_default(),
                 pf.name
             )));

@@ -222,7 +222,7 @@ fn replaced_master_forces_full_reattach() {
         master.put(k(i), v(i, "orig")).unwrap();
     }
     // fork point: everything after this exists only on the original
-    let info = master.checkpoint("cut").unwrap();
+    let info = master.fork("cut").unwrap();
     for i in 0..100u32 {
         master.put(k(i), v(i, "post-cut")).unwrap();
     }
@@ -236,7 +236,7 @@ fn replaced_master_forces_full_reattach() {
     });
     let instance_before = replica.master().instance_id;
 
-    // replace the master wholesale with a restored fork of the checkpoint
+    // replace the master wholesale with a restored copy of the fork
     let fork_dir = mdir.path().join("fork");
     fluent31::restore_to(&info.path, &fork_dir, Some("prov-fork")).unwrap();
     drop(harness);

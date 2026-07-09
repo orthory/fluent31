@@ -3,7 +3,7 @@
 //! One dynamically-built schema exposes three layers:
 //!
 //! 1. **Direct operations** — `get`, `scan`, `put`, `delete`, `writeBatch`,
-//!    module/checkpoint/maintenance admin (see `builtins.rs`).
+//!    module/maintenance admin (see `builtins.rs`).
 //! 2. **Generic WASM access** — `Query.wasm` / `Mutation.wasmExecute` run
 //!    any installed module with raw byte input/output.
 //! 3. **Typed module fields** — a module exporting `describe` (fluentabi v1
@@ -27,6 +27,8 @@ mod bytes;
 mod descriptor;
 mod error;
 mod modules;
+mod registry;
+mod router;
 mod schema;
 
 use std::collections::BTreeMap;
@@ -39,6 +41,8 @@ use tokio::sync::Semaphore;
 
 pub use descriptor::{parse_descriptor, ModuleSchema};
 pub use error::engine_err;
+pub use registry::{InstanceRegistry, RegistryConfig, ResolveError};
+pub use router::router;
 
 /// The engine parks stalled writers on 100ms condvar waits when flush or
 /// compaction falls behind (`wait_for_space`), holding their blocking-pool
@@ -46,6 +50,11 @@ pub use error::engine_err;
 /// tokio's blocking pool and queue every read behind them. These caps keep
 /// the pool's worst case at READ_PERMITS + WRITE_PERMITS threads, so one
 /// class can never starve the other; excess calls queue on the semaphore.
+///
+/// One pool per served *tree*: fork instances share the primary's permits
+/// (see [`InstanceRegistry`]), so the number of open instances cannot
+/// multiply the blocking-pool worst case.
+#[derive(Clone)]
 pub(crate) struct EnginePermits {
     pub(crate) read: Arc<Semaphore>,
     pub(crate) write: Arc<Semaphore>,
@@ -102,26 +111,56 @@ pub struct SchemaManager {
     /// Handed to resolvers via schema data (Weak: the schema itself lives
     /// inside this manager — a strong Arc would be a reference cycle).
     weak: Weak<SchemaManager>,
+    /// Back-reference to the registry serving this manager, when one is
+    /// (Weak: the registry holds this manager). `deleteFork` uses it to
+    /// close a served fork before deleting it.
+    registry: RwLock<Option<Weak<registry::RegistryShared>>>,
 }
 
 impl SchemaManager {
     /// Open the manager over a database handle: runs every installed
     /// module's `describe` once and builds the initial schema.
     pub fn new(db: Arc<Db>) -> Result<Arc<SchemaManager>, fluent31::Error> {
+        Self::with_permits(
+            db,
+            EnginePermits {
+                read: Arc::new(Semaphore::new(READ_PERMITS)),
+                write: Arc::new(Semaphore::new(WRITE_PERMITS)),
+            },
+        )
+    }
+
+    /// As [`SchemaManager::new`] but sharing an existing permit pool —
+    /// used by the instance registry so every instance of one served tree
+    /// draws from the primary's caps.
+    pub(crate) fn with_permits(
+        db: Arc<Db>,
+        permits: EnginePermits,
+    ) -> Result<Arc<SchemaManager>, fluent31::Error> {
         let cache = schema::collect_outcomes(&db, &BTreeMap::new())?;
         let statuses = schema::statuses_from_outcomes(&cache);
         Ok(Arc::new_cyclic(|weak| SchemaManager {
             db,
-            permits: EnginePermits {
-                read: Arc::new(Semaphore::new(READ_PERMITS)),
-                write: Arc::new(Semaphore::new(WRITE_PERMITS)),
-            },
+            permits,
             schema: RwLock::new(schema::build(weak.clone(), &statuses)),
             statuses: RwLock::new(statuses),
             describe_cache: RwLock::new(cache),
             rebuild_lock: tokio::sync::Mutex::new(()),
             weak: weak.clone(),
+            registry: RwLock::new(None),
         }))
+    }
+
+    pub(crate) fn permit_handles(&self) -> EnginePermits {
+        self.permits.clone()
+    }
+
+    pub(crate) fn attach_registry(&self, reg: Weak<registry::RegistryShared>) {
+        *self.registry.write().unwrap() = Some(reg);
+    }
+
+    pub(crate) fn registry_shared(&self) -> Option<Arc<registry::RegistryShared>> {
+        self.registry.read().unwrap().as_ref().and_then(Weak::upgrade)
     }
 
     /// The underlying database handle (tests and embedders; GraphQL-side

@@ -53,7 +53,7 @@ pub(crate) struct ManifestData {
     /// Store identity (name, instance id, lineage); `None` for an unnamed
     /// store. Immutable once set except through a pending fork.
     pub identity: Option<StoreIdentity>,
-    /// A fork recorded by checkpoint/restore, consumed (minted into
+    /// A fork recorded by fork creation or restore, consumed (minted into
     /// `identity`) by the first read-write open. See `identity.rs`.
     pub pending_fork: Option<PendingFork>,
 }
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(enc[8..12].try_into().unwrap()), 2);
         assert_eq!(ManifestData::decode(&enc).unwrap(), d);
 
-        // fork lineage + pending fork together (a forked store checkpointing)
+        // fork lineage + pending fork together (a forked store forking again)
         let parent = StoreIdentity::root("main");
         d.identity = Some(PendingFork {
             parent_instance_id: parent.instance_id,

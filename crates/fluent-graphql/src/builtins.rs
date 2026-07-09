@@ -1,14 +1,21 @@
-//! Built-in root fields: direct KV operations, generic WASM access, and
-//! module/checkpoint/maintenance admin.
+//! Built-in root fields: direct KV operations, generic WASM access,
+//! instance branching (forks), and module/maintenance admin.
+//!
+//! Every root here is served per *instance*: the same built-in surface is
+//! built over whichever database the request's path routed to (primary at
+//! `/graphql`, forks at `/graphql/<instanceId>` — see `registry.rs`).
+//! `fork` returns the new branch's instanceId; access control for
+//! instances is an authn concern above this layer, the id is only an
+//! address.
 //!
 //! Every fallible field is nullable so a per-field failure stays
 //! representable in the response (`errors` entry + null field) without
 //! spec-invalid partial objects — sibling fields keep their data. Key/value
 //! reads (`get`, `scan`, `wasm`, typed module queries, `snapshotSeqno`)
 //! execute at the operation's single pinned MVCC snapshot; the admin
-//! listings (`modules`, `checkpoints`, `stats`) read current state — module
-//! metadata and archives are not MVCC-versioned views. Mutation fields run
-//! serially in document order.
+//! listings (`modules`, `forks`, `stats`) read current state — module
+//! metadata and fork archives are not MVCC-versioned views. Mutation
+//! fields run serially in document order.
 
 use async_graphql::dynamic::{
     Field, FieldFuture, FieldValue, InputValue, Object, ResolverContext, TypeRef,
@@ -64,9 +71,10 @@ fn obj(entries: Vec<(&str, Value)>) -> Value {
     )
 }
 
-fn checkpoint_value(c: fluent31::CheckpointInfo) -> Value {
+fn fork_value(c: fluent31::ForkInfo) -> Value {
     obj(vec![
         ("name", Value::String(c.name)),
+        ("instanceId", Value::String(c.instance_id)),
         ("createdUnixMs", Value::String(c.created_unix_ms.to_string())),
         ("lastSeqno", Value::String(c.last_seqno.to_string())),
         ("path", Value::String(c.path.display().to_string())),
@@ -300,17 +308,20 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             .description("Engine statistics (not snapshot-bound)."),
         )
         .field(
-            Field::new("checkpoints", TypeRef::named_nn_list("Checkpoint"), |ctx| {
+            Field::new("forks", TypeRef::named_nn_list("Fork"), |ctx| {
                 FieldFuture::new(async move {
                     let mgr = manager(&ctx)?;
                     let db = mgr.db.clone();
-                    let list = mgr.blocking_read(move || db.list_checkpoints()).await?;
+                    let list = mgr.blocking_read(move || db.list_forks()).await?;
                     Ok(Some(FieldValue::value(Value::List(
-                        list.into_iter().map(checkpoint_value).collect(),
+                        list.into_iter().map(fork_value).collect(),
                     ))))
                 })
             })
-            .description("Point-in-time checkpoint archives (current state, not snapshot-bound)."),
+            .description(
+                "This instance's forks (current state, not snapshot-bound). \
+                 Each fork is itself addressable at /graphql/<instanceId>.",
+            ),
         )
         .field(
             Field::new("triggers", TypeRef::named_nn_list("Trigger"), |ctx| {
@@ -536,30 +547,46 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             ),
         )
         .field(
-            Field::new("checkpoint", TypeRef::named("Checkpoint"), |ctx| {
+            Field::new("fork", TypeRef::named("Fork"), |ctx| {
                 FieldFuture::new(async move {
                     let name = arg_string(&ctx, "name")?;
                     let mgr = manager(&ctx)?;
                     let db = mgr.db.clone();
-                    let info = mgr.blocking_write(move || db.checkpoint(&name)).await?;
-                    Ok(Some(FieldValue::value(checkpoint_value(info))))
+                    let info = mgr.blocking_write(move || db.fork(&name)).await?;
+                    Ok(Some(FieldValue::value(fork_value(info))))
                 })
             })
             .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
-            .description("Create a named point-in-time checkpoint archive."),
+            .description(
+                "Branch this instance: cut an MVCC-pinned, hard-linked fork. \
+                 The returned instanceId addresses the new branch at \
+                 /graphql/<instanceId> (an address, not a credential).",
+            ),
         )
         .field(
-            Field::new("deleteCheckpoint", TypeRef::named(TypeRef::BOOLEAN), |ctx| {
+            Field::new("deleteFork", TypeRef::named(TypeRef::BOOLEAN), |ctx| {
                 FieldFuture::new(async move {
                     let name = arg_string(&ctx, "name")?;
                     let mgr = manager(&ctx)?;
+                    // a fork this server is itself serving holds its own
+                    // lock — close the idle instance first so the delete
+                    // isn't refused on our own account. In-flight requests
+                    // still make it fail cleanly (engine flock check).
                     let db = mgr.db.clone();
-                    mgr.blocking_write(move || db.delete_checkpoint(&name)).await?;
+                    let lookup = name.clone();
+                    let forks = mgr.blocking_read(move || db.list_forks()).await?;
+                    if let Some(info) = forks.iter().find(|f| f.name == lookup) {
+                        if let Some(reg) = mgr.registry_shared() {
+                            reg.close_by_path(&info.path);
+                        }
+                    }
+                    let db = mgr.db.clone();
+                    mgr.blocking_write(move || db.delete_fork(&name)).await?;
                     Ok(Some(FieldValue::value(true)))
                 })
             })
             .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
-            .description("Delete a checkpoint archive."),
+            .description("Delete a fork of this instance (refused while the fork is in use)."),
         )
         .field(
             Field::new("syncWal", TypeRef::named(TypeRef::BOOLEAN), |ctx| {

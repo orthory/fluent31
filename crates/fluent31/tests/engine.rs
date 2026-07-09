@@ -1,5 +1,5 @@
 //! End-to-end engine tests: CRUD, MVCC, flush/compaction, recovery, value
-//! log, checkpoints, transactions, and a randomized model test against a
+//! log, forks, transactions, and a randomized model test against a
 //! BTreeMap reference.
 
 use std::collections::BTreeMap;
@@ -361,6 +361,7 @@ fn vlog_gc_relocates_and_retires() {
         }
         db.flush().unwrap();
     }
+    let files_before = db.stats().vlog_files;
     // compaction records discard stats
     db.compact_all().unwrap();
     // run gc until nothing qualifies
@@ -369,7 +370,16 @@ fn vlog_gc_relocates_and_retires() {
         retired += 1;
         assert!(retired < 100, "gc runaway");
     }
-    assert!(retired > 0, "expected at least one vlog file to be retired");
+    // the background maintenance thread races this loop (auto_gc after its
+    // compaction passes) and may retire the victims first — assert the
+    // outcome, not which thread performed it
+    let s = db.stats();
+    assert!(
+        retired > 0 || s.vlog_retired > 0 || s.vlog_files < files_before,
+        "expected vlog retirement (explicit {retired}, gated {}, files {files_before} -> {})",
+        s.vlog_retired,
+        s.vlog_files
+    );
     // everything still readable, with the latest values
     for i in 0..40u32 {
         assert_eq!(db.get(&k(i)).unwrap().unwrap(), big(i, 3), "key {i}");
@@ -481,7 +491,7 @@ fn txn_iterator_merges_overlay() {
 }
 
 #[test]
-fn checkpoint_create_open_delete() {
+fn fork_create_open_delete() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), small_opts()).unwrap();
     for i in 0..80u32 {
@@ -491,7 +501,7 @@ fn checkpoint_create_open_delete() {
     for i in 0..10u32 {
         db.put(format!("big{i}").into_bytes(), vec![7u8; 300]).unwrap();
     }
-    let info = db.checkpoint("snap1").unwrap();
+    let info = db.fork("snap1").unwrap();
     assert_eq!(info.name, "snap1");
     assert!(info.path.exists());
 
@@ -516,18 +526,37 @@ fn checkpoint_create_open_delete() {
     assert!(db.get(b"fork-only").unwrap().is_none());
     assert_eq!(db.get(&k(0)).unwrap().unwrap(), v(0, "post"));
 
-    let listed = db.list_checkpoints().unwrap();
+    let listed = db.list_forks().unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "snap1");
 
-    db.delete_checkpoint("snap1").unwrap();
-    assert!(db.list_checkpoints().unwrap().is_empty());
+    db.delete_fork("snap1").unwrap();
+    assert!(db.list_forks().unwrap().is_empty());
     // parent unaffected by the unlink (hard links)
     assert_eq!(db.get(&k(3)).unwrap().unwrap(), v(3, "post"));
 }
 
 #[test]
-fn checkpoint_with_gc_interleaved() {
+fn fork_instance_ids_are_stable_and_unique() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    db.put(b"a".to_vec(), b"1".to_vec()).unwrap();
+    let a = db.fork("snap").unwrap();
+    assert_eq!(a.instance_id.len(), 32, "{}", a.instance_id);
+    // listing re-reads fork.meta: same id both through the handle and
+    // through the lock-free external listing
+    assert_eq!(db.list_forks().unwrap()[0].instance_id, a.instance_id);
+    let ext = fluent31::list_forks_at(dir.path()).unwrap();
+    assert_eq!(ext[0].instance_id, a.instance_id);
+    // delete + recreate mints a fresh id — stale handles must not resolve
+    // to the new fork
+    db.delete_fork("snap").unwrap();
+    let a2 = db.fork("snap").unwrap();
+    assert_ne!(a2.instance_id, a.instance_id);
+}
+
+#[test]
+fn fork_with_gc_interleaved() {
     let dir = tempfile::tempdir().unwrap();
     let mut opts = small_opts();
     opts.vlog_gc_ratio = 0.2;
@@ -539,7 +568,7 @@ fn checkpoint_with_gc_interleaved() {
         }
         db.flush().unwrap();
     }
-    let info = db.checkpoint("mid").unwrap();
+    let info = db.fork("mid").unwrap();
     db.compact_all().unwrap();
     while db.gc_vlog().unwrap().is_some() {}
     db.flush().unwrap();
@@ -1027,17 +1056,32 @@ fn identity_mint_reopen_adopt() {
     }
 }
 
+/// The routing id recorded in fork.meta at creation must equal the store
+/// identity the fork mints on its first read-write open — routing and
+/// replication share one id for named lineages.
+#[test]
+fn fork_instance_id_matches_minted_identity_for_named_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), named_opts("root-store")).unwrap();
+    db.put(b"a".to_vec(), b"1".to_vec()).unwrap();
+    let info = db.fork("branch").unwrap();
+    let fdb = Db::open(&info.path, Options::default()).unwrap();
+    let minted = fdb.identity().expect("named lineage mints on open");
+    assert_eq!(info.instance_id, minted.instance_hex());
+    assert_eq!(minted.name, "branch");
+}
+
 /// Forks mint deterministic child identities: in-place archive open and
 /// restore_to copies each fork under their own name; restores of a named
 /// lineage without a new name are refused.
 #[test]
-fn identity_forks_via_checkpoint_and_restore() {
+fn identity_forks_via_fork_and_restore() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), named_opts("main")).unwrap();
     for i in 0..50u32 {
         db.put(k(i), v(i, "pre")).unwrap();
     }
-    let info = db.checkpoint("nightly").unwrap();
+    let info = db.fork("nightly").unwrap();
     let parent_id = db.identity().unwrap();
 
     // named lineage: restore without a new name is refused (two copies of

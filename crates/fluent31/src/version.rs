@@ -5,7 +5,7 @@
 //! merges resumable. A `Version` is the levels array plus the live value-log
 //! file set; both tables and vlog files are lifetime-managed by Arc handles —
 //! **file unlink happens exclusively in handle Drop** (after `mark_obsolete`),
-//! so pinned versions (readers, checkpoints) keep paths alive for hard-links.
+//! so pinned versions (readers, forks) keep paths alive for hard-links.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

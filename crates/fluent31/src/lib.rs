@@ -1,6 +1,6 @@
 //! fluent31 — an embedded LSM key-value engine with MVCC snapshots and
 //! transactions, io_uring-backed IO on Linux, WiscKey-style key-value
-//! separation, manual point-in-time checkpoints, and an in-database WASM
+//! separation, copy-on-write database forks, and an in-database WASM
 //! execution layer that replaces SQL.
 //!
 //! See DESIGN.md at the repository root for the full architecture.
@@ -9,13 +9,13 @@ mod batch;
 mod block;
 mod bloom;
 mod cache;
-mod checkpoint;
 mod coding;
 mod compaction;
 mod config;
 mod db;
 pub mod edge;
 mod error;
+mod fork;
 pub mod identity;
 mod io;
 mod iter;
@@ -48,4 +48,4 @@ pub use types::{SeqNo, ValueKind};
 #[cfg(feature = "wasm")]
 pub use wasm::ModuleInfo;
 
-pub use checkpoint::{restore_to, CheckpointInfo};
+pub use fork::{list_at as list_forks_at, restore_to, ForkInfo};

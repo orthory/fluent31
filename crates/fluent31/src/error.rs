@@ -7,7 +7,7 @@ pub enum Error {
     Io(std::io::Error),
     /// On-disk data failed validation (bad CRC, truncated structure, bad magic).
     Corruption(String),
-    /// Caller misuse: reserved key prefix, bad checkpoint name, unknown module...
+    /// Caller misuse: reserved key prefix, bad fork name, unknown module...
     InvalidArgument(String),
     /// Optimistic transaction lost a first-committer-wins race.
     Conflict,

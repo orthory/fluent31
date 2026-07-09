@@ -123,7 +123,7 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 /// Hard-link `src` to `dst`; fall back to a full copy (+fsync) when the
-/// filesystem refuses links. Used by checkpoints — sources are immutable.
+/// filesystem refuses links. Used by forks — sources are immutable.
 pub fn hard_link_or_copy(src: &Path, dst: &Path) -> Result<()> {
     match std::fs::hard_link(src, dst) {
         Ok(()) => Ok(()),
