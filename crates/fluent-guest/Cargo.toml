@@ -5,3 +5,4 @@ edition.workspace = true
 description = "Guest-side SDK for writing fluent31 WASM queries and executors"
 
 [dependencies]
+fluent-guest-macros = { path = "../fluent-guest-macros" }

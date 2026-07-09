@@ -123,6 +123,12 @@ pub struct Options {
     /// Max touched keys handed to one trigger invocation (the runner drains
     /// a backlog in chunks of this many events).
     pub trigger_batch: usize,
+    /// Changes-mode triggers inline the written value into the event record
+    /// up to this size; larger values are elided (the event still carries
+    /// the key — the module reads the value on demand). Bounds queue write
+    /// amplification and keeps every event deliverable within
+    /// `max_wasm_input` (the engine additionally clamps inlining to fit).
+    pub trigger_inline_value: usize,
 }
 
 impl Default for Options {
@@ -159,6 +165,7 @@ impl Default for Options {
             max_wasm_scans: 64,
             wasm_module_cache: 32,
             trigger_batch: 512,
+            trigger_inline_value: 64 << 10,
         }
     }
 }

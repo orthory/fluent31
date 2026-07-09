@@ -2,7 +2,7 @@
 #   cargo build --manifest-path guests/Cargo.toml --target wasm32-unknown-unknown --release
 [workspace]
 resolver = "2"
-members = ["agg", "transfer", "place_order", "top_customers", "customer_index"]
+members = ["agg", "transfer", "place_order", "top_customers", "customer_index", "order_feed"]
 
 [profile.release]
 opt-level = "s"

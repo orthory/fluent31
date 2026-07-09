@@ -1727,9 +1727,9 @@ fn trigger_admin_validation() {
     let db = Db::open(dir.path(), small_opts()).unwrap();
     db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
 
-    let is_invalid = |r: fluent31::Result<()>| {
+    fn is_invalid<T: std::fmt::Debug>(r: fluent31::Result<T>) {
         assert!(matches!(r, Err(Error::InvalidArgument(_))), "{r:?}");
-    };
+    }
     is_invalid(db.create_trigger("t", "nope", None, None));
     is_invalid(db.create_trigger("bad name", "mirror", None, None));
     is_invalid(db.create_trigger("t", "mirror", Some(b"b"), Some(b"a")));

@@ -8,19 +8,18 @@
 //! `count` is all matching keys and `summed` is how many contributed to the
 //! numeric aggregates.
 
+use fluent_guest::Fail;
+
 fn le_u64(v: &[u8]) -> Option<u64> {
     v.get(..8).map(|b| u64::from_le_bytes(b.try_into().unwrap()))
 }
 
-fn agg_main() -> i32 {
-    let prefix = fluent_guest::input();
+#[fluent_guest::main]
+fn agg(prefix: Vec<u8>) -> Result<Vec<u8>, Fail> {
     if prefix.is_empty() {
-        fluent_guest::log("agg: empty prefix not allowed");
-        return 2;
+        return Err(Fail::new(2, "empty prefix not allowed"));
     }
-    let Ok(scan) = fluent_guest::scan_prefix(&prefix) else {
-        return 3;
-    };
+    let scan = fluent_guest::scan_prefix(&prefix).map_err(|_| Fail::new(3, "scan failed"))?;
     let (mut count, mut summed, mut sum, mut min, mut max) = (0u64, 0u64, 0u64, u64::MAX, 0u64);
     for (_key, value) in scan {
         count += 1;
@@ -35,8 +34,5 @@ fn agg_main() -> i32 {
     for word in [count, summed, sum, min, max] {
         out.extend_from_slice(&word.to_le_bytes());
     }
-    fluent_guest::output(&out);
-    0
+    Ok(out)
 }
-
-fluent_guest::fluent_main!(agg_main);

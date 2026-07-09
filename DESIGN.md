@@ -288,48 +288,70 @@ them. The reserved keyspace is invisible through the ABI: writes EINVAL,
 scans clamped to the user keyspace.
 
 Guest SDK: `fluent-guest` (safe wrappers, growable scan batches, chunked
-big-value reads, `fluent_main!`). Example guests in `guests/`:
+big-value reads, typed `#[fluent_guest::main]`/`#[fluent_guest::on_apply]`
+attribute entry points over `FromInput`/`IntoOutput`/`Fail`, with
+`fluent_main!`/`fluent_on_apply!` as the raw exit-code layer; the
+attribute macros live in the dependency-free proc-macro crate
+`fluent-guest-macros`). Example guests in `guests/`:
 **agg** (prefix count/sum/min/max — the `SELECT agg WHERE prefix`
 replacement), **transfer** (balance transfer via `get_for_update` —
-the stored procedure replacement, exercised concurrently in tests), and
-**customer_index** (a trigger-maintained secondary index — the
-`CREATE INDEX` replacement).
+the stored procedure replacement, exercised concurrently in tests),
+**customer_index** (a keys-mode trigger-maintained secondary index — the
+`CREATE INDEX` replacement), and **order_feed** (a changes-mode ordered
+changefeed — the CDC/audit-log replacement).
 
 ### Write-range triggers (`trigger.rs`)
 
-The async fan-out from committed writes to executor modules — the
-schema-free replacement for SQL indexes/materialized views. A trigger is
-`(name, module, [lo, hi))`, persisted at `\x00trg\x00<name>` and mirrored
-in an in-memory registry (an `Arc<Vec<_>>` swapped whole on create/delete;
-the write path pays one read-lock clone per batch, nothing when empty).
+The async fan-out from committed writes to modules — the schema-free
+replacement for SQL indexes/materialized views/changefeeds. A trigger is
+`(name, module, [lo, hi), mode)`, persisted at `\x00trg\x00<name>` and
+mirrored in an in-memory registry (an `Arc<Vec<_>>` swapped whole on
+create/delete; the write path pays one read-lock clone per batch, nothing
+when empty). The mode is detected from the module's exports at
+registration: `on_apply` present → **changes**, else **keys**.
 
-**Capture.** `write_batch` and `Txn::commit` match their *logical* write
-keys against the registry and append event records to the same batch —
-same WAL record, same seqno range, same crash atomicity: "the write
-happened" and "the trigger owes a run" are inseparable. Engine-internal
-writes bypass capture entirely (vlog-GC relocations rewrite placement, not
-state; system-txn commits — see below — enforce no-stacking).
+**Capture.** Both apply paths (`apply_locked` and its group-commit twin)
+match each capture-eligible batch's *logical* write keys against the
+registry and append event records to the batch being applied — same WAL
+record, same seqno range, same crash atomicity: "the write happened" and
+"the trigger owes a run" are inseparable. Capture runs INSIDE the commit
+critical section, after the batch's base seqno is fixed, because
+changes-mode queue keys embed each op's commit seqno — capture anywhere
+earlier could order the feed differently from the commits it describes
+(tests/trigger_changes.rs proves this against the replication stream).
+Eligibility rides the batch: user writes and non-system txn commits
+capture; engine-internal writes bypass capture entirely (vlog-GC
+relocations rewrite placement, not state; system-txn commits — see below —
+enforce no-stacking).
 
-**Queue.** The event key is `\x00trgq\x00<name>\x00<touched user key>` with
-an empty value: the touched key IS the queue key, so a hot key coalesces
-to one pending event no matter how far the runner lags, and queue depth is
-bounded by distinct touched keys. This encodes the delivery semantic: an
-event means "reconcile this key against current state", not "replay this
-op" — modules read the key and converge, making replays and reordering
-harmless by construction.
+**Queue.** Keys mode: the event key is
+`\x00trgq\x00<name>\x00<touched user key>` with an empty value — the
+touched key IS the queue key, so a hot key coalesces to one pending event
+no matter how far the runner lags, and queue depth is bounded by distinct
+touched keys. This encodes the delivery semantic: an event means
+"reconcile this key against current state", not "replay this op" —
+modules read the key and converge, making replays and reordering harmless
+by construction. Changes mode inverts the trade:
+`\x00trgq\x00<name>\x00<be64 op seqno>` with the change itself as the
+value (kind, key, and the written value up to `trigger_inline_value`;
+larger values elided) — one event per op, iterating in commit order, no
+coalescing. Drains never conflict with capture there (fresh seqnos, fresh
+keys), so a busy range cannot starve its own feed.
 
 **Runner.** A dedicated thread (parked on a signal notified by capturing
 commits) discovers backlogged triggers by skip-seeking the queue prefix,
 then drains each in chunks of `trigger_batch`: it invokes the module as a
-normal executor whose transaction is pre-seeded — marked *system* and
-carrying deletes of the consumed queue entries. The module's writes and
-the queue consumption therefore commit atomically: invocation is
-at-least-once (a crash mid-run re-fires), effects are exactly-once. The
-consumed entries sit in the transaction's write set, so OCC closes the
-drain race for free: a re-touch after the drain snapshot rewrites the
-queue key, conflicts the commit, and the attempt re-runs against a fresh
-snapshot. System-txn commits skip capture, so a trigger's own writes never
-enqueue events — no cascades, no loops, by decree.
+normal executor — entry `run` with packed touched keys (keys mode) or
+`on_apply` with the wire-framed change list (changes mode) — whose
+transaction is pre-seeded: marked *system* and carrying deletes of the
+consumed queue entries. The module's writes and the queue consumption
+therefore commit atomically: invocation is at-least-once (a crash mid-run
+re-fires), effects are exactly-once. The consumed entries sit in the
+transaction's write set, so OCC closes the keys-mode drain race for free:
+a re-touch after the drain snapshot rewrites the queue key, conflicts the
+commit, and the attempt re-runs against a fresh snapshot. System-txn
+commits skip capture, so a trigger's own writes never enqueue events — no
+cascades, no loops, by decree.
 
 **Failure.** A failing module (guest error, missing module, conflict
 exhaustion) never loses events: the batch stays queued, the runner backs

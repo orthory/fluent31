@@ -12,7 +12,11 @@
 //! consumption commit together or not at all. Invocation is therefore
 //! at-least-once; effects are exactly-once.
 //!
-//! Semantics, deliberately chosen:
+//! A trigger consumes committed writes in one of two modes, auto-detected
+//! at registration from the module's exports (`on_apply` present → changes
+//! mode; plain `run` → keys mode):
+//!
+//! **Keys mode** (module entry `run`):
 //!
 //! - An event means "this key was touched", NOT "here is the op that
 //!   touched it". Queue keys are the touched user keys, so a hot key
@@ -23,6 +27,22 @@
 //!   sits in the transaction's write set, so a newer event record on the
 //!   same key conflicts the commit and the drain re-runs against a fresh
 //!   snapshot.
+//!
+//! **Changes mode** (module entry `on_apply`): the post-apply change feed.
+//!
+//! - One event per committed op — no coalescing. The queue key is the op's
+//!   commit seqno and the record value carries the change itself (kind,
+//!   key, and the written value up to `trigger_inline_value`; larger
+//!   values are elided and read on demand). The module receives the
+//!   ordered "list of changes committed", filters it in code, and its
+//!   effects are exactly-once per change.
+//! - Capture happens inside the commit critical section, so event order
+//!   IS commit order — the feed never misrepresents which write won a key.
+//! - Drains never conflict with capture (new events always take fresh
+//!   seqno keys), so a busy range cannot starve its own feed.
+//!
+//! Common to both modes:
+//!
 //! - No stacking: a trigger invocation commits through a *system*
 //!   transaction whose writes never generate events, so trigger graphs
 //!   cannot cascade or loop.
@@ -35,12 +55,13 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 
-use crate::batch::WriteBatch;
+use crate::batch::{BatchOp, WriteBatch};
 use crate::coding::{put_len_prefixed, put_uvarint, Reader};
+use crate::config::Options;
 use crate::db::{DbInner, Signal};
 use crate::error::{corrupt, Error, Result};
 use crate::types::{
-    sys_trigger_event_key, sys_trigger_key, sys_wasm_key, validate_user_key, MAX_SEQNO,
+    sys_trigger_change_key, sys_trigger_event_key, sys_trigger_key, validate_user_key, SeqNo,
     SYS_PREFIX,
 };
 
@@ -80,6 +101,32 @@ fn parse_event_key(key: &[u8]) -> Option<(&str, &[u8])> {
     Some((name, &rest[sep + 1..]))
 }
 
+/// How a trigger consumes committed writes (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerMode {
+    /// Coalesced touched-key events delivered to the module's `run`.
+    Keys,
+    /// Ordered per-op change events delivered to the module's `on_apply`.
+    Changes,
+}
+
+impl TriggerMode {
+    /// The module export a drain invokes for this mode.
+    pub fn entry(self) -> &'static str {
+        match self {
+            TriggerMode::Keys => "run",
+            TriggerMode::Changes => "on_apply",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TriggerMode::Keys => "keys",
+            TriggerMode::Changes => "changes",
+        }
+    }
+}
+
 /// A registered trigger, as listed by `Db::list_triggers`.
 #[derive(Debug, Clone)]
 pub struct TriggerInfo {
@@ -89,6 +136,7 @@ pub struct TriggerInfo {
     pub lo: Vec<u8>,
     /// Exclusive range end; empty = unbounded.
     pub hi: Vec<u8>,
+    pub mode: TriggerMode,
     /// Queued events not yet consumed by a successful invocation.
     pub pending: u64,
     /// Why the most recent drain attempt failed; None when healthy.
@@ -101,6 +149,7 @@ pub(crate) struct TriggerDef {
     pub module: String,
     pub lo: Vec<u8>,
     pub hi: Vec<u8>,
+    pub mode: TriggerMode,
 }
 
 impl TriggerDef {
@@ -111,19 +160,27 @@ impl TriggerDef {
 }
 
 fn encode_def(d: &TriggerDef) -> Vec<u8> {
-    let mut out = vec![1u8]; // record version
+    // keys-mode defs keep the v1 layout byte-for-byte, so a store that
+    // never uses changes mode stays readable by older binaries
+    let mut out = match d.mode {
+        TriggerMode::Keys => vec![1u8],
+        TriggerMode::Changes => vec![2u8],
+    };
     put_len_prefixed(&mut out, d.name.as_bytes());
     put_len_prefixed(&mut out, d.module.as_bytes());
     put_len_prefixed(&mut out, &d.lo);
     put_len_prefixed(&mut out, &d.hi);
+    if d.mode == TriggerMode::Changes {
+        out.push(1u8); // mode byte, room for future modes
+    }
     out
 }
 
 fn decode_def(buf: &[u8]) -> Result<TriggerDef> {
     let mut r = Reader::new(buf);
-    match r.u8()? {
-        1 => {}
-        v => return Err(corrupt(format!("bad trigger record version {v}"))),
+    let ver = r.u8()?;
+    if ver != 1 && ver != 2 {
+        return Err(corrupt(format!("bad trigger record version {ver}")));
     }
     let name = String::from_utf8(r.len_prefixed()?.to_vec())
         .map_err(|_| corrupt("trigger name is not utf-8"))?;
@@ -131,11 +188,21 @@ fn decode_def(buf: &[u8]) -> Result<TriggerDef> {
         .map_err(|_| corrupt("trigger module name is not utf-8"))?;
     let lo = r.len_prefixed()?.to_vec();
     let hi = r.len_prefixed()?.to_vec();
+    let mode = if ver == 1 {
+        TriggerMode::Keys
+    } else {
+        match r.u8()? {
+            0 => TriggerMode::Keys,
+            1 => TriggerMode::Changes,
+            m => return Err(corrupt(format!("bad trigger mode {m}"))),
+        }
+    };
     Ok(TriggerDef {
         name,
         module,
         lo,
         hi,
+        mode,
     })
 }
 
@@ -174,6 +241,58 @@ pub(crate) struct TriggerState {
     status: Mutex<HashMap<String, RunnerStatus>>,
 }
 
+// ---------------------------------------------------------------------------
+// changes-mode event records (queue values, persisted — versioned)
+// ---------------------------------------------------------------------------
+
+/// `[ver=1][kind][uvarint klen][key][value…]` — value present iff kind
+/// is `CHANGE_PUT`.
+const CHANGE_RECORD_V1: u8 = 1;
+pub(crate) const CHANGE_PUT: u8 = 0;
+pub(crate) const CHANGE_DELETE: u8 = 1;
+/// A put whose value exceeded `trigger_inline_value`: the event carries the
+/// key only and the module reads the value on demand.
+pub(crate) const CHANGE_PUT_ELIDED: u8 = 2;
+
+fn encode_change_record(op: &BatchOp, inline_cap: usize) -> Vec<u8> {
+    let (kind, key, value): (u8, &[u8], &[u8]) = match op {
+        BatchOp::Put { key, value } if value.len() <= inline_cap => (CHANGE_PUT, key, value),
+        BatchOp::Put { key, .. } => (CHANGE_PUT_ELIDED, key, &[]),
+        BatchOp::Delete { key } => (CHANGE_DELETE, key, &[]),
+    };
+    let mut out = Vec::with_capacity(12 + key.len() + value.len());
+    out.push(CHANGE_RECORD_V1);
+    out.push(kind);
+    put_uvarint(&mut out, key.len() as u64);
+    out.extend_from_slice(key);
+    out.extend_from_slice(value);
+    out
+}
+
+/// Decode a stored change record into (kind, key, inline value).
+fn decode_change_record(buf: &[u8]) -> Result<(u8, &[u8], &[u8])> {
+    let mut r = Reader::new(buf);
+    match r.u8()? {
+        CHANGE_RECORD_V1 => {}
+        v => return Err(corrupt(format!("bad change record version {v}"))),
+    }
+    let kind = r.u8()?;
+    if kind > CHANGE_PUT_ELIDED {
+        return Err(corrupt(format!("bad change record kind {kind}")));
+    }
+    let klen = usize::try_from(r.uvarint()?).map_err(|_| corrupt("change record key length"))?;
+    if r.remaining() < klen {
+        return Err(corrupt("change record truncated"));
+    }
+    let key = r.bytes(klen)?;
+    let n = r.remaining();
+    let value = r.bytes(n)?;
+    if kind != CHANGE_PUT && !value.is_empty() {
+        return Err(corrupt("change record has a value but no put kind"));
+    }
+    Ok((kind, key, value))
+}
+
 impl TriggerState {
     pub fn new() -> TriggerState {
         TriggerState {
@@ -184,27 +303,61 @@ impl TriggerState {
         }
     }
 
-    /// Event records to append to a batch whose logical writes touch the
-    /// given keys. Sorted + deduped so a key written twice in one batch
-    /// enqueues once.
-    pub fn event_keys<'a>(&self, keys: impl Iterator<Item = &'a [u8]>) -> Vec<Vec<u8>> {
+    /// Event ops to append to a batch whose logical writes are `ops`,
+    /// where the batch's first op will commit at seqno `base`.
+    ///
+    /// MUST be called inside the commit critical section (`write_mu` held,
+    /// `base` freshly allocated): changes-mode queue keys embed each op's
+    /// commit seqno, and "events iterate in commit order" is only true if
+    /// no other batch can take an earlier seqno afterwards.
+    ///
+    /// Keys-mode events are sorted + deduped so a key written twice in one
+    /// batch enqueues once; changes-mode events are one per op, in batch
+    /// order, and never collide (seqnos are unique).
+    pub fn capture_ops(&self, ops: &[BatchOp], base: SeqNo, opts: &Options) -> Vec<BatchOp> {
         let defs = self.defs.read().clone();
         if defs.is_empty() {
             return Vec::new();
         }
-        let mut out: Vec<Vec<u8>> = Vec::new();
-        for key in keys {
+        // an inlined value must never make a single event undeliverable:
+        // one packed change (seqno + kind + framed key + framed value) has
+        // to fit a max_wasm_input-sized invocation with room to spare
+        let inline_cap = opts
+            .trigger_inline_value
+            .min(opts.max_wasm_input.saturating_sub(opts.max_key_size + 64));
+        let mut keyed: Vec<Vec<u8>> = Vec::new();
+        let mut changes: Vec<BatchOp> = Vec::new();
+        for (i, op) in ops.iter().enumerate() {
+            let key = match op {
+                BatchOp::Put { key, .. } => key.as_slice(),
+                BatchOp::Delete { key } => key.as_slice(),
+            };
             if key.first() == Some(&SYS_PREFIX) {
                 continue; // engine-internal writes never fire triggers
             }
             for d in defs.iter() {
-                if d.matches(key) {
-                    out.push(sys_trigger_event_key(&d.name, key));
+                if !d.matches(key) {
+                    continue;
+                }
+                match d.mode {
+                    TriggerMode::Keys => keyed.push(sys_trigger_event_key(&d.name, key)),
+                    TriggerMode::Changes => changes.push(BatchOp::Put {
+                        key: sys_trigger_change_key(&d.name, base + i as u64),
+                        value: encode_change_record(op, inline_cap),
+                    }),
                 }
             }
         }
-        out.sort_unstable();
-        out.dedup();
+        keyed.sort_unstable();
+        keyed.dedup();
+        let mut out: Vec<BatchOp> = keyed
+            .into_iter()
+            .map(|key| BatchOp::Put {
+                key,
+                value: Vec::new(),
+            })
+            .collect();
+        out.extend(changes);
         out
     }
 
@@ -257,12 +410,12 @@ impl TriggerState {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn create_trigger(
-    db: &DbInner,
+    db: &Arc<DbInner>,
     name: &str,
     module: &str,
     lo: Option<&[u8]>,
     hi: Option<&[u8]>,
-) -> Result<()> {
+) -> Result<TriggerMode> {
     validate_trigger_name(name)?;
     let lo = lo.unwrap_or_default().to_vec();
     let hi = hi.unwrap_or_default().to_vec();
@@ -288,16 +441,19 @@ pub(crate) fn create_trigger(
             "trigger {name:?} already exists (delete it first to change it)"
         )));
     }
-    if db.get_at_seq(&sys_wasm_key(module), MAX_SEQNO)?.is_none() {
-        return Err(Error::InvalidArgument(format!(
-            "no module named {module:?}"
-        )));
-    }
+    // the module declares its consumption mode through its exports:
+    // `on_apply` → the ordered change feed, plain `run` → coalesced keys
+    let mode = if crate::wasm::module_exports_func(db, module, "on_apply")? {
+        TriggerMode::Changes
+    } else {
+        TriggerMode::Keys
+    };
     let def = TriggerDef {
         name: name.to_string(),
         module: module.to_string(),
         lo,
         hi,
+        mode,
     };
     // persist first: a trigger only becomes active once it is durable
     let mut b = WriteBatch::new();
@@ -307,7 +463,7 @@ pub(crate) fn create_trigger(
     let mut next = defs.as_ref().clone();
     next.push(def);
     *defs = Arc::new(next);
-    Ok(())
+    Ok(mode)
 }
 
 pub(crate) fn delete_trigger(db: &DbInner, name: &str) -> Result<()> {
@@ -352,6 +508,7 @@ pub(crate) fn list_triggers(db: &DbInner) -> Result<Vec<TriggerInfo>> {
             module: d.module.clone(),
             lo: d.lo.clone(),
             hi: d.hi.clone(),
+            mode: d.mode,
             pending,
             last_error: db.triggers.last_error(&d.name),
         });
@@ -469,10 +626,24 @@ fn runner_pass(db: &Arc<DbInner>) -> bool {
     }
 }
 
-/// Drain one batch of a trigger's queue: invoke the module with the packed
-/// touched keys as input; the consumed queue entries are deleted inside the
-/// module's own transaction (exactly-once effects).
+/// Drain one batch of a trigger's queue: invoke the module (mode-specific
+/// entry point and input packing) with the consumed queue entries deleted
+/// inside the module's own transaction (exactly-once effects).
 fn drain_one(db: &Arc<DbInner>, def: &TriggerDef) -> Result<bool> {
+    let (input, consume) = match def.mode {
+        TriggerMode::Keys => pack_touched_keys(db, def)?,
+        TriggerMode::Changes => pack_changes(db, def)?,
+    };
+    if consume.is_empty() {
+        return Ok(false);
+    }
+    crate::wasm::execute_system(db, &def.module, &input, &consume, def.mode.entry())?;
+    Ok(true)
+}
+
+/// Keys-mode input: the touched keys packed as `[klen uvarint][key]`,
+/// repeated (`fluent_guest::trigger_keys()` on the guest side).
+fn pack_touched_keys(db: &Arc<DbInner>, def: &TriggerDef) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
     let prefix = queue_prefix(&def.name);
     let it = db.iter_raw(None, &prefix, Some(queue_prefix_end(&def.name)), false)?;
     let mut consume: Vec<Vec<u8>> = Vec::new();
@@ -497,11 +668,50 @@ fn drain_one(db: &Arc<DbInner>, def: &TriggerDef) -> Result<bool> {
         input.extend_from_slice(ukey);
         consume.push(k);
     }
-    if consume.is_empty() {
-        return Ok(false);
+    Ok((input, consume))
+}
+
+/// Changes-mode input, wire-format framing (little-endian, `u32` lengths):
+/// `[u32 count]` then per change `[u64 seqno][u8 kind][u32 klen][key]` plus
+/// `[u32 vlen][value]` when kind = put. Events iterate — and are therefore
+/// delivered — in commit order.
+fn pack_changes(db: &Arc<DbInner>, def: &TriggerDef) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    let prefix = queue_prefix(&def.name);
+    let it = db.iter_raw(None, &prefix, Some(queue_prefix_end(&def.name)), false)?;
+    let mut consume: Vec<Vec<u8>> = Vec::new();
+    let mut input: Vec<u8> = vec![0u8; 4]; // count, patched below
+    for kv in it {
+        let (k, v) = kv?;
+        if consume.len() >= db.opts.trigger_batch {
+            break;
+        }
+        let seq_bytes: [u8; 8] = k[prefix.len()..]
+            .try_into()
+            .map_err(|_| corrupt("change event key is not a seqno"))?;
+        let seqno = u64::from_be_bytes(seq_bytes);
+        let (kind, ukey, uval) = decode_change_record(&v)?;
+        let packed = 8 + 1 + 4 + ukey.len() + if kind == CHANGE_PUT { 4 + uval.len() } else { 0 };
+        if input.len() + packed > db.opts.max_wasm_input {
+            if consume.is_empty() {
+                return Err(Error::InvalidArgument(
+                    "pending trigger event exceeds max_wasm_input".into(),
+                ));
+            }
+            break;
+        }
+        crate::coding::put_u64(&mut input, seqno);
+        input.push(kind);
+        crate::coding::put_u32(&mut input, ukey.len() as u32);
+        input.extend_from_slice(ukey);
+        if kind == CHANGE_PUT {
+            crate::coding::put_u32(&mut input, uval.len() as u32);
+            input.extend_from_slice(uval);
+        }
+        consume.push(k);
     }
-    crate::wasm::execute_system(db, &def.module, &input, &consume)?;
-    Ok(true)
+    let count = consume.len() as u32;
+    input[..4].copy_from_slice(&count.to_le_bytes());
+    Ok((input, consume))
 }
 
 #[cfg(test)]
@@ -514,18 +724,150 @@ mod tests {
             module: "m".into(),
             lo: lo.to_vec(),
             hi: hi.to_vec(),
+            mode: TriggerMode::Keys,
         }
     }
 
     #[test]
     fn def_record_roundtrip() {
         let d = def("orders-idx", b"orders/", b"orders0");
-        let got = decode_def(&encode_def(&d)).unwrap();
+        let enc = encode_def(&d);
+        assert_eq!(enc[0], 1, "keys-mode defs keep the v1 layout");
+        let got = decode_def(&enc).unwrap();
         assert_eq!(got.name, "orders-idx");
         assert_eq!(got.module, "m");
         assert_eq!(got.lo, b"orders/");
         assert_eq!(got.hi, b"orders0");
+        assert_eq!(got.mode, TriggerMode::Keys);
         assert!(decode_def(&[9u8, 0, 0, 0, 0]).is_err(), "bad version");
+
+        let d2 = TriggerDef {
+            mode: TriggerMode::Changes,
+            ..def("feed", b"", b"")
+        };
+        let enc2 = encode_def(&d2);
+        assert_eq!(enc2[0], 2, "changes-mode defs use the v2 layout");
+        let got2 = decode_def(&enc2).unwrap();
+        assert_eq!(got2.mode, TriggerMode::Changes);
+        assert_eq!(got2.name, "feed");
+    }
+
+    #[test]
+    fn change_record_roundtrip() {
+        let put = BatchOp::Put {
+            key: b"orders/1".to_vec(),
+            value: b"hello".to_vec(),
+        };
+        let (kind, k, v) = {
+            let enc = encode_change_record(&put, 64);
+            let (kind, k, v) = decode_change_record(&enc).unwrap();
+            (kind, k.to_vec(), v.to_vec())
+        };
+        assert_eq!((kind, k.as_slice(), v.as_slice()), (CHANGE_PUT, &b"orders/1"[..], &b"hello"[..]));
+
+        // a value above the inline cap is elided, key retained
+        let enc = encode_change_record(&put, 4);
+        let (kind, k, v) = decode_change_record(&enc).unwrap();
+        assert_eq!(kind, CHANGE_PUT_ELIDED);
+        assert_eq!(k, b"orders/1");
+        assert!(v.is_empty());
+
+        let del = BatchOp::Delete {
+            key: b"orders/1".to_vec(),
+        };
+        let enc = encode_change_record(&del, 64);
+        let (kind, k, v) = decode_change_record(&enc).unwrap();
+        assert_eq!(kind, CHANGE_DELETE);
+        assert_eq!(k, b"orders/1");
+        assert!(v.is_empty());
+
+        assert!(decode_change_record(&[7u8, 0, 0]).is_err(), "bad version");
+        assert!(decode_change_record(&[1u8, 9, 0]).is_err(), "bad kind");
+        assert!(decode_change_record(&[1u8, 1, 5, b'a']).is_err(), "truncated");
+    }
+
+    #[test]
+    fn capture_emits_per_op_seqno_keyed_changes_and_coalesced_keys() {
+        let state = TriggerState::new();
+        *state.defs.write() = Arc::new(vec![
+            TriggerDef {
+                mode: TriggerMode::Changes,
+                ..def("feed", b"orders/", b"orders0")
+            },
+            def("idx", b"orders/", b"orders0"),
+        ]);
+        let ops = vec![
+            BatchOp::Put {
+                key: b"orders/1".to_vec(),
+                value: b"a".to_vec(),
+            },
+            BatchOp::Put {
+                key: b"other".to_vec(),
+                value: b"x".to_vec(),
+            },
+            BatchOp::Put {
+                key: b"orders/1".to_vec(),
+                value: b"b".to_vec(),
+            },
+            BatchOp::Delete {
+                key: b"orders/1".to_vec(),
+            },
+        ];
+        let events = state.capture_ops(&ops, 100, &Options::default());
+        // keys mode coalesces the three orders/1 touches into ONE event;
+        // changes mode keeps all three, keyed by their op seqnos
+        assert_eq!(events.len(), 1 + 3);
+        let keys: Vec<&[u8]> = events
+            .iter()
+            .map(|op| match op {
+                BatchOp::Put { key, .. } => key.as_slice(),
+                BatchOp::Delete { key } => key.as_slice(),
+            })
+            .collect();
+        assert_eq!(keys[0], sys_trigger_event_key("idx", b"orders/1").as_slice());
+        assert_eq!(keys[1], sys_trigger_change_key("feed", 100).as_slice());
+        assert_eq!(keys[2], sys_trigger_change_key("feed", 102).as_slice());
+        assert_eq!(keys[3], sys_trigger_change_key("feed", 103).as_slice());
+        // the change records carry kind + key + inline value
+        let BatchOp::Put { value, .. } = &events[1] else {
+            panic!("change events are puts")
+        };
+        let (kind, k, v) = decode_change_record(value).unwrap();
+        assert_eq!((kind, k, v), (CHANGE_PUT, &b"orders/1"[..], &b"a"[..]));
+        let BatchOp::Put { value, .. } = &events[3] else {
+            panic!("change events are puts")
+        };
+        let (kind, k, v) = decode_change_record(value).unwrap();
+        assert_eq!((kind, k, v), (CHANGE_DELETE, &b"orders/1"[..], &[][..]));
+    }
+
+    #[test]
+    fn capture_skips_system_keys_and_respects_ranges() {
+        let state = TriggerState::new();
+        *state.defs.write() = Arc::new(vec![TriggerDef {
+            mode: TriggerMode::Changes,
+            ..def("feed", b"b", b"d")
+        }]);
+        let ops = vec![
+            BatchOp::Put {
+                key: vec![SYS_PREFIX, b'x'],
+                value: b"sys".to_vec(),
+            },
+            BatchOp::Put {
+                key: b"a".to_vec(),
+                value: b"out".to_vec(),
+            },
+            BatchOp::Put {
+                key: b"c".to_vec(),
+                value: b"in".to_vec(),
+            },
+        ];
+        let events = state.capture_ops(&ops, 7, &Options::default());
+        assert_eq!(events.len(), 1);
+        let BatchOp::Put { key, .. } = &events[0] else {
+            panic!()
+        };
+        assert_eq!(key.as_slice(), sys_trigger_change_key("feed", 9).as_slice());
     }
 
     #[test]

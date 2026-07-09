@@ -1365,14 +1365,15 @@ async fn trigger_lifecycle_and_async_fire() {
 
     let d = run(
         &schema,
-        r#"{ triggers { name module lo { text } hi { text } pending lastError } }"#,
+        r#"{ triggers { name module lo { text } hi { text } mode pending lastError } }"#,
         json!({}),
     )
     .await;
     assert_eq!(
         d["triggers"],
         json!([{"name": "t", "module": "mirror", "lo": {"text": "u/"},
-                "hi": {"text": "v"}, "pending": "0", "lastError": null}])
+                "hi": {"text": "v"}, "mode": "keys", "pending": "0",
+                "lastError": null}])
     );
 
     run(
@@ -1399,6 +1400,67 @@ async fn trigger_lifecycle_and_async_fire() {
     run(&schema, r#"mutation { deleteTrigger(name: "t") }"#, json!({})).await;
     let d = run(&schema, r#"{ triggers { name } }"#, json!({})).await;
     assert_eq!(d["triggers"], json!([]));
+}
+
+/// Records its whole `on_apply` input at key `cdc` (changes-mode target).
+const CDC_WAT: &str = r#"
+(module
+  (import "fluent" "input_len" (func $ilen (result i32)))
+  (import "fluent" "input_read" (func $iread (param i32 i32 i32) (result i32)))
+  (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 0) "cdc")
+  (func (export "on_apply") (result i32)
+    (local $len i32)
+    (local.set $len (call $ilen))
+    (drop (call $iread (i32.const 1024) (local.get $len) (i32.const 0)))
+    (call $put (i32.const 0) (i32.const 3) (i32.const 1024) (local.get $len))))
+"#;
+
+/// A module exporting `on_apply` registers as a changes-mode trigger and
+/// receives the wire-framed change list (count, seqno, kind, key, value).
+#[tokio::test]
+async fn changes_mode_trigger_via_graphql() {
+    let (schema, _dir) = open_schema();
+    run(
+        &schema,
+        r#"mutation Install($w: BytesInput!) { installModule(name: "cdcmod", wasm: $w) { name } }"#,
+        json!({"w": {"text": CDC_WAT}}),
+    )
+    .await;
+    run(
+        &schema,
+        r#"mutation { createTrigger(name: "c", module: "cdcmod",
+                                    lo: {text: "u/"}, hi: {text: "v"}) }"#,
+        json!({}),
+    )
+    .await;
+    let d = run(&schema, r#"{ triggers { name mode } }"#, json!({})).await;
+    assert_eq!(d["triggers"], json!([{"name": "c", "mode": "changes"}]));
+
+    run(
+        &schema,
+        r#"mutation { put(key: {text: "u/a"}, value: {text: "1"}) }"#,
+        json!({}),
+    )
+    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let d = run(&schema, r#"{ get(key: {text: "cdc"}) { hex } }"#, json!({})).await;
+        if !d["get"].is_null() {
+            let hex = d["get"]["hex"].as_str().unwrap();
+            // [count=1 u32][seqno u64][kind=put][klen=3]["u/a"][vlen=1]["1"]
+            assert!(hex.starts_with("01000000"), "one change: {hex}");
+            let tail = format!("{}{}{}{}{}", "00", "03000000", "752f61", "01000000", "31");
+            assert!(hex.ends_with(&tail), "kind+key+value framing: {hex}");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "changes trigger did not fire within 10s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]

@@ -172,8 +172,7 @@ impl Txn {
         // commits are writes: honor the same memtable/L0 backpressure as the
         // plain write path
         self.db.wait_for_space()?;
-        #[cfg_attr(not(feature = "wasm"), allow(unused_mut))]
-        let mut ops: Vec<BatchOp> = self
+        let ops: Vec<BatchOp> = self
             .writes
             .iter()
             .map(|(k, v)| match v {
@@ -184,38 +183,24 @@ impl Txn {
                 None => BatchOp::Delete { key: k.clone() },
             })
             .collect();
-        #[cfg_attr(not(feature = "wasm"), allow(unused_mut))]
-        let mut bytes = self.bytes;
 
-        // Trigger events ride the same batch as the writes that caused them
-        // (atomic through WAL, memtable, and crash recovery). They are NOT
+        // Trigger events materialize inside the apply critical section and
+        // ride the same batch as the writes that caused them (atomic
+        // through WAL, memtable, and crash recovery). They are NOT
         // validation keys: the queue moving underneath us must not conflict
-        // this commit.
-        #[cfg(feature = "wasm")]
-        let fired = if self.system {
-            false
-        } else {
-            let events = self
-                .db
-                .triggers
-                .event_keys(self.writes.keys().map(|k| k.as_slice()));
-            let fired = !events.is_empty();
-            bytes += events.iter().map(|k| k.len()).sum::<usize>();
-            ops.extend(events.into_iter().map(|key| BatchOp::Put {
-                key,
-                value: Vec::new(),
-            }));
-            fired
-        };
+        // this commit. System transactions (the trigger runner itself)
+        // never capture — the no-stacking rule.
+        let capture = !self.system;
 
-        let result = if self.db.opts.sync == SyncMode::Always {
+        if self.db.opts.sync == SyncMode::Always {
             let keys: Vec<Vec<u8>> = self
                 .writes
                 .keys()
                 .chain(self.locks.iter())
                 .cloned()
                 .collect();
-            self.db.queue_commit(ops, bytes, Some((self.snap, keys)))
+            self.db
+                .queue_commit(ops, self.bytes, Some((self.snap, keys)), capture)
         } else {
             let mut ws = self.db.write_mu.lock();
             // validation inside the write mutex: no writer can slip a
@@ -233,16 +218,11 @@ impl Txn {
             if conflicted {
                 Err(Error::Conflict)
             } else if !ops.is_empty() {
-                self.db.apply_locked(&mut ws, &ops)
+                self.db.apply_locked(&mut ws, &ops, capture)
             } else {
                 Ok(())
             }
-        };
-        #[cfg(feature = "wasm")]
-        if fired && result.is_ok() {
-            self.db.triggers.signal.notify();
         }
-        result
     }
 
     /// Discard all buffered writes (also what `Drop` does).

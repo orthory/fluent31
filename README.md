@@ -14,11 +14,14 @@ An embedded key-value database engine in Rust:
   them as read-only **queries** or transactional **executors** against a
   kernel-style syscall ABI (`get`/`put`/`delete`, batched scans, input/output
   streams, fuel + memory limits).
-- **Write-range triggers** — bind an executor module to a key range and the
-  engine invokes it asynchronously whenever a committed write touches the
-  range: schema-free custom indexes and materialized views with no writer
-  cooperation. Events are durable (they commit atomically with the
-  triggering write), coalesced per key, and consumed exactly-once.
+- **Write-range triggers** — bind a module to a key range and the engine
+  invokes it asynchronously whenever a committed write touches the range:
+  schema-free custom indexes, materialized views, and changefeeds with no
+  writer cooperation. Two modes, picked by the module's exports: **keys**
+  (coalesced touched keys — reconcile against current state) and
+  **changes** (`on_apply` receives the ordered list of committed changes,
+  values included). Events are durable (they commit atomically with the
+  triggering write) and consumed exactly-once.
 - **Database forks** — not PITR (no log archiving, no
   restore-to-arbitrary-time; a fork is a named cut): `fork("name")` pins an
   MVCC snapshot and hard-links the immutable files into `archive/name/`, so
@@ -102,9 +105,13 @@ db.put("orders/00000042", r#"{"customer":"acme","amountCents":500}"#)?;
 //   idx/customer/acme/00000042  (maintained by guests/customer_index)
 ```
 
-A trigger event means "this key was touched — reconcile it": the module
-reads current state and converges, so replays and coalesced re-touches are
-harmless. See [WASM.md](WASM.md) §8 for the authoring contract.
+A keys-mode trigger event means "this key was touched — reconcile it": the
+module reads current state and converges, so replays and coalesced
+re-touches are harmless. A module exporting `on_apply` gets **changes
+mode** instead: the ordered list of committed changes (op kind, key,
+value, commit seqno), one event per op — the post-apply filter that feeds
+changefeeds and event-driven index generation (see `guests/order_feed`).
+See [WASM.md](WASM.md) §8 for both authoring contracts.
 
 Build the bundled examples:
 

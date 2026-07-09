@@ -42,7 +42,7 @@ pub use error::{Error, Result};
 pub use identity::{InstanceId, StoreIdentity};
 pub use iter::DbIterator;
 #[cfg(feature = "wasm")]
-pub use trigger::TriggerInfo;
+pub use trigger::{TriggerInfo, TriggerMode};
 pub use txn::Txn;
 pub use types::{SeqNo, ValueKind};
 #[cfg(feature = "wasm")]

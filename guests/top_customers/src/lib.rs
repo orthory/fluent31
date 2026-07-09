@@ -9,9 +9,9 @@
 //!
 //! Input: {"limit": n|null, "minTotalCents": n|null}.
 
+use fluent_guest::Fail;
 use serde_json::{json, Value};
 
-fluent_guest::fluent_main!(top_customers_main);
 fluent_guest::fluent_describe!(
     r#"{
   "kind": "query",
@@ -34,21 +34,18 @@ fluent_guest::fluent_describe!(
 
 const PREFIX: &[u8] = b"customers/";
 
-fn top_customers_main() -> i32 {
-    let input: Value = serde_json::from_slice(&fluent_guest::input()).unwrap_or(Value::Null);
+#[fluent_guest::main]
+fn top_customers(raw: Vec<u8>) -> Result<String, Fail> {
+    let input: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
     let limit = input["limit"].as_i64().unwrap_or(10);
     if limit <= 0 {
         // an explicit request for zero (or negative) rows means zero rows
-        fluent_guest::output(b"[]");
-        return 0;
+        return Ok("[]".into());
     }
     let limit = limit.min(100) as usize;
     let min_total = input["minTotalCents"].as_u64().unwrap_or(0);
 
-    let Ok(scan) = fluent_guest::scan_prefix(PREFIX) else {
-        fluent_guest::output(b"customers scan failed");
-        return 2;
-    };
+    let scan = fluent_guest::scan_prefix(PREFIX).map_err(|_| Fail::new(2, "customers scan failed"))?;
     let mut rows: Vec<(String, u64, u64)> = Vec::new();
     for (key, value) in scan {
         let Ok(name) = String::from_utf8(key[PREFIX.len()..].to_vec()) else {
@@ -78,6 +75,5 @@ fn top_customers_main() -> i32 {
             })
         })
         .collect();
-    fluent_guest::output(Value::Array(out).to_string().as_bytes());
-    0
+    Ok(Value::Array(out).to_string())
 }

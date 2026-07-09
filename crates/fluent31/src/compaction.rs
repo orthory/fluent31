@@ -662,7 +662,8 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
             });
         }
         if !ops.is_empty() {
-            db.apply_locked(&mut ws, &ops)?;
+            // relocations change placement, not logical state: never capture
+            db.apply_locked(&mut ws, &ops, false)?;
         }
     }
 

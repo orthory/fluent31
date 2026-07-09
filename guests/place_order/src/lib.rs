@@ -13,12 +13,13 @@
 //!   customers/<name>        {"orders": u64, "totalCents": u64}
 //!
 //! Input (from the typed GraphQL field): {"customer", "amountCents", "note"}.
-//! Non-zero exits surface as GUEST_FAILED with the message in the output.
+//! Failures surface as GUEST_FAILED with the `Fail` message in the output
+//! and its code as the exit code (distinct per failure class).
 
+use fluent_guest::Fail;
 use serde::Deserialize;
 use serde_json::json;
 
-fluent_guest::fluent_main!(place_order_main);
 fluent_guest::fluent_describe!(
     r#"{
   "kind": "execute",
@@ -49,15 +50,10 @@ struct Input {
     note: Option<String>,
 }
 
-fn fail(msg: &str, code: i32) -> i32 {
-    fluent_guest::output(msg.as_bytes());
-    code
-}
-
-fn place_order_main() -> i32 {
-    let Ok(input) = serde_json::from_slice::<Input>(&fluent_guest::input()) else {
-        return fail("input is not valid placeOrder JSON", 2);
-    };
+#[fluent_guest::main]
+fn place_order(raw: Vec<u8>) -> Result<String, Fail> {
+    let input = serde_json::from_slice::<Input>(&raw)
+        .map_err(|_| Fail::new(2, "input is not valid placeOrder JSON"))?;
     // customer becomes a key segment: reject empties, key injection ('/'),
     // and unbounded names
     let name_ok = !input.customer.is_empty()
@@ -67,13 +63,13 @@ fn place_order_main() -> i32 {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
     if !name_ok {
-        return fail("customer must be [a-z0-9_-], 1..=64 chars", 3);
+        return Err(Fail::new(3, "customer must be [a-z0-9_-], 1..=64 chars"));
     }
     if input.amount_cents == 0 {
-        return fail("amountCents must be positive", 4);
+        return Err(Fail::new(4, "amountCents must be positive"));
     }
     if input.note.as_deref().is_some_and(|n| n.len() > 256) {
-        return fail("note exceeds 256 bytes", 5);
+        return Err(Fail::new(5, "note exceeds 256 bytes"));
     }
 
     // allocate the next order id (locked for update: OCC retries keep it
@@ -82,19 +78,17 @@ fn place_order_main() -> i32 {
     // existing orders.
     let id = match fluent_guest::get_for_update(b"orders/next") {
         Ok(None) => 1,
-        Ok(Some(bytes)) => match String::from_utf8(bytes).ok().and_then(|s| s.parse::<u64>().ok())
-        {
-            Some(n) => n,
-            None => return fail("orders/next counter is corrupt", 7),
-        },
-        Err(_) => return fail("counter read failed", 6),
+        Ok(Some(bytes)) => String::from_utf8(bytes)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or(Fail::new(7, "orders/next counter is corrupt"))?,
+        Err(_) => return Err(Fail::new(6, "counter read failed")),
     };
-    let Some(next) = id.checked_add(1) else {
-        return fail("order id space exhausted", 7);
-    };
-    if fluent_guest::put(b"orders/next", next.to_string().as_bytes()).is_err() {
-        return fail("counter write failed", 6);
-    }
+    let next = id
+        .checked_add(1)
+        .ok_or(Fail::new(7, "order id space exhausted"))?;
+    fluent_guest::put(b"orders/next", next.to_string().as_bytes())
+        .map_err(|_| Fail::new(6, "counter write failed"))?;
 
     let record = json!({
         "id": id,
@@ -103,37 +97,30 @@ fn place_order_main() -> i32 {
         "note": input.note,
     });
     let order_key = format!("orders/{id:08}");
-    if fluent_guest::put(order_key.as_bytes(), record.to_string().as_bytes()).is_err() {
-        return fail("order write failed", 6);
-    }
+    fluent_guest::put(order_key.as_bytes(), record.to_string().as_bytes())
+        .map_err(|_| Fail::new(6, "order write failed"))?;
 
     // fold into the customer's running stats. Wrong-shape JSON is
     // corruption too — folding into unwrap_or(0) would silently erase the
     // customer's history.
     let stat_key = format!("customers/{}", input.customer);
     let (orders, total) = match fluent_guest::get_for_update(stat_key.as_bytes()) {
-        Ok(Some(v)) => {
-            let parsed = serde_json::from_slice::<serde_json::Value>(&v)
-                .ok()
-                .and_then(|s| Some((s.get("orders")?.as_u64()?, s.get("totalCents")?.as_u64()?)));
-            match parsed {
-                Some(pair) => pair,
-                None => return fail("customer stats corrupt", 7),
-            }
-        }
+        Ok(Some(v)) => serde_json::from_slice::<serde_json::Value>(&v)
+            .ok()
+            .and_then(|s| Some((s.get("orders")?.as_u64()?, s.get("totalCents")?.as_u64()?)))
+            .ok_or(Fail::new(7, "customer stats corrupt"))?,
         Ok(None) => (0, 0),
-        Err(_) => return fail("customer stats read failed", 6),
+        Err(_) => return Err(Fail::new(6, "customer stats read failed")),
     };
     let (Some(orders), Some(total)) = (
         orders.checked_add(1),
         total.checked_add(input.amount_cents),
     ) else {
-        return fail("customer stats overflow", 7);
+        return Err(Fail::new(7, "customer stats overflow"));
     };
     let stats = json!({"orders": orders, "totalCents": total});
-    if fluent_guest::put(stat_key.as_bytes(), stats.to_string().as_bytes()).is_err() {
-        return fail("customer stats write failed", 6);
-    }
+    fluent_guest::put(stat_key.as_bytes(), stats.to_string().as_bytes())
+        .map_err(|_| Fail::new(6, "customer stats write failed"))?;
 
     let out = json!({
         "id": id,
@@ -142,6 +129,5 @@ fn place_order_main() -> i32 {
         "customerOrders": orders,
         "customerTotalCents": total,
     });
-    fluent_guest::output(out.to_string().as_bytes());
-    0
+    Ok(out.to_string())
 }

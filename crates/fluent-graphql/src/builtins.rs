@@ -505,8 +505,10 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             .description(
                 "Register a write-range trigger: whenever a committed write touches a \
                  key in [lo, hi) (omit either bound for an open end), the given WASM \
-                 executor module is asynchronously invoked with the touched keys as \
-                 input. Events are durable and consumed exactly once; the module's \
+                 executor module is asynchronously invoked — with the coalesced \
+                 touched keys (module exports `run`), or with the ordered per-op \
+                 change feed when the module exports `on_apply` (changes mode). \
+                 Events are durable and consumed exactly once; the module's \
                  writes never fire further triggers.",
             ),
         )

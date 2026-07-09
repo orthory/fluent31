@@ -763,6 +763,13 @@ dependencies = [
 [[package]]
 name = "fluent-guest"
 version = "0.1.0"
+dependencies = [
+ "fluent-guest-macros",
+]
+
+[[package]]
+name = "fluent-guest-macros"
+version = "0.1.0"
 
 [[package]]
 name = "fluent-replication"
@@ -795,6 +802,7 @@ dependencies = [
  "libc",
  "lz4_flex",
  "parking_lot",
+ "serde_json",
  "sha2",
  "tempfile",
  "wasmtime",
