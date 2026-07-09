@@ -12,7 +12,7 @@ fixes are baked in below and called out where the reasoning is subtle.
 Contents: §1 on-disk layout · §2 write path · §3 tables · §4 LSM shape ·
 §5 manifest/recovery · §6 MVCC & transactions · §7 IO backends · §8 value
 log · §9 WASM layer · §10 forks · §11 concurrency & locks ·
-§12 testing · §13 tooling & limits.
+§12 testing · §13 tooling & limits · §14 identity & edge replication.
 
 ---
 
@@ -290,8 +290,53 @@ scans clamped to the user keyspace.
 Guest SDK: `fluent-guest` (safe wrappers, growable scan batches, chunked
 big-value reads, `fluent_main!`). Example guests in `guests/`:
 **agg** (prefix count/sum/min/max — the `SELECT agg WHERE prefix`
-replacement) and **transfer** (balance transfer via `get_for_update` —
-the stored procedure replacement, exercised concurrently in tests).
+replacement), **transfer** (balance transfer via `get_for_update` —
+the stored procedure replacement, exercised concurrently in tests), and
+**customer_index** (a trigger-maintained secondary index — the
+`CREATE INDEX` replacement).
+
+### Write-range triggers (`trigger.rs`)
+
+The async fan-out from committed writes to executor modules — the
+schema-free replacement for SQL indexes/materialized views. A trigger is
+`(name, module, [lo, hi))`, persisted at `\x00trg\x00<name>` and mirrored
+in an in-memory registry (an `Arc<Vec<_>>` swapped whole on create/delete;
+the write path pays one read-lock clone per batch, nothing when empty).
+
+**Capture.** `write_batch` and `Txn::commit` match their *logical* write
+keys against the registry and append event records to the same batch —
+same WAL record, same seqno range, same crash atomicity: "the write
+happened" and "the trigger owes a run" are inseparable. Engine-internal
+writes bypass capture entirely (vlog-GC relocations rewrite placement, not
+state; system-txn commits — see below — enforce no-stacking).
+
+**Queue.** The event key is `\x00trgq\x00<name>\x00<touched user key>` with
+an empty value: the touched key IS the queue key, so a hot key coalesces
+to one pending event no matter how far the runner lags, and queue depth is
+bounded by distinct touched keys. This encodes the delivery semantic: an
+event means "reconcile this key against current state", not "replay this
+op" — modules read the key and converge, making replays and reordering
+harmless by construction.
+
+**Runner.** A dedicated thread (parked on a signal notified by capturing
+commits) discovers backlogged triggers by skip-seeking the queue prefix,
+then drains each in chunks of `trigger_batch`: it invokes the module as a
+normal executor whose transaction is pre-seeded — marked *system* and
+carrying deletes of the consumed queue entries. The module's writes and
+the queue consumption therefore commit atomically: invocation is
+at-least-once (a crash mid-run re-fires), effects are exactly-once. The
+consumed entries sit in the transaction's write set, so OCC closes the
+drain race for free: a re-touch after the drain snapshot rewrites the
+queue key, conflicts the commit, and the attempt re-runs against a fresh
+snapshot. System-txn commits skip capture, so a trigger's own writes never
+enqueue events — no cascades, no loops, by decree.
+
+**Failure.** A failing module (guest error, missing module, conflict
+exhaustion) never loses events: the batch stays queued, the runner backs
+off exponentially (100ms → 6.4s) per trigger, and `list_triggers` exposes
+`pending` + `last_error`. Queue entries whose trigger no longer exists
+(create/delete race, crash mid-delete) are garbage-collected by the
+runner. Recovery needs no machinery: events are ordinary durable keys.
 
 ## 10. Forks (explicit, manual)
 
@@ -406,3 +451,55 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
   GC relocations bump seqnos, so a hot large-value key can cost a user txn
   a retry; fixed `max_levels` (no dynamic depth); bottom merges rewrite the
   whole bottom level (fragments bound file sizes, not total merge work).
+
+## 14. Store identity & edge replication
+
+**Identity** (`identity.rs`, manifest format 2). A store carries an
+operator-chosen name and a deterministic 128-bit `instance_id`:
+`H(name)` at creation, `H(parent_id ‖ cut_seqno ‖ name)` when a
+fork mints (first read-write open of an archive consumes a
+`pending_fork` marker; `restore_to` requires a fresh name per copy so
+two restores of one archive can never mint the same id). Determinism
+makes minting crash-safe with no commit ordering — a crash before the
+persisting manifest write re-mints the identical id — and makes the
+lineage chain verifiable from metadata. Uniqueness is an operator
+contract (fleet-unique names), like hostnames. Normal restarts keep the
+id: file ids are monotonic and recovery never appends to a pre-crash
+vlog file, so `(file, offset)` never aliases within one lifetime.
+Unnamed stores stay on manifest format 1, readable by older binaries.
+
+**Why identity matters**: replication copies bytes across machines and
+names them by `(file id, offset)` — coordinates unique only within one
+store lifetime. The instance id is the outer qualifier; every replica
+connection verifies it by equality, and a re-minted master (restore,
+fork, replacement) invalidates every remote cache wholesale instead of
+silently serving a divergent history.
+
+**Master surface** (db.rs replication section). `Db::subscribe(lo, hi)`
+taps both apply paths under `write_mu` right after `visible_seqno`
+publication: delivery is seqno-ordered and gap-free past the
+subscription's start (installation also holds `write_mu`). Entries
+carry unresolved reprs; the consumer resolves values off the write path
+against a `ReadView`, protected by an **advancing registered-snapshot
+pin** — a vlog GC victim retired at seqno S is deletable only once the
+watermark passes S, and the pin sits at-or-below the oldest unconsumed
+entry, so streamed pointers always resolve. A subscriber that exceeds
+`sub_queue_bytes` is cut off (Lagged) rather than stalling writers.
+`Db::slice_manifest(lo, hi)` flushes, then reports per run only the
+fragments overlapping the range (id, size, key bounds from pinned
+stats); `read_table_chunk`/`read_vlog_chunk` serve raw bytes from the
+live version and answer `Error::Gone` once compaction/GC dropped the
+file — slice readers pin nothing on the master, by design.
+
+**Edge store** (`edge.rs`) + **channel** (`fluent-replication`,
+REPLICATION.md). The edge copies overlapping fragments locally (bounds +
+size cross-checked at install, blocks CRC-verified as always), applies
+the stream into an in-memory overlay memtable, and resolves values
+inline → local record cache → `ValueFetcher` reach-back; every record
+re-verifies CRC + embedded key before serving or caching. Reads reuse
+the engine's merge/MVCC iterator stack at `MAX_SEQNO` over
+overlay + scoped runs. Slice refreshes prune the overlay to the new
+flush watermark. The replica serves standard wire-v1 reads through
+`fluent_wire::WireBackend`; writes answer INVALID. Re-sync after
+lag/disconnect keeps all local caches (same instance id); a provenance
+mismatch wipes and re-attaches behind an atomic store swap.

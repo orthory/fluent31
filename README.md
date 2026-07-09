@@ -14,6 +14,11 @@ An embedded key-value database engine in Rust:
   them as read-only **queries** or transactional **executors** against a
   kernel-style syscall ABI (`get`/`put`/`delete`, batched scans, input/output
   streams, fuel + memory limits).
+- **Write-range triggers** — bind an executor module to a key range and the
+  engine invokes it asynchronously whenever a committed write touches the
+  range: schema-free custom indexes and materialized views with no writer
+  cooperation. Events are durable (they commit atomically with the
+  triggering write), coalesced per key, and consumed exactly-once.
 - **Database forks** — not PITR (no log archiving, no
   restore-to-arbitrary-time; a fork is a named cut): `fork("name")` pins an
   MVCC snapshot and hard-links the immutable files into `archive/name/`, so
@@ -85,6 +90,22 @@ aborts; commit conflicts re-run the module against a fresh snapshot
 automatically. Guests are sandboxed hard: fuel-metered, memory-capped,
 output/log/scan/write-set-capped, no WASI, reserved keyspace invisible.
 
+An executor can also be bound to a key range as a **trigger** — the engine
+then invokes it after every committed write into the range, with the
+touched keys as input:
+
+```rust
+db.create_trigger("customerIndex", "customer_index",
+                  Some(b"orders/"), Some(b"orders0"))?;
+db.put("orders/00000042", r#"{"customer":"acme","amountCents":500}"#)?;
+// moments later, with no writer cooperation:
+//   idx/customer/acme/00000042  (maintained by guests/customer_index)
+```
+
+A trigger event means "this key was touched — reconcile it": the module
+reads current state and converges, so replays and coalesced re-touches are
+harmless. See [WASM.md](WASM.md) §8 for the authoring contract.
+
 Build the bundled examples:
 
 ```sh
@@ -112,7 +133,8 @@ visible seqno  2
 ```
 
 Every command prints its wall-clock latency. `begin/tput/commit` drive
-transactions, `install/query/exec` drive WASM, `gc` runs value-log GC.
+transactions, `install/query/exec` drive WASM, `mktrig/deltrig/triggers`
+manage write-range triggers, `gc` runs value-log GC.
 
 ## The GraphQL server
 
@@ -152,6 +174,8 @@ mutation {
                    {delete: {text: "b"}}])                # atomic
   wasmExecute(module: "transfer", input: {base64: "..."}) { base64 }  # transactional
   installModule(name: "agg", wasm: {base64: "..."}) { name size }
+  createTrigger(name: "idx", module: "customer_index",
+                lo: {text: "orders/"}, hi: {text: "orders0"})
   fork(name: "snap1") { instanceId }   # branch this instance
 }
 ```
@@ -227,10 +251,28 @@ cargo run -p fluent-wire -- ./data --sync periodic:50    # tcp 127.0.0.1:8427
 Spec in [`WIRE.md`](WIRE.md); reference client `fluent_wire::WireClient`.
 GraphQL stays the general/typed/admin plane.
 
+## Edge replication
+
+Small ephemeral read replicas that hold only a key-range slice of one
+master: the overlapping index fragments copied locally, values fetched
+lazily and cached, committed writes streamed in. Provenance is anchored
+on a deterministic store identity — a restored/forked master re-mints
+its instance id and every edge invalidates wholesale instead of serving
+a divergent history.
+
+```sh
+cargo run -p fluent-replication -- master ./data --store-name prod       # tcp 127.0.0.1:8428
+cargo run -p fluent-replication -- edge --master 127.0.0.1:8428 \
+    --dir /tmp/edge-cache --lo user/ --hi user0 --serve 127.0.0.1:8427   # wire-v1 reads
+```
+
+Spec in [`REPLICATION.md`](REPLICATION.md); identity model in
+[`DESIGN.md`](DESIGN.md) §14.
+
 ## Testing
 
 ```sh
-cargo test --workspace           # 130 tests incl. randomized model, group commit, wasm & graphql e2e
+cargo test --workspace           # 178 tests incl. randomized model, group commit, wasm, graphql & replication e2e
 ```
 
 On Linux the suite exercises the io_uring backend automatically. Under
@@ -247,11 +289,12 @@ the WASM layer (no wasmtime).
 ## Crate layout
 
 ```
-crates/fluent31       the engine (lib)
-crates/fluent-guest   guest-side SDK for WASM modules
-crates/fluent-cli     interactive shell
-crates/fluent-graphql GraphQL server (axum + async-graphql)
-crates/fluent-wire    binary wire-protocol server + reference client
+crates/fluent31           the engine (lib), incl. store identity + edge store
+crates/fluent-guest       guest-side SDK for WASM modules
+crates/fluent-cli         interactive shell
+crates/fluent-graphql     GraphQL server (axum + async-graphql)
+crates/fluent-wire        binary wire-protocol server + reference client
+crates/fluent-replication edge replication channel: master server + replica driver
 guests/               example WASM guests (separate workspace): agg, transfer,
                       place_order + top_customers (typed GraphQL demo pair)
 ```

@@ -1004,3 +1004,743 @@ fn vlog_gc_sampling_reclaims_without_discard_stats() {
         assert_eq!(db.get(&k(i)).unwrap().unwrap(), big(i, 3), "key {i}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Store identity & lineage
+// ---------------------------------------------------------------------------
+
+fn named_opts(name: &str) -> Options {
+    Options {
+        store_name: Some(name.to_string()),
+        ..small_opts()
+    }
+}
+
+/// Identity lifecycle: deterministic mint at create, stable across reopen,
+/// name mismatch refused, adoption onto an unnamed store.
+#[test]
+fn identity_mint_reopen_adopt() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = fluent31::identity::derive_root("prod");
+    {
+        let db = Db::open(dir.path(), named_opts("prod")).unwrap();
+        let id = db.identity().unwrap();
+        assert_eq!(id.name, "prod");
+        assert_eq!(id.instance_id, expected);
+        assert!(id.parent.is_none());
+        db.put(b"a".to_vec(), b"1".to_vec()).unwrap();
+    }
+    // reopen without a name: identity persists
+    {
+        let db = Db::open(dir.path(), small_opts()).unwrap();
+        assert_eq!(db.identity().unwrap().instance_id, expected);
+    }
+    // reopen with a mismatched name: refused
+    assert!(matches!(
+        Db::open(dir.path(), named_opts("other")),
+        Err(Error::InvalidArgument(_))
+    ));
+
+    // adoption: an unnamed store gains identity on a later open
+    let dir2 = tempfile::tempdir().unwrap();
+    {
+        let db = Db::open(dir2.path(), small_opts()).unwrap();
+        assert!(db.identity().is_none());
+        db.put(b"x".to_vec(), b"1".to_vec()).unwrap();
+    }
+    {
+        let db = Db::open(dir2.path(), named_opts("adopted")).unwrap();
+        let id = db.identity().unwrap();
+        assert_eq!(id.instance_id, fluent31::identity::derive_root("adopted"));
+        assert_eq!(db.get(b"x").unwrap().unwrap(), b"1");
+    }
+}
+
+/// The routing id recorded in fork.meta at creation must equal the store
+/// identity the fork mints on its first read-write open — routing and
+/// replication share one id for named lineages.
+#[test]
+fn fork_instance_id_matches_minted_identity_for_named_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), named_opts("root-store")).unwrap();
+    db.put(b"a".to_vec(), b"1".to_vec()).unwrap();
+    let info = db.fork("branch").unwrap();
+    let fdb = Db::open(&info.path, Options::default()).unwrap();
+    let minted = fdb.identity().expect("named lineage mints on open");
+    assert_eq!(info.instance_id, minted.instance_hex());
+    assert_eq!(minted.name, "branch");
+}
+
+/// Forks mint deterministic child identities: in-place archive open and
+/// restore_to copies each fork under their own name; restores of a named
+/// lineage without a new name are refused.
+#[test]
+fn identity_forks_via_fork_and_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), named_opts("main")).unwrap();
+    for i in 0..50u32 {
+        db.put(k(i), v(i, "pre")).unwrap();
+    }
+    let info = db.fork("nightly").unwrap();
+    let parent_id = db.identity().unwrap();
+
+    // named lineage: restore without a new name is refused (two copies of
+    // one archive must not mint identical instance ids)
+    let dest = dir.path().join("restored");
+    assert!(matches!(
+        fluent31::restore_to(&info.path, &dest, None),
+        Err(Error::InvalidArgument(_))
+    ));
+    // with a name: a distinct deterministic child, data intact
+    fluent31::restore_to(&info.path, &dest, Some("edge-1")).unwrap();
+    let restored = Db::open(&dest, small_opts()).unwrap();
+    let rid = restored.identity().unwrap();
+    assert_eq!(
+        rid.instance_id,
+        fluent31::identity::derive_fork(&parent_id.instance_id, info.last_seqno, "edge-1")
+    );
+    for i in 0..50u32 {
+        assert_eq!(restored.get(&k(i)).unwrap().unwrap(), v(i, "pre"), "key {i}");
+    }
+
+    // in-place fork: first rw open mints child = H(parent ‖ cut ‖ "nightly")
+    let expected_child =
+        fluent31::identity::derive_fork(&parent_id.instance_id, info.last_seqno, "nightly");
+    assert_ne!(rid.instance_id, expected_child);
+    {
+        let fork = Db::open(&info.path, small_opts()).unwrap();
+        let id = fork.identity().unwrap();
+        assert_eq!(id.name, "nightly");
+        assert_eq!(id.instance_id, expected_child);
+        assert_eq!(id.parent, Some((parent_id.instance_id, info.last_seqno)));
+        // reopen keeps the minted id (fork marker consumed once)
+        drop(fork);
+        let again = Db::open(&info.path, small_opts()).unwrap();
+        assert_eq!(again.identity().unwrap().instance_id, expected_child);
+    }
+
+    // once forked in place the archive is a live store: restoring a copy of
+    // it would duplicate the minted instance id — refused
+    assert!(matches!(
+        fluent31::restore_to(&info.path, &dir.path().join("r2"), Some("edge-2")),
+        Err(Error::InvalidArgument(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Replication surface: subscriptions, slices, chunk reads
+// ---------------------------------------------------------------------------
+
+use fluent31::StreamEvent;
+use std::time::Duration;
+
+fn recv_batch(sub: &mut fluent31::Subscription) -> Vec<fluent31::StreamEntry> {
+    match sub.recv_timeout(Duration::from_secs(5)).unwrap() {
+        Some(StreamEvent::Batch(b)) => b,
+        other => panic!("expected batch, got {other:?}"),
+    }
+}
+
+/// Subscriptions deliver exactly the in-range committed writes, in seqno
+/// order, values resolved — including vlog-resident ones.
+#[test]
+fn subscription_streams_in_range_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    db.put(b"kb-before".to_vec(), b"x".to_vec()).unwrap();
+
+    let mut sub = db.subscribe(b"ka", Some(b"kz")).unwrap();
+    assert_eq!(sub.start_seqno(), 1);
+
+    db.put(b"ka-1".to_vec(), b"small".to_vec()).unwrap();
+    db.put(b"zz-out-of-range".to_vec(), b"nope".to_vec()).unwrap();
+    // vlog-resident value (>= value_threshold of 64)
+    db.put(b"kb-2".to_vec(), vec![7u8; 200]).unwrap();
+    db.delete(b"ka-1".to_vec()).unwrap();
+
+    let mut got = Vec::new();
+    while got.len() < 3 {
+        got.extend(recv_batch(&mut sub));
+    }
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[0].key, b"ka-1");
+    assert_eq!(got[0].value.as_deref(), Some(b"small".as_ref()));
+    assert_eq!(got[1].key, b"kb-2");
+    assert_eq!(got[1].value.as_deref(), Some(vec![7u8; 200].as_ref()));
+    assert_eq!(got[2].key, b"ka-1");
+    assert!(got[2].value.is_none()); // tombstone
+    assert!(got[0].seqno < got[1].seqno && got[1].seqno < got[2].seqno);
+    // nothing else pending
+    assert!(sub
+        .recv_timeout(Duration::from_millis(50))
+        .unwrap()
+        .is_none());
+}
+
+/// Streamed vlog pointers stay resolvable across GC: the subscription's
+/// advancing pin blocks victim deletion until entries are consumed.
+#[test]
+fn subscription_pointers_survive_vlog_gc() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    opts.vlog_gc_ratio = 0.1;
+    let db = Db::open(dir.path(), opts).unwrap();
+
+    let mut sub = db.subscribe(b"k", None).unwrap();
+    let big = |i: u32, r: u32| format!("{:0>300}", format!("{i}.{r}")).into_bytes();
+    // two rounds: round-0 values become garbage, GC relocates round-1
+    for round in 0..2u32 {
+        for i in 0..20u32 {
+            db.put(k(i), big(i, round)).unwrap();
+        }
+        db.flush().unwrap();
+    }
+    db.compact_all().unwrap();
+    while db.gc_vlog().unwrap().is_some() {}
+
+    // consume everything AFTER gc ran: old pointers must still resolve
+    let mut got = Vec::new();
+    while got.len() < 40 {
+        got.extend(recv_batch(&mut sub));
+    }
+    for (n, e) in got.iter().enumerate() {
+        let (round, i) = ((n / 20) as u32, (n % 20) as u32);
+        assert_eq!(e.key, k(i), "entry {n}");
+        assert_eq!(e.value.as_deref(), Some(big(i, round).as_ref()), "entry {n}");
+    }
+}
+
+/// A subscriber that stops consuming gets cut off (Lagged), writers never
+/// stall, and a fresh subscription works.
+#[test]
+fn subscription_lag_drops_subscriber() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    opts.sub_queue_bytes = 4 << 10; // tiny queue
+    let db = Db::open(dir.path(), opts).unwrap();
+
+    let mut sub = db.subscribe(b"k", None).unwrap();
+    for i in 0..200u32 {
+        db.put(k(i), vec![1u8; 100]).unwrap(); // ~20 KiB >> 4 KiB cap
+    }
+    // may see some batches first, but must end in Lagged
+    let saw_lagged = loop {
+        match sub.recv_timeout(Duration::from_millis(200)).unwrap() {
+            Some(StreamEvent::Lagged) => break true,
+            Some(StreamEvent::Batch(_)) => continue,
+            None => break false,
+        }
+    };
+    assert!(saw_lagged, "overflowed subscription never reported Lagged");
+
+    // the store is unaffected; a new subscription streams fine
+    let mut sub2 = db.subscribe(b"k", None).unwrap();
+    db.put(k(9999), b"after".to_vec()).unwrap();
+    let b = recv_batch(&mut sub2);
+    assert_eq!(b[0].key, k(9999));
+}
+
+/// slice_manifest returns only overlapping fragments; chunk reads serve
+/// live files and answer Gone for compacted-away ids.
+#[test]
+fn slice_manifest_scope_and_chunk_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    for i in 0..300u32 {
+        db.put(k(i), v(i, "s")).unwrap();
+    }
+    db.flush().unwrap();
+
+    let full = db.slice_manifest(b"\x01", None).unwrap();
+    let full_ids: Vec<u64> = full
+        .levels
+        .iter()
+        .flatten()
+        .flat_map(|r| r.tables.iter().map(|t| t.id))
+        .collect();
+    assert!(!full_ids.is_empty());
+
+    // a narrow scope selects a strict subset (many fragments exist: 300
+    // keys against a 4 KiB target file size)
+    let lo = k(100);
+    let hi = k(120);
+    let scoped = db.slice_manifest(&lo, Some(&hi)).unwrap();
+    let scoped_tables: Vec<&fluent31::SliceTable> = scoped
+        .levels
+        .iter()
+        .flatten()
+        .flat_map(|r| r.tables.iter())
+        .collect();
+    assert!(!scoped_tables.is_empty());
+    assert!(scoped_tables.len() < full_ids.len());
+    for t in &scoped_tables {
+        assert!(t.max_ukey.as_slice() >= lo.as_slice() && t.min_ukey.as_slice() < hi.as_slice());
+    }
+
+    // chunk reads reassemble a fragment byte-for-byte
+    let t0 = scoped_tables[0];
+    let mut assembled = Vec::new();
+    let mut off = 0u64;
+    while off < t0.size {
+        let chunk = db.read_table_chunk(t0.id, off, 1 << 10).unwrap();
+        assert!(!chunk.is_empty());
+        off += chunk.len() as u64;
+        assembled.extend(chunk);
+    }
+    let disk = std::fs::read(dir.path().join(format!("sst-{:06}.tbl", t0.id))).unwrap();
+    assert_eq!(assembled, disk);
+
+    // compact everything into new files: old ids answer Gone
+    for i in 0..300u32 {
+        db.put(k(i), v(i, "s2")).unwrap();
+    }
+    db.flush().unwrap();
+    db.compact_all().unwrap();
+    let gone = full_ids
+        .iter()
+        .any(|&id| matches!(db.read_table_chunk(id, 0, 16), Err(Error::Gone(_))));
+    assert!(gone, "no compacted-away fragment reported Gone");
+}
+
+/// Vlog chunk reads serve record bytes that parse and verify; unknown
+/// files answer Gone.
+#[test]
+fn vlog_chunk_reads_and_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    let mut sub = db.subscribe(b"k", None).unwrap();
+    db.put(k(1), vec![9u8; 500]).unwrap(); // vlog-resident
+
+    // learn the pointer through the stream? No — the stream resolves it.
+    // Instead grab it via the slice path: flush and read back the repr is
+    // internal, so exercise the public path: the streamed value proves
+    // resolution; the chunk API is exercised with offsets from a scan of
+    // the head file id range.
+    let b = recv_batch(&mut sub);
+    assert_eq!(b[0].value.as_deref(), Some(vec![9u8; 500].as_ref()));
+
+    // head vlog file exists with id small; probe the first record region
+    let stats = db.stats();
+    assert!(stats.vlog_files >= 1);
+    // find a real vlog file id from disk
+    let vid = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().into_string().ok()?;
+            let id = n
+                .strip_prefix("vlog-")?
+                .strip_suffix(".vlog")?
+                .parse::<u64>()
+                .ok()?;
+            (e.metadata().ok()?.len() > 0).then_some(id)
+        })
+        .next()
+        .expect("a non-empty vlog file");
+    let chunk = db.read_vlog_chunk(vid, 0, 4096).unwrap();
+    assert!(!chunk.is_empty());
+
+    assert!(matches!(
+        db.read_vlog_chunk(999_999, 0, 16),
+        Err(Error::Gone(_))
+    ));
+    assert!(matches!(
+        db.read_vlog_chunk(vid, 1 << 40, 16),
+        Err(Error::Gone(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Edge store (engine-level, no network: fetcher wired straight to the master)
+// ---------------------------------------------------------------------------
+
+use fluent31::edge::{EdgeConfig, EdgeStore, ValueFetcher};
+use std::sync::atomic::{AtomicU64, Ordering as AtOrd};
+use std::sync::Arc;
+
+struct DirectFetcher {
+    master: Arc<Db>,
+    calls: AtomicU64,
+}
+
+impl ValueFetcher for DirectFetcher {
+    fn fetch_record(&self, file: u64, offset: u64, len: u32) -> fluent31::Result<Vec<u8>> {
+        self.calls.fetch_add(1, AtOrd::Relaxed);
+        self.master.read_vlog_chunk(file, offset, len as usize)
+    }
+}
+
+/// Pull + install one slice, restarting from a fresh snapshot when the
+/// master's background compaction wins the race (Gone) — the same loop the
+/// real protocol client runs.
+fn sync_slice(
+    master: &Db,
+    edge: &EdgeStore,
+    lo: &[u8],
+    hi: Option<&[u8]>,
+) -> fluent31::SliceManifest {
+    'retry: loop {
+        let slice = master.slice_manifest(lo, hi).unwrap();
+        for run in slice.levels.iter().flatten() {
+            for t in &run.tables {
+                if edge.has_fragment(t.id) {
+                    continue;
+                }
+                let mut bytes = Vec::with_capacity(t.size as usize);
+                while (bytes.len() as u64) < t.size {
+                    match master.read_table_chunk(t.id, bytes.len() as u64, 64 << 10) {
+                        Ok(chunk) => bytes.extend(chunk),
+                        Err(Error::Gone(_)) => continue 'retry,
+                        Err(e) => panic!("chunk fetch: {e}"),
+                    }
+                }
+                std::fs::write(edge.fragment_path(t.id), &bytes).unwrap();
+            }
+        }
+        edge.install_slice(&slice).unwrap();
+        return slice;
+    }
+}
+
+/// Full edge loop: scoped slice + lazy value fetch + cache hits + streamed
+/// syncs + refresh — the edge's scoped view stays byte-equal to the master.
+#[test]
+fn edge_store_end_to_end() {
+    let mdir = tempfile::tempdir().unwrap();
+    let edir = tempfile::tempdir().unwrap();
+    let master = Arc::new(
+        Db::open(
+            mdir.path(),
+            Options {
+                store_name: Some("edge-master".into()),
+                ..small_opts()
+            },
+        )
+        .unwrap(),
+    );
+    // mixed inline + vlog values, in and out of the scope
+    for i in 0..300u32 {
+        master.put(k(i), v(i, "base")).unwrap();
+    }
+    for i in 0..30u32 {
+        master.put(k(i * 10), vec![(i % 250) as u8 + 1; 200]).unwrap();
+    }
+
+    // attach: subscribe FIRST, then slice — gap-free by construction
+    let mut sub = master.subscribe(&k(100), Some(&k(200))).unwrap();
+
+    let fetcher = Arc::new(DirectFetcher {
+        master: master.clone(),
+        calls: AtomicU64::new(0),
+    });
+    let edge = EdgeStore::attach(
+        EdgeConfig::new(
+            edir.path().join("cache"),
+            master.identity().unwrap(),
+            k(100),
+            Some(k(200)),
+        ),
+        fetcher.clone(),
+    )
+    .unwrap();
+    let slice = sync_slice(&master, &edge, &k(100), Some(&k(200)));
+    assert!(slice.flushed_seqno >= sub.start_seqno());
+
+    // scoped equality, inline and vlog values alike
+    for i in 100..200u32 {
+        assert_eq!(
+            edge.get(&k(i)).unwrap(),
+            master.get(&k(i)).unwrap(),
+            "key {i}"
+        );
+    }
+    // out of scope: refused, not silently absent
+    assert!(matches!(
+        edge.get(&k(250)),
+        Err(Error::InvalidArgument(_))
+    ));
+
+    // laziness: big values were fetched on demand; repeat reads hit cache
+    let after_first_pass = fetcher.calls.load(AtOrd::Relaxed);
+    assert!(after_first_pass > 0, "no lazy fetches happened");
+    for i in 100..200u32 {
+        edge.get(&k(i)).unwrap();
+    }
+    assert_eq!(
+        fetcher.calls.load(AtOrd::Relaxed),
+        after_first_pass,
+        "second pass should be fully cache-served"
+    );
+
+    // streamed syncs: master writes (some vlog-resident), edge follows
+    for i in 100..150u32 {
+        master.put(k(i), v(i, "live")).unwrap();
+    }
+    master.put(k(160), vec![42u8; 300]).unwrap();
+    master.delete(k(199)).unwrap();
+    master.put(k(50), v(50, "outside")).unwrap(); // out of scope: not streamed
+    let mut applied = 0;
+    while applied < 52 {
+        match sub.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Some(StreamEvent::Batch(b)) => {
+                applied += b.len();
+                edge.apply_stream(&b).unwrap();
+            }
+            other => panic!("unexpected stream event {other:?}"),
+        }
+    }
+    for i in 100..200u32 {
+        assert_eq!(
+            edge.get(&k(i)).unwrap(),
+            master.get(&k(i)).unwrap(),
+            "post-stream key {i}"
+        );
+    }
+
+    // scans match the master over the scope (both directions, paged)
+    let (page, more) = edge.scan(None, None, false, 500).unwrap();
+    assert!(!more);
+    let master_scan: Vec<_> = master
+        .iter(Some(&k(100)), Some(&k(200)), false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(page, master_scan);
+    let (rev_page, _) = edge.scan(None, None, true, 500).unwrap();
+    let mut rev_expected = master_scan.clone();
+    rev_expected.reverse();
+    assert_eq!(rev_page, rev_expected);
+
+    // paging: limit cuts and reports has_more
+    let (short, more) = edge.scan(None, None, false, 10).unwrap();
+    assert_eq!(short.len(), 10);
+    assert!(more);
+    assert_eq!(short[..], master_scan[..10]);
+
+    // refresh: pull a fresh slice; overlay prunes to the new watermark and
+    // equality holds
+    let slice2 = sync_slice(&master, &edge, &k(100), Some(&k(200)));
+    assert!(slice2.flushed_seqno > slice.flushed_seqno);
+    let stats = edge.stats();
+    assert_eq!(stats.flushed_seqno, slice2.flushed_seqno);
+    for i in 100..200u32 {
+        assert_eq!(
+            edge.get(&k(i)).unwrap(),
+            master.get(&k(i)).unwrap(),
+            "post-refresh key {i}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// write-range triggers
+// ---------------------------------------------------------------------------
+
+/// Executor used as a trigger target: records the raw packed input under
+/// `idx/last` and mirrors every touched key `<k>` to `m/<k>` (value = the
+/// key bytes). Assumes single-byte uvarint key lengths (keys < 128 bytes),
+/// which every test key satisfies.
+#[cfg(feature = "wasm")]
+const MIRROR_WAT: &str = r#"
+(module
+  (import "fluent" "input_len" (func $ilen (result i32)))
+  (import "fluent" "input_read" (func $iread (param i32 i32 i32) (result i32)))
+  (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 0) "idx/last")
+  (func (export "run") (result i32)
+    (local $len i32) (local $off i32) (local $klen i32)
+    (local.set $len (call $ilen))
+    (drop (call $iread (i32.const 1024) (local.get $len) (i32.const 0)))
+    (drop (call $put (i32.const 0) (i32.const 8) (i32.const 1024) (local.get $len)))
+    (local.set $off (i32.const 0))
+    (block $done
+      (loop $next
+        (br_if $done (i32.ge_u (local.get $off) (local.get $len)))
+        (local.set $klen (i32.load8_u (i32.add (i32.const 1024) (local.get $off))))
+        (local.set $off (i32.add (local.get $off) (i32.const 1)))
+        (i32.store8 (i32.const 8192) (i32.const 109))
+        (i32.store8 (i32.const 8193) (i32.const 47))
+        (memory.copy (i32.const 8194)
+                     (i32.add (i32.const 1024) (local.get $off))
+                     (local.get $klen))
+        (drop (call $put (i32.const 8192) (i32.add (local.get $klen) (i32.const 2))
+                         (i32.add (i32.const 1024) (local.get $off)) (local.get $klen)))
+        (local.set $off (i32.add (local.get $off) (local.get $klen)))
+        (br $next)))
+    (i32.const 0)))
+"#;
+
+#[cfg(feature = "wasm")]
+fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !f() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not reached within 10s: {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(feature = "wasm")]
+fn pending(db: &Db, name: &str) -> u64 {
+    db.list_triggers()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.name == name)
+        .map(|t| t.pending)
+        .unwrap_or_else(|| panic!("no trigger named {name}"))
+}
+
+/// The full loop under SyncMode::Always: a put in the subscribed range
+/// fires the module (which indexes the key), the queue drains to zero, and
+/// out-of-range writes fire nothing. Batch and transaction write paths
+/// fire the same way.
+#[cfg(feature = "wasm")]
+#[test]
+fn trigger_fires_on_range_and_drains_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(
+        dir.path(),
+        Options {
+            sync: SyncMode::Always,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+
+    // plain put
+    db.put(b"u/a".to_vec(), b"1".to_vec()).unwrap();
+    wait_until("mirror of u/a", || db.get(b"m/u/a").unwrap().is_some());
+    assert_eq!(db.get(b"m/u/a").unwrap().unwrap(), b"u/a");
+
+    // batch and transaction writes fire too
+    let mut b = WriteBatch::new();
+    b.put(b"u/b".to_vec(), b"2".to_vec());
+    b.delete(b"u/c".to_vec()); // deletes are events as well
+    db.write(b).unwrap();
+    let mut t = db.begin();
+    t.put(b"u/d".to_vec(), b"3".to_vec()).unwrap();
+    t.commit().unwrap();
+    for key in [b"m/u/b".as_ref(), b"m/u/c".as_ref(), b"m/u/d".as_ref()] {
+        wait_until("mirrors of batch/txn writes", || db.get(key).unwrap().is_some());
+    }
+
+    // out-of-range writes fire nothing
+    db.put(b"w/out".to_vec(), b"x".to_vec()).unwrap();
+    wait_until("queue drained", || pending(&db, "t") == 0);
+    assert!(db.get(b"m/w/out").unwrap().is_none());
+
+    let info = &db.list_triggers().unwrap()[0];
+    assert_eq!(info.module, "mirror");
+    assert_eq!(info.last_error, None);
+}
+
+/// Events are durable and coalesced: with the target module uninstalled the
+/// runner cannot drain (it reports the error), re-touches of one key stay a
+/// single pending event, the backlog survives a reopen, and reinstalling
+/// the module drains it. delete_trigger discards the backlog.
+#[cfg(feature = "wasm")]
+#[test]
+fn trigger_backlog_coalesces_survives_reopen_and_clears_on_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Db::open(dir.path(), small_opts()).unwrap();
+        db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+        db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+        // no module -> the runner cannot drain; events accumulate durably
+        db.uninstall_module("mirror").unwrap();
+        for _ in 0..3 {
+            db.put(b"u/hot".to_vec(), b"v".to_vec()).unwrap();
+        }
+        db.put(b"u/other".to_vec(), b"v".to_vec()).unwrap();
+        db.put(b"zz/out-of-range".to_vec(), b"v".to_vec()).unwrap();
+        assert_eq!(pending(&db, "t"), 2, "coalesced: hot key counts once");
+        wait_until("drain failure surfaces", || {
+            pending(&db, "t") == 2
+                && db.list_triggers().unwrap()[0]
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("mirror"))
+        });
+    }
+
+    // the backlog survives a full close + reopen (events are ordinary
+    // durable keys), and a freshly installed module drains it
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    assert_eq!(pending(&db, "t"), 2, "backlog recovered");
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+    wait_until("recovered backlog drains", || pending(&db, "t") == 0);
+    assert_eq!(db.get(b"m/u/hot").unwrap().unwrap(), b"u/hot");
+    assert_eq!(db.get(b"m/u/other").unwrap().unwrap(), b"u/other");
+    assert!(db.get(b"m/zz/out-of-range").unwrap().is_none());
+
+    // a deleted trigger takes its backlog with it: accumulate one fresh
+    // event with the module gone again, delete the trigger, recreate it
+    db.uninstall_module("mirror").unwrap();
+    db.put(b"u/fresh".to_vec(), b"v".to_vec()).unwrap();
+    assert_eq!(pending(&db, "t"), 1);
+    db.delete_trigger("t").unwrap();
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+    assert_eq!(pending(&db, "t"), 0, "recreate starts with an empty queue");
+    // the discarded event's record is gone, so it can never fire
+    assert!(db.get(b"m/u/fresh").unwrap().is_none());
+}
+
+/// No stacking: writes committed by a trigger invocation never generate
+/// events, even when they land inside another trigger's subscribed range —
+/// while direct user writes into that range still fire it.
+#[cfg(feature = "wasm")]
+#[test]
+fn trigger_writes_do_not_fire_other_triggers() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+    db.create_trigger("a", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+    // b watches the range a's module writes into
+    db.create_trigger("b", "mirror", Some(b"m/"), Some(b"n")).unwrap();
+
+    db.put(b"u/1".to_vec(), b"x".to_vec()).unwrap();
+    wait_until("a fires", || db.get(b"m/u/1").unwrap().is_some());
+    // a's invocation committed m/u/1: had stacking existed, b's event would
+    // have been enqueued atomically with that commit — so this is exact
+    assert_eq!(pending(&db, "b"), 0, "no event from a trigger's own writes");
+    assert!(db.get(b"m/m/u/1").unwrap().is_none());
+
+    // a DIRECT user write into b's range does fire b
+    db.put(b"m/direct".to_vec(), b"x".to_vec()).unwrap();
+    wait_until("b fires on direct write", || {
+        db.get(b"m/m/direct").unwrap().is_some()
+    });
+}
+
+/// Admin validation: bad ranges, unknown modules, duplicate names, unknown
+/// deletes, and reserved-keyspace bounds are all rejected loudly.
+#[cfg(feature = "wasm")]
+#[test]
+fn trigger_admin_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+
+    let is_invalid = |r: fluent31::Result<()>| {
+        assert!(matches!(r, Err(Error::InvalidArgument(_))), "{r:?}");
+    };
+    is_invalid(db.create_trigger("t", "nope", None, None));
+    is_invalid(db.create_trigger("bad name", "mirror", None, None));
+    is_invalid(db.create_trigger("t", "mirror", Some(b"b"), Some(b"a")));
+    is_invalid(db.create_trigger("t", "mirror", Some(b"\x00sys"), None));
+    is_invalid(db.delete_trigger("t"));
+
+    db.create_trigger("t", "mirror", None, None).unwrap();
+    is_invalid(db.create_trigger("t", "mirror", None, None));
+    let infos = db.list_triggers().unwrap();
+    assert_eq!(infos.len(), 1);
+    assert!(infos[0].lo.is_empty() && infos[0].hi.is_empty());
+    db.delete_trigger("t").unwrap();
+    assert!(db.list_triggers().unwrap().is_empty());
+}

@@ -277,13 +277,43 @@ pub(crate) fn query(
 }
 
 pub(crate) fn execute(db: &Arc<DbInner>, name: &str, input: &[u8]) -> Result<Vec<u8>> {
+    execute_impl(db, name, input, &[], false)
+}
+
+/// Trigger-runner executor: the transaction is *system* (its commit fires
+/// no triggers — the no-stacking rule) and consumes the given queue entries
+/// atomically with whatever the module writes. Re-seeding per attempt is
+/// sound: the module reconciles against each attempt's fresh snapshot, and
+/// a queue entry re-written after that snapshot conflicts the commit.
+pub(crate) fn execute_system(
+    db: &Arc<DbInner>,
+    name: &str,
+    input: &[u8],
+    consume: &[Vec<u8>],
+) -> Result<Vec<u8>> {
+    execute_impl(db, name, input, consume, true)
+}
+
+fn execute_impl(
+    db: &Arc<DbInner>,
+    name: &str,
+    input: &[u8],
+    consume: &[Vec<u8>],
+    system: bool,
+) -> Result<Vec<u8>> {
     if input.len() > db.opts.max_wasm_input {
         return Err(Error::InvalidArgument("input exceeds max_wasm_input".into()));
     }
     let attempts = db.opts.execute_retries.max(1);
     for _ in 0..attempts {
         // fresh everything per attempt: snapshot, txn, store, fuel, output
-        let txn = Txn::new(db.clone());
+        let mut txn = Txn::new(db.clone());
+        if system {
+            txn.mark_system();
+        }
+        for key in consume {
+            txn.sys_delete(key.clone())?;
+        }
         let module = load_module_at(db, name, txn.snapshot_seqno())?;
         let ctx = HostCtx::new(db.clone(), Access::Txn(Some(txn)), input.to_vec());
         let (code, mut ctx) = run_instance(db, &module, ctx, "run")?;

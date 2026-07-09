@@ -13,13 +13,17 @@ mod coding;
 mod compaction;
 mod config;
 mod db;
+pub mod edge;
 mod error;
 mod fork;
+pub mod identity;
 mod io;
 mod iter;
 mod manifest;
 mod memtable;
 mod table;
+#[cfg(feature = "wasm")]
+mod trigger;
 mod txn;
 mod types;
 mod version;
@@ -30,11 +34,18 @@ mod wasm;
 
 pub use batch::WriteBatch;
 pub use config::{Compression, IoBackend, Options, SyncMode};
-pub use db::{Db, DbStats, Snapshot};
+pub use db::{
+    Db, DbStats, SliceManifest, SliceRun, SliceTable, Snapshot, StreamEntry, StreamEvent,
+    Subscription,
+};
 pub use error::{Error, Result};
+pub use identity::{InstanceId, StoreIdentity};
 pub use iter::DbIterator;
+#[cfg(feature = "wasm")]
+pub use trigger::TriggerInfo;
 pub use txn::Txn;
+pub use types::{SeqNo, ValueKind};
 #[cfg(feature = "wasm")]
 pub use wasm::ModuleInfo;
 
-pub use fork::{clone_to, list_at as list_forks_at, ForkInfo};
+pub use fork::{list_at as list_forks_at, restore_to, ForkInfo};

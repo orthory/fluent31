@@ -69,6 +69,7 @@ snapshots snap | snaps | sget ID K | snapdrop ID
 wasm      install NAME FILE.wasm | modules | uninstall NAME
           query NAME [INPUT] | exec NAME [INPUT]
 forks     fork NAME | forks | delfork NAME
+triggers  mktrig NAME MODULE [LO|-] [HI|-] | deltrig NAME | triggers
 admin     flush | compact | gc | stats | help | exit
 bytes     plain utf-8 or hex:DEADBEEF";
 
@@ -274,6 +275,60 @@ impl Shell {
                     )),
                     Err(e) => Err(e.to_string()),
                 }
+            }
+            "mktrig" => {
+                let name = tokens.get(1).ok_or("missing trigger name")?;
+                let module = tokens.get(2).ok_or("missing module name")?;
+                // `-` = unbounded, mirroring scan's convention
+                let bound = |i: usize| -> Result<Option<Vec<u8>>, String> {
+                    match tokens.get(i) {
+                        None => Ok(None),
+                        Some(t) if t == "-" => Ok(None),
+                        Some(t) => parse_bytes(t).map(Some),
+                    }
+                };
+                let (lo, hi) = (bound(3)?, bound(4)?);
+                self.db
+                    .create_trigger(name, module, lo.as_deref(), hi.as_deref())
+                    .map_err(err)?;
+                Ok(format!("trigger {name} -> {module}"))
+            }
+            "deltrig" => {
+                self.db
+                    .delete_trigger(tokens.get(1).ok_or("missing trigger name")?)
+                    .map_err(err)?;
+                Ok("deleted".into())
+            }
+            "triggers" => {
+                let trigs = self.db.list_triggers().map_err(err)?;
+                if trigs.is_empty() {
+                    return Ok("(none)".into());
+                }
+                Ok(trigs
+                    .iter()
+                    .map(|t| {
+                        let range = |b: &[u8]| {
+                            if b.is_empty() {
+                                "-".to_string()
+                            } else {
+                                fmt_bytes(b)
+                            }
+                        };
+                        let mut line = format!(
+                            "{} -> {} [{}, {}) pending={}",
+                            t.name,
+                            t.module,
+                            range(&t.lo),
+                            range(&t.hi),
+                            t.pending
+                        );
+                        if let Some(e) = &t.last_error {
+                            line.push_str(&format!(" last_error={e:?}"));
+                        }
+                        line
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"))
             }
             "fork" => {
                 let info = self

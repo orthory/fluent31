@@ -9,10 +9,12 @@
 //!
 //! Full specification: WIRE.md at the repository root.
 
+mod backend;
 mod client;
 mod dispatch;
 pub mod proto;
 mod server;
 
+pub use backend::WireBackend;
 pub use client::{WireClient, WireError, WireResult};
 pub use server::{ServerConfig, WireServer};

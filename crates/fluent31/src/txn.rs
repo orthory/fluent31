@@ -28,6 +28,10 @@ pub struct Txn {
     /// time (get_for_update).
     locks: BTreeSet<Vec<u8>>,
     bytes: usize,
+    /// Engine-internal transaction (the trigger runner): its commit fires
+    /// no triggers, so trigger invocations can never cascade.
+    #[cfg(feature = "wasm")]
+    system: bool,
 }
 
 impl Txn {
@@ -40,7 +44,27 @@ impl Txn {
             writes: BTreeMap::new(),
             locks: BTreeSet::new(),
             bytes: 0,
+            #[cfg(feature = "wasm")]
+            system: false,
         }
+    }
+
+    /// Mark this transaction as engine-internal: its commit generates no
+    /// trigger events (the no-stacking rule).
+    #[cfg(feature = "wasm")]
+    pub(crate) fn mark_system(&mut self) {
+        self.system = true;
+    }
+
+    /// Buffer a reserved-keyspace delete (trigger queue consumption).
+    /// Bypasses user-key validation — engine-internal callers only. The key
+    /// joins the commit's conflict set like any write, which is what makes
+    /// consuming an event race-safe against a concurrent re-touch.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn sys_delete(&mut self, key: Vec<u8>) -> Result<()> {
+        self.track_bytes(key.len())?;
+        self.writes.insert(key, None);
+        Ok(())
     }
 
     pub fn snapshot_seqno(&self) -> SeqNo {
@@ -148,7 +172,8 @@ impl Txn {
         // commits are writes: honor the same memtable/L0 backpressure as the
         // plain write path
         self.db.wait_for_space()?;
-        let ops: Vec<BatchOp> = self
+        #[cfg_attr(not(feature = "wasm"), allow(unused_mut))]
+        let mut ops: Vec<BatchOp> = self
             .writes
             .iter()
             .map(|(k, v)| match v {
@@ -159,34 +184,65 @@ impl Txn {
                 None => BatchOp::Delete { key: k.clone() },
             })
             .collect();
+        #[cfg_attr(not(feature = "wasm"), allow(unused_mut))]
+        let mut bytes = self.bytes;
 
-        if self.db.opts.sync == SyncMode::Always {
+        // Trigger events ride the same batch as the writes that caused them
+        // (atomic through WAL, memtable, and crash recovery). They are NOT
+        // validation keys: the queue moving underneath us must not conflict
+        // this commit.
+        #[cfg(feature = "wasm")]
+        let fired = if self.system {
+            false
+        } else {
+            let events = self
+                .db
+                .triggers
+                .event_keys(self.writes.keys().map(|k| k.as_slice()));
+            let fired = !events.is_empty();
+            bytes += events.iter().map(|k| k.len()).sum::<usize>();
+            ops.extend(events.into_iter().map(|key| BatchOp::Put {
+                key,
+                value: Vec::new(),
+            }));
+            fired
+        };
+
+        let result = if self.db.opts.sync == SyncMode::Always {
             let keys: Vec<Vec<u8>> = self
                 .writes
                 .keys()
                 .chain(self.locks.iter())
                 .cloned()
                 .collect();
-            return self
-                .db
-                .queue_commit(ops, self.bytes, Some((self.snap, keys)));
-        }
-
-        let mut ws = self.db.write_mu.lock();
-        // validation inside the write mutex: no writer can slip a version in
-        // between validation and application
-        let view = self.db.read_view();
-        for key in self.writes.keys().chain(self.locks.iter()) {
-            if let Some((seq, _kind)) = view.latest(key)? {
-                if seq > self.snap {
-                    return Err(Error::Conflict);
+            self.db.queue_commit(ops, bytes, Some((self.snap, keys)))
+        } else {
+            let mut ws = self.db.write_mu.lock();
+            // validation inside the write mutex: no writer can slip a
+            // version in between validation and application
+            let view = self.db.read_view();
+            let mut conflicted = false;
+            for key in self.writes.keys().chain(self.locks.iter()) {
+                if let Some((seq, _kind)) = view.latest(key)? {
+                    if seq > self.snap {
+                        conflicted = true;
+                        break;
+                    }
                 }
             }
+            if conflicted {
+                Err(Error::Conflict)
+            } else if !ops.is_empty() {
+                self.db.apply_locked(&mut ws, &ops)
+            } else {
+                Ok(())
+            }
+        };
+        #[cfg(feature = "wasm")]
+        if fired && result.is_ok() {
+            self.db.triggers.signal.notify();
         }
-        if !ops.is_empty() {
-            self.db.apply_locked(&mut ws, &ops)?;
-        }
-        Ok(())
+        result
     }
 
     /// Discard all buffered writes (also what `Drop` does).
