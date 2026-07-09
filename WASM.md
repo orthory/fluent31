@@ -382,10 +382,18 @@ declaration.
 | `guests/transfer` | execute (untyped) | OCC transfer with conflict retries |
 | `guests/customer_index` | execute (keys-mode trigger) | trigger-maintained secondary index: `parse_trigger_keys()`, reconcile-against-current-state, the back-pointer pattern for updates/deletes |
 | `guests/order_feed` | change consumer (changes-mode trigger) | ordered changefeed materialization: `#[fluent_guest::on_apply]`, per-op kinds/values/seqnos, in-code filtering, elided-value handling |
+| `guests/dynamic_index` | change consumer (changes-mode trigger) | DYNAMIC index generation: index specs stored as keys, scan-backfill on spec write, fold-style live maintenance, teardown on spec delete |
+| `guests/live_stats` | change consumer (changes-mode trigger) | always-fresh `GROUP BY` aggregates: exactly-once delta folding (updates move groups, deletes subtract) that provably never drifts |
+| `guests/cascade_delete` | change consumer (changes-mode trigger) | `ON DELETE CASCADE`: op-kind filtering, subtree sweep, the no-stacking rule doing the loop prevention |
+| `guests/claim` | execute | atomic unique-claim (schema-free UNIQUE constraint): OCC exactly-one-winner under concurrency, idempotent re-claim, attributable failures |
 | `crates/fluent-graphql/tests/graphql.rs` | — | minimal WAT modules incl. `describe` exports (`wat_typed`) |
 
-Demo end-to-end (server running): `scripts/demo-orders.sh` builds,
-installs, seeds, and queries the typed pair.
+Four of these ship as runnable, self-asserting host-side walkthroughs —
+`cargo run -p fluent31 --example
+{dynamic_index,live_stats,cascade_delete,claim}` — which build the guest
+workspace automatically. Demo end-to-end (server running):
+`scripts/demo-orders.sh` builds, installs, seeds, and queries the typed
+pair.
 
 ## 7. Authoring checklist
 
