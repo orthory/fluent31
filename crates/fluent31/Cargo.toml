@@ -25,3 +25,7 @@ default = ["wasm"]
 # In-database WASM execution (queries/executors). Disable for a pure
 # storage-engine build (e.g. cross-checking the io_uring backend).
 wasm = ["dep:wasmtime"]
+# Test-only: exposes the IO traits and `Db::open_with_io` so durability tests
+# can inject a fault-injecting backend (fsync failure, short/torn writes,
+# ENOSPC). No effect on a normal build; never enable in production.
+fault-injection = []
