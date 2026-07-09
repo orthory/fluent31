@@ -86,7 +86,7 @@ impl SchemaManager {
 }
 
 /// A field of a Value-object parent: looks itself up in the parent's
-/// `Value::Object`. Lets whole output trees (Stats, Checkpoint, typed
+/// `Value::Object`. Lets whole output trees (Stats, Module, typed
 /// module outputs) be produced as one `Value` with no per-type resolvers.
 pub(crate) fn value_field(name: &str, ty: TypeRef) -> Field {
     let key = async_graphql::Name::new(name);
@@ -321,9 +321,10 @@ fn module_object() -> Object {
         .field(value_field("schemaError", TypeRef::named(TypeRef::STRING)))
 }
 
-fn checkpoint_object() -> Object {
-    Object::new("Checkpoint")
+fn fork_object() -> Object {
+    Object::new("Fork")
         .field(value_field("name", TypeRef::named_nn(TypeRef::STRING)))
+        .field(value_field("instanceId", TypeRef::named_nn(TypeRef::STRING)))
         .field(value_field("createdUnixMs", TypeRef::named_nn("U64")))
         .field(value_field("lastSeqno", TypeRef::named_nn("U64")))
         .field(value_field("path", TypeRef::named_nn(TypeRef::STRING)))
@@ -406,7 +407,7 @@ pub(crate) fn build(
         .register(pair_object())
         .register(scan_page_object())
         .register(module_object())
-        .register(checkpoint_object())
+        .register(fork_object())
         .register(gc_result_object())
         .register(level_stats_object())
         .register(stats_object())

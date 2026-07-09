@@ -752,9 +752,11 @@ dependencies = [
  "axum",
  "base64",
  "fluent31",
+ "http-body-util",
  "serde_json",
  "tempfile",
  "tokio",
+ "tower",
  "tower-http",
 ]
 

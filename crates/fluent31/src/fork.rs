@@ -1,11 +1,15 @@
-//! Manual point-in-time checkpoints (PITR).
+//! Named database forks — MVCC-pinned snapshots materialized as hard
+//! links. Not PITR: there is no log archiving and no
+//! restore-to-arbitrary-time; a fork captures an explicit named cut.
+//! Creation copies almost nothing and leaves live readers and writers
+//! essentially undisturbed.
 //!
-//! A checkpoint is a complete database directory under `archive/<name>/`:
+//! A fork is a complete database directory under `archive/<name>/`:
 //! hard links of the (immutable) tables and sealed vlog files, a bounded
 //! copy of the vlog head, and a fresh manifest. Creation is crash-atomic:
 //! everything is built in `archive/.tmp-<name>/`, fsynced, then renamed into
-//! place. Restore is just `Db::open` on the archive path — opening it
-//! read-write forks the database copy-on-write.
+//! place. A fork activates with just `Db::open` on its path — writable,
+//! copy-on-write with respect to the parent.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,12 +22,30 @@ use crate::io::{self, copy_prefix, hard_link_or_copy};
 use crate::manifest::{self, ManifestData, RunMeta};
 
 #[derive(Debug, Clone)]
-pub struct CheckpointInfo {
+pub struct ForkInfo {
     pub name: String,
+    /// Stable routing handle minted at creation — servers use it to address
+    /// the fork as a database instance. An address, not a credential:
+    /// unguessable only so stale handles can't collide across
+    /// delete/recreate cycles.
+    pub instance_id: String,
     pub created_unix_ms: u64,
     /// Every write with seqno <= this is contained in the archive.
     pub last_seqno: u64,
     pub path: PathBuf,
+}
+
+/// 128 hex bits from two independently-seeded `RandomState` hashers —
+/// process-level OS entropy without adding a rand dependency.
+fn mint_instance_id(name: &str, created_unix_ms: u64, seq: u64) -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+    let mut out = String::with_capacity(32);
+    for salt in 0..2u8 {
+        let h = RandomState::new().hash_one((salt, name, created_unix_ms, seq));
+        out.push_str(&format!("{h:016x}"));
+    }
+    out
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -37,12 +59,12 @@ fn validate_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::InvalidArgument(format!(
-            "invalid checkpoint name {name:?} (use [A-Za-z0-9._-], max 64 chars, no leading dot)"
+            "invalid fork name {name:?} (use [A-Za-z0-9._-], max 64 chars, no leading dot)"
         )))
     }
 }
 
-/// Snapshot registration guard for the checkpoint cut.
+/// Snapshot registration guard for the fork cut.
 struct CutPin {
     db: Arc<crate::db::DbInner>,
     seq: u64,
@@ -54,13 +76,34 @@ impl Drop for CutPin {
     }
 }
 
-pub(crate) fn create(db: &Db, name: &str) -> Result<CheckpointInfo> {
+/// Removes the in-progress build dir if creation errors (or panics) before
+/// the rename publishes it — a failed build must not poison its fork name
+/// until the next `Db::open` sweep. Armed only by the caller that created
+/// the dir, so a losing concurrent creator can never delete the winner's
+/// in-progress build.
+struct TmpDirGuard(Option<PathBuf>);
+
+impl TmpDirGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TmpDirGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_dir_all(&p);
+        }
+    }
+}
+
+pub(crate) fn create(db: &Db, name: &str) -> Result<ForkInfo> {
     validate_name(name)?;
     let inner = &db.inner;
     let final_dir = inner.paths.archive(name);
     if final_dir.exists() {
         return Err(Error::InvalidArgument(format!(
-            "checkpoint {name:?} already exists"
+            "fork {name:?} already exists"
         )));
     }
 
@@ -84,7 +127,7 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<CheckpointInfo> {
     };
 
     // 3. build the archive in a temp dir. create_dir doubles as the mutual
-    //    exclusion for concurrent same-name checkpoints: the second caller
+    //    exclusion for concurrent same-name forks: the second caller
     //    fails here instead of clobbering the first one's in-progress build.
     //    (Stale .tmp-* dirs from crashes are swept at Db::open.)
     let root = inner.paths.archive_root();
@@ -93,12 +136,13 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<CheckpointInfo> {
     std::fs::create_dir(&tmp_dir).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
             Error::InvalidArgument(format!(
-                "checkpoint {name:?} is already being created"
+                "fork {name:?} is already being created"
             ))
         } else {
             Error::Io(e)
         }
     })?;
+    let mut tmp_guard = TmpDirGuard(Some(tmp_dir.clone()));
 
     // tables (paths stay live: the pinned view holds their Arc handles and
     // unlink only ever happens in handle Drop)
@@ -166,23 +210,37 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<CheckpointInfo> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let meta = format!("name={name}\ncreated_unix_ms={created_unix_ms}\nlast_seqno={cut}\n");
-    io::atomic_write(&tmp_dir.join("checkpoint.meta"), meta.as_bytes())?;
+    let instance_id = mint_instance_id(name, created_unix_ms, cut);
+    let meta = format!(
+        "name={name}\ninstance_id={instance_id}\ncreated_unix_ms={created_unix_ms}\nlast_seqno={cut}\n"
+    );
+    io::atomic_write(&tmp_dir.join("fork.meta"), meta.as_bytes())?;
 
-    // 4. publish atomically
+    // 4. publish atomically. Once the rename lands the fork is complete and
+    //    valid; the guard must not touch it even if the root fsync fails.
     io::sync_dir(&tmp_dir)?;
     std::fs::rename(&tmp_dir, &final_dir)?;
+    tmp_guard.disarm();
     io::sync_dir(&root)?;
 
-    Ok(CheckpointInfo {
+    Ok(ForkInfo {
         name: name.to_string(),
+        instance_id,
         created_unix_ms,
         last_seqno: cut,
         path: final_dir,
     })
 }
 
-pub(crate) fn list(paths: &DbPaths) -> Result<Vec<CheckpointInfo>> {
+/// List the forks recorded under a database directory by reading
+/// `archive/*/fork.meta` — no lock taken, works on databases another
+/// process has open. Point-in-time: racing creates/deletes may appear or
+/// not.
+pub fn list_at(db_dir: &Path) -> Result<Vec<ForkInfo>> {
+    list(&DbPaths::new(db_dir))
+}
+
+pub(crate) fn list(paths: &DbPaths) -> Result<Vec<ForkInfo>> {
     let root = paths.archive_root();
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(&root) else {
@@ -195,15 +253,17 @@ pub(crate) fn list(paths: &DbPaths) -> Result<Vec<CheckpointInfo>> {
             continue; // .tmp-* build dirs
         }
         let dir = entry.path();
-        let Ok(meta) = std::fs::read_to_string(dir.join("checkpoint.meta")) else {
+        let Ok(meta) = std::fs::read_to_string(dir.join("fork.meta")) else {
             continue;
         };
         let field = |k: &str| -> Option<String> {
             meta.lines()
                 .find_map(|l| l.strip_prefix(&format!("{k}=")).map(|v| v.to_string()))
         };
-        out.push(CheckpointInfo {
+        out.push(ForkInfo {
             name: name.to_string(),
+            // pre-instance-id forks stay addressable by name
+            instance_id: field("instance_id").unwrap_or_else(|| name.to_string()),
             created_unix_ms: field("created_unix_ms")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
@@ -220,16 +280,16 @@ pub(crate) fn delete(paths: &DbPaths, name: &str) -> Result<()> {
     let dir = paths.archive(name);
     if !dir.exists() {
         return Err(Error::InvalidArgument(format!(
-            "no checkpoint named {name:?}"
+            "no fork named {name:?}"
         )));
     }
-    // refuse to delete a checkpoint that is open as a live database
+    // refuse to delete a fork that is open as a live database
     let lock_path = dir.join("LOCK");
     if lock_path.exists() {
         let f = std::fs::OpenOptions::new().write(true).open(&lock_path)?;
         if f.try_lock().is_err() {
             return Err(Error::InvalidArgument(format!(
-                "checkpoint {name:?} is currently open as a database"
+                "fork {name:?} is currently open as a database"
             )));
         }
     }
@@ -238,9 +298,9 @@ pub(crate) fn delete(paths: &DbPaths, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Re-link an archive into a fresh standalone directory (promote a
-/// checkpoint without mutating the archive).
-pub fn restore_to(archive: &Path, dest: &Path) -> Result<()> {
+/// Re-link a fork into a fresh standalone directory — a second copy you
+/// can open read-write while the archived fork stays pristine.
+pub fn clone_to(archive: &Path, dest: &Path) -> Result<()> {
     if dest.exists() {
         return Err(Error::InvalidArgument(format!(
             "destination {} already exists",

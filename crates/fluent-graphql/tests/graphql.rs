@@ -549,8 +549,10 @@ async fn stats_and_maintenance() {
     assert_eq!(d["gcVlog"], json!({ "retired": Value::Null }));
 }
 
+/// Fork lifecycle on a single instance's surface (routing/isolation is
+/// covered in tests/instances.rs).
 #[tokio::test]
-async fn checkpoint_lifecycle() {
+async fn fork_lifecycle() {
     let (schema, _dir) = open_schema();
     run(
         &schema,
@@ -560,28 +562,29 @@ async fn checkpoint_lifecycle() {
     .await;
     let d = run(
         &schema,
-        r#"mutation { checkpoint(name: "snap1") { name lastSeqno } }"#,
+        r#"mutation { fork(name: "snap1") { name instanceId lastSeqno } }"#,
         json!({}),
     )
     .await;
-    assert_eq!(d["checkpoint"]["name"], json!("snap1"));
-    assert!(u64_field(&d["checkpoint"]["lastSeqno"]) >= 1);
+    assert_eq!(d["fork"]["name"], json!("snap1"));
+    assert_eq!(d["fork"]["instanceId"].as_str().unwrap().len(), 32);
+    assert!(u64_field(&d["fork"]["lastSeqno"]) >= 1);
 
-    let d = run(&schema, r#"{ checkpoints { name } }"#, json!({})).await;
-    assert_eq!(d["checkpoints"][0]["name"], json!("snap1"));
+    let d = run(&schema, r#"{ forks { name instanceId } }"#, json!({})).await;
+    assert_eq!(d["forks"][0]["name"], json!("snap1"));
 
     run(
         &schema,
-        r#"mutation { deleteCheckpoint(name: "snap1") }"#,
+        r#"mutation { deleteFork(name: "snap1") }"#,
         json!({}),
     )
     .await;
-    let d = run(&schema, r#"{ checkpoints { name } }"#, json!({})).await;
-    assert_eq!(d["checkpoints"].as_array().unwrap().len(), 0);
+    let d = run(&schema, r#"{ forks { name } }"#, json!({})).await;
+    assert_eq!(d["forks"].as_array().unwrap().len(), 0);
 
     let errs = run_err(
         &schema,
-        r#"mutation { checkpoint(name: "../evil") { name } }"#,
+        r#"mutation { fork(name: "../evil") { name } }"#,
         json!({}),
     )
     .await;
@@ -1302,9 +1305,9 @@ async fn typed_int_args_enforce_32bit_range_and_singleton_lists_coerce() {
 }
 
 #[tokio::test]
-async fn modules_and_checkpoints_are_nonnull_item_lists() {
+async fn modules_and_forks_are_nonnull_item_lists() {
     let (schema, _dir) = open_schema();
     let sdl = schema.schema().sdl();
     assert!(sdl.contains("modules: [Module!]"), "{sdl}");
-    assert!(sdl.contains("checkpoints: [Checkpoint!]"), "{sdl}");
+    assert!(sdl.contains("forks: [Fork!]"), "{sdl}");
 }

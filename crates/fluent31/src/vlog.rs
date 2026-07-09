@@ -208,7 +208,7 @@ pub(crate) struct VlogHead {
 
 /// Append side of the value log. All appends happen under the DB write mutex;
 /// the internal mutex just keeps the bookkeeping consistent for readers of
-/// head state (checkpoint, rotation).
+/// head state (fork, rotation).
 pub(crate) struct Vlog {
     head: Mutex<VlogHead>,
 }

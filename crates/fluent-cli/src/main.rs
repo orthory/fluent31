@@ -68,7 +68,7 @@ txn       begin | tget K | tput K V | tdel K | tlock K (get_for_update) | commit
 snapshots snap | snaps | sget ID K | snapdrop ID
 wasm      install NAME FILE.wasm | modules | uninstall NAME
           query NAME [INPUT] | exec NAME [INPUT]
-pitr      checkpoint NAME | checkpoints | delcp NAME
+forks     fork NAME | forks | delfork NAME
 admin     flush | compact | gc | stats | help | exit
 bytes     plain utf-8 or hex:DEADBEEF";
 
@@ -275,37 +275,38 @@ impl Shell {
                     Err(e) => Err(e.to_string()),
                 }
             }
-            "checkpoint" => {
+            "fork" => {
                 let info = self
                     .db
-                    .checkpoint(tokens.get(1).ok_or("missing name")?)
+                    .fork(tokens.get(1).ok_or("missing name")?)
                     .map_err(err)?;
                 Ok(format!(
-                    "checkpoint {} @ seq {} -> {}",
+                    "fork {} @ seq {} (instance {}) -> {}",
                     info.name,
                     info.last_seqno,
+                    info.instance_id,
                     info.path.display()
                 ))
             }
-            "checkpoints" => {
-                let cps = self.db.list_checkpoints().map_err(err)?;
-                if cps.is_empty() {
+            "forks" => {
+                let forks = self.db.list_forks().map_err(err)?;
+                if forks.is_empty() {
                     return Ok("(none)".into());
                 }
-                Ok(cps
+                Ok(forks
                     .iter()
                     .map(|c| {
                         format!(
-                            "{} @ seq {} ({} ms epoch)",
-                            c.name, c.last_seqno, c.created_unix_ms
+                            "{} @ seq {} (instance {}, {} ms epoch)",
+                            c.name, c.last_seqno, c.instance_id, c.created_unix_ms
                         )
                     })
                     .collect::<Vec<_>>()
                     .join("\n"))
             }
-            "delcp" => {
+            "delfork" => {
                 self.db
-                    .delete_checkpoint(tokens.get(1).ok_or("missing name")?)
+                    .delete_fork(tokens.get(1).ok_or("missing name")?)
                     .map_err(err)?;
                 Ok("deleted".into())
             }

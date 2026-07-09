@@ -2,7 +2,7 @@
 
 An embedded LSM key-value engine in Rust with MVCC snapshots and optimistic
 transactions, WiscKey-style key-value separation, io_uring-backed IO on
-Linux, manual point-in-time checkpoints, and an in-database WASM execution
+Linux, copy-on-write database forks, and an in-database WASM execution
 layer that replaces SQL.
 
 This document describes the system **as implemented**. It went through two
@@ -11,7 +11,7 @@ fixes are baked in below and called out where the reasoning is subtle.
 
 Contents: §1 on-disk layout · §2 write path · §3 tables · §4 LSM shape ·
 §5 manifest/recovery · §6 MVCC & transactions · §7 IO backends · §8 value
-log · §9 WASM layer · §10 checkpoints/PITR · §11 concurrency & locks ·
+log · §9 WASM layer · §10 forks · §11 concurrency & locks ·
 §12 testing · §13 tooling & limits.
 
 ---
@@ -26,7 +26,7 @@ log · §9 WASM layer · §10 checkpoints/PITR · §11 concurrency & locks ·
   wal-<id>.log         # write-ahead logs, one per memtable generation
   sst-<id>.tbl         # immutable table fragments (§3)
   vlog-<id>.vlog       # value-log files (§8); one active head, rest sealed
-  archive/<name>/      # checkpoints — each one a complete DB directory (§10)
+  archive/<name>/      # forks — each one a complete DB directory (§10)
 ```
 
 All integers little-endian; all checksums CRC32C. One `next_file_id`
@@ -130,7 +130,7 @@ with magic/format/CRC framing. Commit ordering, always: table files
 fdatasynced → dir fsync → `MANIFEST-<gen+1>` written + fsynced → dir fsync
 → CURRENT flipped (tmp + fsync + rename + dir fsync) → obsolete files
 dropped. sst/vlog unlinks happen **only in handle `Drop`** after
-`mark_obsolete` — pinned Versions (readers, checkpoints) keep paths alive
+`mark_obsolete` — pinned Versions (readers, forks) keep paths alive
 for hard-linking; WALs/manifests are deleted by path (never linked).
 
 **`wal_floor`**: WALs with id ≥ floor are live; recovery replays every
@@ -162,7 +162,7 @@ rotation-vs-GC data-loss window found in design review.
    file that predates a crash (kills the offset-reuse aliasing bug class;
    the key check in every vlog read is the second layer).
 6. Startup GC: delete sst/vlog/wal files no durable state references, and
-   sweep crashed checkpoint builds (`archive/.tmp-*`).
+   sweep crashed fork builds (`archive/.tmp-*`).
 
 ## 6. MVCC, snapshots, transactions
 
@@ -238,7 +238,7 @@ dataset stay memory-resident, and compaction moves pointers, not payloads.
   so no crash can resurrect pointers into a deleted file (the BadgerDB
   bug class). Only then is the handle dropped and `mark_obsolete`d;
   physical unlink happens on the last Arc drop, so long scans and
-  checkpoints holding old ReadViews pin the file regardless. At reopen,
+  fork creation holding old ReadViews pins the file regardless. At reopen,
   gated victims are re-adopted as resolvable-but-retired (never back into
   `vlog_live`).
 - Discard stats are persisted in the same manifest flip as the compaction
@@ -293,9 +293,17 @@ big-value reads, `fluent_main!`). Example guests in `guests/`:
 replacement) and **transfer** (balance transfer via `get_for_update` —
 the stored procedure replacement, exercised concurrently in tests).
 
-## 10. Checkpoints / PITR (explicit, manual)
+## 10. Forks (explicit, manual)
 
-`db.checkpoint(name)`:
+Not PITR: there is no continuous log archiving and no
+restore-to-arbitrary-time — a fork captures an explicitly named cut. What
+a fork is: an MVCC-pinned snapshot materialized as hard links, so
+creation copies almost nothing (one bounded head copy) and leaves live
+readers and writers essentially undisturbed — the cost is a memtable
+flush, a brief manifest-lock hold, and vlog GC deletions deferred for the
+duration of the build.
+
+`db.fork(name)`:
 1. Flush everything (freeze + drain the frozen queue).
 2. Under the manifest lock (freezes structure): clone manifest data, take
    a ReadView, `cut = last_flushed_seqno`. Register a snapshot at `cut` —
@@ -310,14 +318,21 @@ the stored procedure replacement, exercised concurrently in tests).
    every pointer at the cut; hard-linking a growing file would share the
    inode with the parent's future appends), write an archive manifest
    (levels from the pinned view, `wal_floor = next_file_id` ⇒ no WALs,
-   retired list emptied) and `checkpoint.meta`.
+   retired list emptied) and `fork.meta` — which records a freshly minted
+   `instance_id`, the fork's stable routing handle (servers address the
+   fork by it, e.g. GraphQL at `/graphql/<instanceId>`; recreating a
+   same-named fork mints a new id so stale handles can't alias).
 4. fsync every written file + the tmp dir, rename to `archive/<name>`,
-   fsync `archive/` — a checkpoint either exists completely or not at all.
+   fsync `archive/` — a fork either exists completely or not at all. A
+   build that fails partway removes its own `.tmp` dir (the name stays
+   immediately reusable); `.tmp` dirs orphaned by a crash are swept at
+   the next `Db::open`.
 
-**Restore = open.** Every archive is a complete database; opening it
-read-write forks copy-on-write (its compactions unlink only its own hard
-links). `delete_checkpoint` refuses if the archive is flock'd by a live
-fork. `restore_to` re-links an archive to a fresh directory.
+**Open = activate.** Every fork is a complete database; opening it
+read-write gives a live copy-on-write clone (its compactions unlink only
+its own hard links). `delete_fork` refuses if the fork is flock'd open as
+a database. `clone_to` re-links a fork to a fresh directory — work on the
+copy, keep the archived fork pristine.
 
 ## 11. Concurrency & locks
 
@@ -339,8 +354,8 @@ manifest roundtrip, cache, memtable/iterator semantics. Integration: CRUD,
 batch atomicity, snapshot isolation across flush+compaction, conflict
 matrix (txn-txn, txn-vs-plain-put, tombstone conflicts, write-skew defense),
 fwd/rev/bounded iterators across mixed memtable/table state, WAL replay,
-torn-tail truncation, vlog roundtrip + GC + reopen, checkpoint
-create/fork/delete + GC interleaving, double-open lock, and a
+torn-tail truncation, vlog roundtrip + GC + reopen, fork
+create/open/delete + GC interleaving, double-open lock, and a
 **randomized model test**: 4 000 seeded ops mirrored against a `BTreeMap`
 with interleaved flushes, compactions, GC, snapshots, bounded scans both
 directions, and full reopens — exact-equality asserted throughout. WASM:
@@ -355,7 +370,7 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
 ## 13. Tooling, features, limits
 
 - `fluent-cli`: interactive shell (get/put/del/scan/count, txns,
-  snapshots, install/query/exec, checkpoints, flush/compact/gc/stats) —
+  snapshots, install/query/exec, forks, flush/compact/gc/stats) —
   every command prints its latency.
 - Cargo features: `wasm` (default) gates wasmtime; `--no-default-features`
   builds the pure storage engine (used to cross-check the uring backend).

@@ -1,18 +1,12 @@
-//! fluent-graphql server binary: GraphQL at POST /graphql, GraphiQL IDE at
-//! GET / and GET /graphql.
+//! fluent-graphql server binary: the primary database at POST /graphql,
+//! forks at POST /graphql/<instanceId>, GraphiQL IDE on GET at each
+//! endpoint.
 
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use async_graphql::http::GraphiQLSource;
-use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::extract::State;
-use axum::response::Html;
-use axum::routing::get;
-use axum::Router;
 use fluent31::{Db, Options, SyncMode};
-use fluent_graphql::SchemaManager;
-use tower_http::limit::RequestBodyLimitLayer;
+use fluent_graphql::{InstanceRegistry, RegistryConfig, SchemaManager};
 
 const USAGE: &str = "usage: fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync always|never|periodic:<ms>] [--max-body-bytes N]\n       fluent-graphql --print-schema";
 const DEFAULT_MAX_BODY: usize = 32 << 20;
@@ -70,7 +64,7 @@ fn main() -> ExitCode {
         sync,
         ..Options::default()
     };
-    let db = match Db::open(&dir, opts) {
+    let db = match Db::open(&dir, opts.clone()) {
         Ok(d) => Arc::new(d),
         Err(e) => {
             eprintln!("fluent-graphql: cannot open {dir}: {e}");
@@ -85,18 +79,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    serve(mgr, listen, max_body)
-}
-
-async fn graphql_handler(
-    State(mgr): State<Arc<SchemaManager>>,
-    req: GraphQLRequest,
-) -> GraphQLResponse {
-    mgr.execute(req.into_inner()).await.into()
-}
-
-async fn graphiql() -> Html<String> {
-    Html(GraphiQLSource::build().endpoint("/graphql").finish())
+    let registry = InstanceRegistry::new(mgr, &dir, opts, RegistryConfig::default());
+    serve(registry, listen, max_body)
 }
 
 /// Resolves on SIGINT (ctrl-C) or, on unix, SIGTERM.
@@ -135,14 +119,19 @@ async fn shutdown_signal() {
 }
 
 #[tokio::main]
-async fn serve(mgr: Arc<SchemaManager>, listen: String, max_body: usize) -> ExitCode {
-    let app = Router::new()
-        .route("/", get(graphiql))
-        .route("/graphql", get(graphiql).post(graphql_handler))
-        // the async-graphql extractor bypasses axum's DefaultBodyLimit, so
-        // cap the body itself
-        .layer(RequestBodyLimitLayer::new(max_body))
-        .with_state(mgr);
+async fn serve(registry: Arc<InstanceRegistry>, listen: String, max_body: usize) -> ExitCode {
+    let app = fluent_graphql::router(registry.clone(), max_body);
+    // close fork instances nobody has touched in a while
+    tokio::spawn({
+        let registry = registry.clone();
+        async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                registry.evict_idle();
+            }
+        }
+    });
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -150,7 +139,7 @@ async fn serve(mgr: Arc<SchemaManager>, listen: String, max_body: usize) -> Exit
             return ExitCode::FAILURE;
         }
     };
-    println!("fluent-graphql: http://{listen}/graphql (GraphiQL at /)");
+    println!("fluent-graphql: http://{listen}/graphql (GraphiQL at /, forks at /graphql/<instanceId>)");
     match axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
