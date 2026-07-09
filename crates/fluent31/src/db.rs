@@ -1160,7 +1160,26 @@ pub struct DbStats {
 
 impl Db {
     pub fn open(dir: impl AsRef<Path>, opts: Options) -> Result<Db> {
-        let inner = open_inner(dir.as_ref(), opts)?;
+        Self::spawn_from_inner(open_inner(dir.as_ref(), opts)?)
+    }
+
+    /// Open with a caller-supplied IO backend, bypassing `opts.io_backend`.
+    /// The **fault-injection test seam** (feature `fault-injection`, off by
+    /// default): a custom `Io` can fail/short/corrupt `append`, `read_at`, and
+    /// `sync_data` to drive durability-fault paths deterministically. Not for
+    /// production use. Note the metadata plane (manifest `atomic_write`,
+    /// directory fsyncs, fork hard-links) does not route through this trait.
+    #[cfg(feature = "fault-injection")]
+    pub fn open_with_io(
+        dir: impl AsRef<Path>,
+        opts: Options,
+        io: Arc<dyn io::Io>,
+        backend_name: &'static str,
+    ) -> Result<Db> {
+        Self::spawn_from_inner(open_inner_with(dir.as_ref(), opts, Some((io, backend_name)))?)
+    }
+
+    fn spawn_from_inner(inner: Arc<DbInner>) -> Result<Db> {
         let mut threads = Vec::new();
         {
             let i = inner.clone();
@@ -1665,6 +1684,17 @@ fn compact_thread(db: Arc<DbInner>) {
 // ---------------------------------------------------------------------------
 
 fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
+    open_inner_with(dir, opts, None)
+}
+
+/// `open_inner` with an optional pre-built IO backend. `None` resolves the
+/// backend from `opts.io_backend`; `Some` injects a caller-provided one (the
+/// feature-gated fault-injection seam — see `Db::open_with_io`).
+fn open_inner_with(
+    dir: &Path,
+    opts: Options,
+    io_override: Option<(Arc<dyn io::Io>, &'static str)>,
+) -> Result<Arc<DbInner>> {
     let paths = DbPaths::new(dir);
     if !dir.exists() {
         if !opts.create_if_missing {
@@ -1693,7 +1723,10 @@ fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
         )));
     }
 
-    let (io_backend, backend_name) = io::backend(opts.io_backend)?;
+    let (io_backend, backend_name) = match io_override {
+        Some(pair) => pair,
+        None => io::backend(opts.io_backend)?,
+    };
     let cache = Arc::new(BlockCache::new(opts.block_cache_size));
 
     if !manifest::exists(dir) {

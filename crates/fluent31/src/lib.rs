@@ -19,6 +19,7 @@ mod fork;
 pub mod identity;
 mod io;
 mod iter;
+pub mod journal;
 mod manifest;
 mod memtable;
 mod table;
@@ -41,6 +42,12 @@ pub use db::{
 pub use error::{Error, Result};
 pub use identity::{InstanceId, StoreIdentity};
 pub use iter::DbIterator;
+pub use journal::{Journal, JournalStats, RebuildReport};
+
+/// IO backend traits, exposed only under the `fault-injection` feature so
+/// durability tests can supply a custom `Io` to `Db::open_with_io`.
+#[cfg(feature = "fault-injection")]
+pub use io::{DbFile, Io, ReadReq};
 #[cfg(feature = "wasm")]
 pub use trigger::TriggerInfo;
 pub use txn::Txn;

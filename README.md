@@ -25,6 +25,12 @@ An embedded key-value database engine in Rust:
   creation copies almost nothing and leaves live readers/writers
   undisturbed. Each fork is itself a complete database directory — open it
   read-write and it's a live, copy-on-write clone of the parent.
+- **Opt-in rebuild journal** — an off-by-default catastrophe-recovery net
+  (`journal::Journal::attach`): a separate, async append-only record of every
+  user-key mutation, independent of the store's own files, from which a fresh
+  database is rebuilt from zero (`journal::rebuild`) for the day a disk block
+  goes bad or the directory is lost. It never sits on the commit path — the DB
+  stays the fast source of truth and the journal trails it.
 
 See [DESIGN.md](DESIGN.md) for the full architecture.
 
@@ -272,8 +278,18 @@ Spec in [`REPLICATION.md`](REPLICATION.md); identity model in
 ## Testing
 
 ```sh
-cargo test --workspace           # 178 tests incl. randomized model, group commit, wasm, graphql & replication e2e
+cargo test --workspace           # randomized model, group commit, wasm, graphql & replication e2e,
+                                 # plus durability: hard-crash recovery, corruption fuzz, journal rebuild
+cargo test -p fluent31 --features fault-injection   # fsync-failure / ENOSPC / read-fault paths
+cargo test --test backup_and_soak -- --ignored      # opt-in endurance soak
 ```
+
+The durability suites are the confidence floor for system-of-record use: a
+SIGKILLed child process proves acked writes survive a hard crash
+(`crash_recovery`), a fault-injecting IO backend proves a failed fsync is never
+a false ack (`fault_injection`), a mutation sweep proves no on-disk byte can
+panic the reader (`corruption_fuzz`), and a nuke-the-directory replay proves the
+journal rebuilds exact state (`journal_rebuild`).
 
 On Linux the suite exercises the io_uring backend automatically. Under
 Docker, io_uring syscalls are blocked by the default seccomp profile:
