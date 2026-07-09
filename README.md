@@ -74,19 +74,24 @@ it, run it:
 
 ```rust
 // guests/agg/src/lib.rs — "SELECT count,sum,min,max WHERE prefix"
-fn agg_main() -> i32 {
-    let prefix = fluent_guest::input();
+use fluent_guest::Fail;
+
+#[fluent_guest::main]                       // exports the `run` entry point
+fn agg(prefix: Vec<u8>) -> Result<Vec<u8>, Fail> {
+    let scan = fluent_guest::scan_prefix(&prefix).map_err(|_| Fail::new(3, "scan failed"))?;
     let (mut count, mut sum) = (0u64, 0u64);
-    for (_k, v) in fluent_guest::scan_prefix(&prefix).unwrap() {
+    for (_k, v) in scan {
         count += 1;
         sum += u64::from_le_bytes(v[..8].try_into().unwrap());
     }
-    fluent_guest::output(&count.to_le_bytes());
-    fluent_guest::output(&sum.to_le_bytes());
-    0
+    Ok([count.to_le_bytes(), sum.to_le_bytes()].concat())
 }
-fluent_guest::fluent_main!(agg_main);
 ```
+
+`Ok` output becomes the invocation's result; `Err(Fail { code, message })`
+becomes a non-zero exit with the message in the output buffer. (The raw
+`fluent_main!(fn() -> i32)` layer still exists for exit-code-speaking
+modules.)
 
 ```rust
 db.install_module("agg", &std::fs::read("agg.wasm")?)?;
@@ -215,7 +220,7 @@ everything — the resync path after installing modules through the CLI (or
 after a failed post-install rebuild).
 
 The full authoring manual and ABI spec live in [`WASM.md`](WASM.md).
-In a Rust guest this is one macro next to `fluent_main!`:
+In a Rust guest this is one macro next to the entry-point function:
 
 ```rust
 fluent_guest::fluent_describe!(r#"{
