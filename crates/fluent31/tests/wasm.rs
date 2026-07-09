@@ -427,3 +427,51 @@ fn rust_guest_transfer_insufficient_funds() {
     assert_eq!(db.get(b"a").unwrap().unwrap(), 10u64.to_le_bytes());
     assert_eq!(db.get(b"b").unwrap().unwrap(), 0u64.to_le_bytes());
 }
+
+/// The `claim` example guest: N concurrent claimers of one username — the
+/// get_for_update conflict set guarantees exactly one winner; the losers
+/// fail attributably (code 1) and the winner's re-claim is idempotent.
+#[test]
+fn rust_guest_claim_exactly_one_winner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut o = opts();
+    o.execute_retries = 50;
+    let db = std::sync::Arc::new(Db::open(dir.path(), o).unwrap());
+    db.install_module("claim", &guest_wasm("claim")).unwrap();
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8usize)
+        .map(|i| {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let input = format!(r#"{{"username":"neo","owner":"racer-{i}"}}"#);
+                barrier.wait();
+                (i, db.execute("claim", input.as_bytes()))
+            })
+        })
+        .collect();
+    let mut winner = None;
+    let mut losses = 0;
+    for h in handles {
+        match h.join().unwrap() {
+            (i, Ok(_)) => assert!(winner.replace(i).is_none(), "two winners"),
+            (_, Err(Error::GuestFailed { code: 1, output })) => {
+                losses += 1;
+                assert!(String::from_utf8_lossy(&output).contains("taken by racer-"));
+            }
+            (i, Err(e)) => panic!("racer {i}: {e}"),
+        }
+    }
+    let winner = winner.expect("someone wins");
+    assert_eq!(losses, 7);
+    assert_eq!(
+        db.get(b"uname/neo").unwrap().unwrap(),
+        format!("racer-{winner}").into_bytes()
+    );
+
+    // idempotent re-claim by the holder; still taken for everyone else
+    let again = format!(r#"{{"username":"neo","owner":"racer-{winner}"}}"#);
+    let out = db.execute("claim", again.as_bytes()).unwrap();
+    assert!(String::from_utf8_lossy(&out).contains(r#""already":true"#));
+}

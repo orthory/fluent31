@@ -395,6 +395,114 @@ fn mode_survives_module_replacement_and_recovers() {
 }
 
 // ---------------------------------------------------------------------------
+// the example guests keep their promises (guards guests/{dynamic_index,
+// live_stats} — the runnable examples exercise these interactively)
+// ---------------------------------------------------------------------------
+
+/// dynamic_index: writing a spec key creates a fully backfilled index,
+/// record changes keep it live, spec deletion tears it down.
+#[test]
+fn dynamic_index_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), opts()).unwrap();
+    db.install_module("dynamic_index", &guest_wasm("dynamic_index")).unwrap();
+    db.create_trigger("data", "dynamic_index", Some(b"rec/"), Some(b"rec0")).unwrap();
+    db.create_trigger("spec", "dynamic_index", Some(b"idxspec/"), Some(b"idxspec0")).unwrap();
+    let idle = |what| {
+        wait_until(what, 30, || {
+            db.list_triggers().unwrap().iter().all(|t| t.pending == 0)
+        })
+    };
+    let index_keys = |prefix: &str| -> Vec<String> {
+        let mut hi = prefix.as_bytes().to_vec();
+        *hi.last_mut().unwrap() += 1;
+        db.iter(Some(prefix.as_bytes()), Some(&hi), false)
+            .unwrap()
+            .map(|kv| String::from_utf8(kv.unwrap().0).unwrap())
+            .collect()
+    };
+
+    db.put(b"rec/1".to_vec(), br#"{"customer":"acme"}"#.to_vec()).unwrap();
+    db.put(b"rec/2".to_vec(), br#"{"customer":"bob"}"#.to_vec()).unwrap();
+    db.put(b"idxspec/byc".to_vec(), br#"{"field":"customer"}"#.to_vec()).unwrap();
+    idle("backfill");
+    assert_eq!(index_keys("idx/byc/"), vec!["idx/byc/acme/1", "idx/byc/bob/2"]);
+
+    // live maintenance: move rec/1, delete rec/2, add rec/3
+    db.put(b"rec/1".to_vec(), br#"{"customer":"zorg"}"#.to_vec()).unwrap();
+    db.delete(b"rec/2".to_vec()).unwrap();
+    db.put(b"rec/3".to_vec(), br#"{"customer":"acme"}"#.to_vec()).unwrap();
+    idle("live maintenance");
+    assert_eq!(index_keys("idx/byc/"), vec!["idx/byc/acme/3", "idx/byc/zorg/1"]);
+
+    // teardown removes the index AND its bookkeeping
+    db.delete(b"idxspec/byc".to_vec()).unwrap();
+    idle("teardown");
+    assert!(index_keys("idx/").is_empty());
+    assert!(index_keys("idxptr/").is_empty());
+    assert!(index_keys("idxcur/").is_empty());
+}
+
+/// live_stats: folded per-group aggregates exactly match a from-scratch
+/// recount after a concurrent storm of upserts, moves, and deletes.
+#[test]
+fn live_stats_fold_is_exact_under_storm() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Db::open(dir.path(), opts()).unwrap());
+    db.install_module("live_stats", &guest_wasm("live_stats")).unwrap();
+    db.create_trigger("stats", "live_stats", Some(b"ord/"), Some(b"ord0")).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = (0..2u64)
+        .map(|t| {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for j in 0..50u64 {
+                    let key = format!("ord/{:02}", (t * 50 + j * 7) % 10);
+                    if (t + j) % 5 == 4 {
+                        let _ = db.delete(key.into_bytes());
+                    } else {
+                        let customer = ["acme", "bob", "zorg"][((t + j) % 3) as usize];
+                        let rec = format!(r#"{{"customer":"{customer}","cents":{}}}"#, j + 1);
+                        db.put(key.into_bytes(), rec.into_bytes()).unwrap();
+                    }
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    wait_until("storm drained", 60, || {
+        db.list_triggers().unwrap().iter().all(|t| t.pending == 0)
+    });
+    assert_eq!(last_error(&db, "stats"), None);
+
+    let mut expected: std::collections::BTreeMap<String, (i64, i64)> = Default::default();
+    for kv in db.iter(Some(b"ord/"), Some(b"ord0"), false).unwrap() {
+        let (_, v) = kv.unwrap();
+        let rec: serde_json::Value = serde_json::from_slice(&v).unwrap();
+        let e = expected
+            .entry(rec["customer"].as_str().unwrap().to_string())
+            .or_default();
+        e.0 += 1;
+        e.1 += rec["cents"].as_i64().unwrap();
+    }
+    let mut folded: std::collections::BTreeMap<String, (i64, i64)> = Default::default();
+    for kv in db.iter(Some(b"stat/"), Some(b"stat0"), false).unwrap() {
+        let (k, v) = kv.unwrap();
+        let s: serde_json::Value = serde_json::from_slice(&v).unwrap();
+        folded.insert(
+            String::from_utf8(k[b"stat/".len()..].to_vec()).unwrap(),
+            (s["orders"].as_i64().unwrap(), s["cents"].as_i64().unwrap()),
+        );
+    }
+    assert_eq!(folded, expected, "folded stats drifted from ground truth");
+}
+
+// ---------------------------------------------------------------------------
 // durability: the feed backlog survives a reopen
 // ---------------------------------------------------------------------------
 

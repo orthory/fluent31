@@ -124,10 +124,25 @@ value, commit seqno), one event per op — the post-apply filter that feeds
 changefeeds and event-driven index generation (see `guests/order_feed`).
 See [WASM.md](WASM.md) §8 for both authoring contracts.
 
-Build the bundled examples:
+Build the bundled guests:
 
 ```sh
 cargo build --manifest-path guests/Cargo.toml --target wasm32-unknown-unknown --release
+```
+
+Or watch the whole story run — self-asserting end-to-end walkthroughs that
+build the guests, open a store, and drive them (each is also the reference
+implementation of a classic SQL feature, rebuilt schema-free):
+
+```sh
+cargo run -p fluent31 --example dynamic_index   # CREATE INDEX at runtime: spec keys
+                                                # backfill, maintain, and tear down indexes
+cargo run -p fluent31 --example live_stats      # GROUP BY that's always fresh: exactly-once
+                                                # folding, proven drift-free under a storm
+cargo run -p fluent31 --example cascade_delete  # ON DELETE CASCADE: parent delete sweeps
+                                                # its subtree; no-stacking stops loops
+cargo run -p fluent31 --example claim           # UNIQUE constraint: 8 concurrent claimers,
+                                                # exactly one winner via OCC
 ```
 
 ## The shell
