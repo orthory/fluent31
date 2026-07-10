@@ -678,6 +678,35 @@ fn fork_at_validates_the_point() {
     assert!(db.list_forks().unwrap().len() == 1, "no partial forks");
 }
 
+/// db.seqno() is the address of "now": it tracks committed writes, and
+/// forks cut at one captured seqno are deterministically the same
+/// version — no pin needed while the point is still the head.
+#[test]
+fn seqno_addresses_now_for_deterministic_forks() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    assert_eq!(db.seqno(), 0);
+    for i in 0..10u32 {
+        db.put(k(i), v(i, "a")).unwrap();
+    }
+    let s = db.seqno();
+    assert_eq!(s, 10, "one seqno per committed write");
+    assert_eq!(s, db.stats().visible_seqno);
+
+    // two forks addressed by the same captured seqno are the same version
+    let f1 = db.fork_at("copy-a", s).unwrap();
+    let f2 = db.fork_at("copy-b", s).unwrap();
+    assert_eq!(f1.last_seqno, s);
+    assert_eq!(f2.last_seqno, s);
+    let c1 = Db::open(&f1.path, Options::default()).unwrap();
+    let c2 = Db::open(&f2.path, Options::default()).unwrap();
+    assert_eq!(c1.stats().visible_seqno, s);
+    assert_eq!(c2.stats().visible_seqno, s);
+    for i in 0..10u32 {
+        assert_eq!(c1.get(&k(i)).unwrap(), c2.get(&k(i)).unwrap(), "key {i}");
+    }
+}
+
 /// Pins are durable: they survive a reopen (re-registered before any GC
 /// can run), keep their point fork-able across restart + churn, and
 /// unpinning releases the hold so the point becomes refusable again.
