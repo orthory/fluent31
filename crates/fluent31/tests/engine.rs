@@ -579,6 +579,207 @@ fn fork_with_gc_interleaved() {
     }
 }
 
+/// The load-bearing fork_at property: a fork cut at a pinned point is
+/// EXACTLY the state at that point — overwrites, deletes, compaction, and
+/// vlog GC after the pin change nothing (the pin holds version and value
+/// GC), keys created after the pin do not leak in (no ghost versions above
+/// the cut), and the child is a fully usable store.
+#[test]
+fn fork_at_pinned_point_equals_state_at_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    opts.vlog_gc_ratio = 0.2;
+    let db = Db::open(dir.path(), opts).unwrap();
+    let big = |i: u32, r: u32| format!("{:0>300}", format!("{i}.{r}")).into_bytes();
+
+    for i in 0..30u32 {
+        db.put(k(i), big(i, 0)).unwrap();
+    }
+    let pin = db.pin("round0").unwrap();
+    assert_eq!(pin.seqno, db.stats().visible_seqno);
+
+    // churn: overwrite everything twice, delete some keys, add new ones,
+    // then push compaction + vlog GC as hard as the engine allows
+    for round in 1..3u32 {
+        for i in 0..30u32 {
+            db.put(k(i), big(i, round)).unwrap();
+        }
+    }
+    for i in 0..10u32 {
+        db.delete(k(i)).unwrap();
+    }
+    for i in 100..110u32 {
+        db.put(k(i), big(i, 9)).unwrap();
+    }
+    db.flush().unwrap();
+    db.compact_all().unwrap();
+    while db.gc_vlog().unwrap().is_some() {}
+    db.flush().unwrap();
+
+    let info = db.fork_at("at-round0", pin.seqno).unwrap();
+    assert_eq!(info.last_seqno, pin.seqno);
+
+    let child = Db::open(&info.path, Options::default()).unwrap();
+    // the child opens exactly at the cut
+    assert_eq!(child.stats().visible_seqno, pin.seqno);
+    for i in 0..30u32 {
+        assert_eq!(child.get(&k(i)).unwrap().unwrap(), big(i, 0), "key {i}");
+    }
+    // nothing from after the pin — a full scan sees exactly the 30 keys
+    let scanned: Vec<_> = child.iter(None, None, false).unwrap().collect();
+    assert_eq!(scanned.len(), 30);
+    // the child is independently writable, and its writes persist a reopen
+    child.put(b"child-only".to_vec(), b"1".to_vec()).unwrap();
+    child.put(k(0), b"child-v".to_vec()).unwrap();
+    drop(child);
+    let child = Db::open(&info.path, Options::default()).unwrap();
+    assert_eq!(child.get(b"child-only").unwrap().unwrap(), b"1");
+    assert_eq!(child.get(&k(0)).unwrap().unwrap(), b"child-v");
+    assert_eq!(child.get(&k(1)).unwrap().unwrap(), big(1, 0));
+    drop(child);
+
+    // parent unaffected: post-pin state intact
+    assert!(db.get(&k(0)).unwrap().is_none());
+    assert_eq!(db.get(&k(15)).unwrap().unwrap(), big(15, 2));
+    assert!(db.get(b"child-only").unwrap().is_none());
+}
+
+/// fork_at addressing rules: the current head is always accepted (same cut
+/// as a plain fork), a future seqno is refused, and a past seqno the GC
+/// watermark has moved beyond is refused with the retention message.
+#[test]
+fn fork_at_validates_the_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    for i in 0..20u32 {
+        db.put(k(i), v(i, "a")).unwrap();
+    }
+    let old = db.stats().visible_seqno;
+    for i in 0..20u32 {
+        db.put(k(i), v(i, "b")).unwrap();
+    }
+
+    // head cut: equivalent to fork()
+    let head = db.stats().visible_seqno;
+    let info = db.fork_at("at-head", head).unwrap();
+    assert_eq!(info.last_seqno, head);
+    let child = Db::open(&info.path, Options::default()).unwrap();
+    assert_eq!(child.get(&k(3)).unwrap().unwrap(), v(3, "b"));
+    drop(child);
+
+    // future seqno: refused
+    let err = format!("{}", db.fork_at("at-future", head + 1000).unwrap_err());
+    assert!(err.contains("beyond the flushed head"), "{err}");
+
+    // unpinned past seqno: the watermark (no snapshots -> visible+1) has
+    // passed it; refused with a hint at pins
+    let err = format!("{}", db.fork_at("at-old", old).unwrap_err());
+    assert!(err.contains("no longer retained"), "{err}");
+    assert!(db.list_forks().unwrap().len() == 1, "no partial forks");
+}
+
+/// Pins are durable: they survive a reopen (re-registered before any GC
+/// can run), keep their point fork-able across restart + churn, and
+/// unpinning releases the hold so the point becomes refusable again.
+#[test]
+fn pin_survives_restart_and_holds_gc() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    opts.vlog_gc_ratio = 0.2;
+    let big = |i: u32, r: u32| format!("{:0>300}", format!("{i}.{r}")).into_bytes();
+    let pin = {
+        let db = Db::open(dir.path(), opts.clone()).unwrap();
+        for i in 0..20u32 {
+            db.put(k(i), big(i, 0)).unwrap();
+        }
+        db.pin("keep").unwrap()
+        // drop: clean shutdown
+    };
+
+    let db = Db::open(dir.path(), opts).unwrap();
+    let listed = db.pins();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "keep");
+    assert_eq!(listed[0].seqno, pin.seqno);
+
+    // churn hard after the restart: the re-registered pin must keep the
+    // pinned state materializable through compaction and vlog GC
+    for round in 1..4u32 {
+        for i in 0..20u32 {
+            db.put(k(i), big(i, round)).unwrap();
+        }
+        db.flush().unwrap();
+    }
+    db.compact_all().unwrap();
+    while db.gc_vlog().unwrap().is_some() {}
+
+    let info = db.fork_at("at-keep", pin.seqno).unwrap();
+    let child = Db::open(&info.path, Options::default()).unwrap();
+    for i in 0..20u32 {
+        assert_eq!(child.get(&k(i)).unwrap().unwrap(), big(i, 0), "key {i}");
+    }
+    drop(child);
+
+    // released: the very same point is refused once the pin is gone
+    db.unpin("keep").unwrap();
+    assert!(db.pins().is_empty());
+    let err = format!("{}", db.fork_at("at-keep2", pin.seqno).unwrap_err());
+    assert!(err.contains("no longer retained"), "{err}");
+
+    // the pin removal is durable too
+    drop(db);
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    assert!(db.pins().is_empty());
+}
+
+/// Pin bookkeeping error paths: names share the fork charset, duplicates
+/// are refused, and unpinning something unknown is a clean error.
+#[test]
+fn pin_name_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    db.put(b"a".to_vec(), b"1".to_vec()).unwrap();
+
+    db.pin("ok-1").unwrap();
+    let err = format!("{}", db.pin("ok-1").unwrap_err());
+    assert!(err.contains("already exists"), "{err}");
+    assert!(db.pin(".bad").is_err());
+    assert!(db.pin("").is_err());
+    let err = format!("{}", db.unpin("missing").unwrap_err());
+    assert!(err.contains("no pin named"), "{err}");
+    // the failed duplicate did not leak a second entry
+    assert_eq!(db.pins().len(), 1);
+}
+
+/// A named store's fork identity carries the cut: forks at different pins
+/// mint different deterministic instance ids, and the child's minted
+/// lineage records (parent id, cut seqno) verbatim.
+#[test]
+fn fork_at_identity_carries_the_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = small_opts();
+    opts.store_name = Some("prod".into());
+    let db = Db::open(dir.path(), opts).unwrap();
+    let parent_id = db.identity().unwrap().instance_id;
+
+    db.put(b"a".to_vec(), b"1".to_vec()).unwrap();
+    let p1 = db.pin("p1").unwrap();
+    db.put(b"a".to_vec(), b"2".to_vec()).unwrap();
+    let p2 = db.pin("p2").unwrap();
+
+    let f1 = db.fork_at("nightly-a", p1.seqno).unwrap();
+    let f2 = db.fork_at("nightly-b", p2.seqno).unwrap();
+    assert_ne!(f1.instance_id, f2.instance_id);
+
+    // first read-write open mints the identity from (parent, cut, name)
+    let child = Db::open(&f1.path, Options::default()).unwrap();
+    let id = child.identity().unwrap();
+    assert_eq!(id.name, "nightly-a");
+    assert_eq!(id.parent, Some((parent_id, p1.seqno)));
+    assert_eq!(id.instance_hex(), f1.instance_id);
+    assert_eq!(child.get(b"a").unwrap().unwrap(), b"1");
+}
+
 #[test]
 fn double_open_is_refused() {
     let dir = tempfile::tempdir().unwrap();

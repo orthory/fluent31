@@ -363,14 +363,30 @@ runner. Recovery needs no machinery: events are ordinary durable keys.
 ## 10. Forks (explicit, manual)
 
 Not PITR: there is no continuous log archiving and no
-restore-to-arbitrary-time — a fork captures an explicitly named cut. What
-a fork is: an MVCC-pinned snapshot materialized as hard links, so
-creation copies almost nothing (one bounded head copy) and leaves live
-readers and writers essentially undisturbed — the cost is a memtable
-flush, a brief manifest-lock hold, and vlog GC deletions deferred for the
-duration of the build.
+restore-to-arbitrary-time — a fork captures an explicitly named cut,
+either **from recent** (`db.fork(name)`, cut = the flushed head) or
+**from a specific point** (`db.fork_at(name, seqno)`, cut = an explicit
+seqno that is still materializable). What a head fork is: an MVCC-pinned
+snapshot materialized as hard links, so creation copies almost nothing
+(one bounded head copy) and leaves live readers and writers essentially
+undisturbed — the cost is a memtable flush, a brief manifest-lock hold,
+and vlog GC deletions deferred for the duration of the build.
 
-`db.fork(name)`:
+**Pins** make points addressable. `db.pin(name)` records a named
+`(name, seqno)` in the manifest and registers it in the snapshot list —
+a durable GC hold, re-registered at every open before background threads
+start, released by `db.unpin(name)`. The invariant it rides: state at
+seqno `S` is fully reconstructible iff `S ≥ watermark` (compaction keeps
+everything above the watermark verbatim plus the newest version at or
+below it), so holding the watermark at the pin keeps its point intact.
+`pin()` orders durability correctly: register the hold, `sync_wal` (the
+pinned state must survive a crash before the pin record does), then
+persist the manifest — a pin above the recovered head at open is real
+history loss and fails the open. `fork_at` accepts the current head or
+any seqno ≥ watermark (checked-and-registered atomically under the
+snapshots lock); everything else is refused with a pointer at pins.
+
+`db.fork(name)` (and `db.fork_at`, where noted):
 1. Flush everything (freeze + drain the frozen queue).
 2. Under the manifest lock (freezes structure): clone manifest data, take
    a ReadView, `cut = last_flushed_seqno`. Register a snapshot at `cut` —
@@ -389,6 +405,14 @@ duration of the build.
    `instance_id`, the fork's stable routing handle (servers address the
    fork by it, e.g. GraphQL at `/graphql/<instanceId>`; recreating a
    same-named fork mints a new id so stale handles can't alias).
+   A **point cut** (`fork_at` below the head) can't link the table files
+   verbatim — they also hold versions above the cut, which the child's own
+   seqnos (starting at cut+1) would collide with. Instead it rewrites the
+   tables: one full merge over the pinned view keeping, per key, the
+   newest version at-or-below the cut (tombstone-newest keys omitted — a
+   complete snapshot needs no tombstones), value reprs verbatim so the
+   vlog files stay hard links. Key-value separation keeps this cheap:
+   only the small side is rewritten.
 4. fsync every written file + the tmp dir, rename to `archive/<name>`,
    fsync `archive/` — a fork either exists completely or not at all. A
    build that fails partway removes its own `.tmp` dir (the name stays
@@ -488,7 +512,8 @@ lineage chain verifiable from metadata. Uniqueness is an operator
 contract (fleet-unique names), like hostnames. Normal restarts keep the
 id: file ids are monotonic and recovery never appends to a pre-crash
 vlog file, so `(file, offset)` never aliases within one lifetime.
-Unnamed stores stay on manifest format 1, readable by older binaries.
+Unnamed stores stay on manifest format 1, readable by older binaries
+(pins bump any manifest to format 3 while they exist; §10).
 
 **Why identity matters**: replication copies bytes across machines and
 names them by `(file id, offset)` — coordinates unique only within one

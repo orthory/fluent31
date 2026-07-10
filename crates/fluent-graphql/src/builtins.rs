@@ -62,6 +62,21 @@ fn arg_string(ctx: &ResolverContext<'_>, name: &str) -> Result<String, Error> {
     Ok(ctx.args.try_get(name)?.string()?.to_string())
 }
 
+/// Optional U64 argument (decimal string or number, per the U64 scalar).
+fn opt_arg_u64(ctx: &ResolverContext<'_>, name: &str) -> Result<Option<u64>, Error> {
+    match ctx.args.get(name) {
+        None => Ok(None),
+        Some(v) if v.is_null() => Ok(None),
+        Some(v) => v
+            .string()
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| v.u64().ok())
+            .map(Some)
+            .ok_or_else(|| Error::new(format!("argument {name:?} is not a valid U64"))),
+    }
+}
+
 fn obj(entries: Vec<(&str, Value)>) -> Value {
     Value::Object(
         entries
@@ -78,6 +93,14 @@ fn fork_value(c: fluent31::ForkInfo) -> Value {
         ("createdUnixMs", Value::String(c.created_unix_ms.to_string())),
         ("lastSeqno", Value::String(c.last_seqno.to_string())),
         ("path", Value::String(c.path.display().to_string())),
+    ])
+}
+
+fn pin_value(p: fluent31::PinInfo) -> Value {
+    obj(vec![
+        ("name", Value::String(p.name)),
+        ("seqno", Value::String(p.seqno.to_string())),
+        ("createdUnixMs", Value::String(p.created_unix_ms.to_string())),
     ])
 }
 
@@ -324,6 +347,22 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             ),
         )
         .field(
+            Field::new("pins", TypeRef::named_nn_list("Pin"), |ctx| {
+                FieldFuture::new(async move {
+                    let mgr = manager(&ctx)?;
+                    let db = mgr.db.clone();
+                    let list = mgr.blocking_read(move || Ok(db.pins())).await?;
+                    Ok(Some(FieldValue::value(Value::List(
+                        list.into_iter().map(pin_value).collect(),
+                    ))))
+                })
+            })
+            .description(
+                "This instance's durable pins, oldest first (current state, not \
+                 snapshot-bound). Each seqno stays fork-able via fork(at:).",
+            ),
+        )
+        .field(
             Field::new("triggers", TypeRef::named_nn_list("Trigger"), |ctx| {
                 FieldFuture::new(async move {
                     let mgr = manager(&ctx)?;
@@ -552,16 +591,25 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             Field::new("fork", TypeRef::named("Fork"), |ctx| {
                 FieldFuture::new(async move {
                     let name = arg_string(&ctx, "name")?;
+                    let at = opt_arg_u64(&ctx, "at")?;
                     let mgr = manager(&ctx)?;
                     let db = mgr.db.clone();
-                    let info = mgr.blocking_write(move || db.fork(&name)).await?;
+                    let info = mgr
+                        .blocking_write(move || match at {
+                            Some(at) => db.fork_at(&name, at),
+                            None => db.fork(&name),
+                        })
+                        .await?;
                     Ok(Some(FieldValue::value(fork_value(info))))
                 })
             })
             .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
+            .argument(InputValue::new("at", TypeRef::named("U64")))
             .description(
-                "Branch this instance: cut an MVCC-pinned, hard-linked fork. \
-                 The returned instanceId addresses the new branch at \
+                "Branch this instance: cut an MVCC-pinned fork. Omit `at` to cut \
+                 at the current head; pass a pinned seqno (see pin) to cut at \
+                 that specific point — seqnos the GC watermark has passed are \
+                 refused. The returned instanceId addresses the new branch at \
                  /graphql/<instanceId> (an address, not a credential).",
             ),
         )
@@ -589,6 +637,36 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             })
             .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
             .description("Delete a fork of this instance (refused while the fork is in use)."),
+        )
+        .field(
+            Field::new("pin", TypeRef::named("Pin"), |ctx| {
+                FieldFuture::new(async move {
+                    let name = arg_string(&ctx, "name")?;
+                    let mgr = manager(&ctx)?;
+                    let db = mgr.db.clone();
+                    let info = mgr.blocking_write(move || db.pin(&name)).await?;
+                    Ok(Some(FieldValue::value(pin_value(info))))
+                })
+            })
+            .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
+            .description(
+                "Create a durable named pin at the current seqno: the pinned state \
+                 stays fork-able via fork(at: seqno) until unpin. Survives \
+                 restarts; holds GC from its seqno forward while it exists.",
+            ),
+        )
+        .field(
+            Field::new("unpin", TypeRef::named(TypeRef::BOOLEAN), |ctx| {
+                FieldFuture::new(async move {
+                    let name = arg_string(&ctx, "name")?;
+                    let mgr = manager(&ctx)?;
+                    let db = mgr.db.clone();
+                    mgr.blocking_write(move || db.unpin(&name)).await?;
+                    Ok(Some(FieldValue::value(true)))
+                })
+            })
+            .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
+            .description("Delete a pin and release its GC hold."),
         )
         .field(
             Field::new("syncWal", TypeRef::named(TypeRef::BOOLEAN), |ctx| {

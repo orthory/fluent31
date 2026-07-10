@@ -1,8 +1,11 @@
 //! Named database forks — MVCC-pinned snapshots materialized as hard
 //! links. Not PITR: there is no log archiving and no
-//! restore-to-arbitrary-time; a fork captures an explicit named cut.
-//! Creation copies almost nothing and leaves live readers and writers
-//! essentially undisturbed.
+//! restore-to-arbitrary-time; a fork captures an explicit named cut,
+//! either "from recent" (the flushed head) or "from a specific point" (an
+//! explicit seqno still held by a pin or live snapshot — see `Db::pin`).
+//! A head fork copies almost nothing; a point fork rewrites the (small)
+//! tables at the cut while still hard-linking the (large) value log.
+//! Either way live readers and writers stay essentially undisturbed.
 //!
 //! A fork is a complete database directory under `archive/<name>/`:
 //! hard links of the (immutable) tables and sealed vlog files, a bounded
@@ -16,11 +19,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::DbPaths;
-use crate::db::Db;
+use crate::db::{Db, DbInner};
 use crate::error::{Error, Result};
 use crate::identity::{validate_store_name, PendingFork, StoreIdentity};
 use crate::io::{self, copy_prefix, hard_link_or_copy};
+use crate::iter::{InternalIterator, MergeIterator};
 use crate::manifest::{self, ManifestData, RunMeta};
+use crate::table::TableBuilder;
+use crate::types::{ikey_kind, ikey_seqno, ikey_ukey, SeqNo, ValueKind};
+use crate::version::ReadView;
 
 #[derive(Debug, Clone)]
 pub struct ForkInfo {
@@ -52,7 +59,9 @@ fn mint_instance_id(name: &str, created_unix_ms: u64, seq: u64) -> String {
     out
 }
 
-fn validate_name(name: &str) -> Result<()> {
+/// Shared label charset for forks and pins; `what` names the kind in the
+/// error ("fork" / "pin").
+pub(crate) fn validate_name(what: &str, name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && name
@@ -63,7 +72,7 @@ fn validate_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::InvalidArgument(format!(
-            "invalid fork name {name:?} (use [A-Za-z0-9._-], max 64 chars, no leading dot)"
+            "invalid {what} name {name:?} (use [A-Za-z0-9._-], max 64 chars, no leading dot)"
         )))
     }
 }
@@ -101,8 +110,8 @@ impl Drop for TmpDirGuard {
     }
 }
 
-pub(crate) fn create(db: &Db, name: &str) -> Result<ForkInfo> {
-    validate_name(name)?;
+pub(crate) fn create(db: &Db, name: &str, at: Option<SeqNo>) -> Result<ForkInfo> {
+    validate_name("fork", name)?;
     let inner = &db.inner;
     let final_dir = inner.paths.archive(name);
     if final_dir.exists() {
@@ -111,20 +120,38 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<ForkInfo> {
         )));
     }
 
-    // 1. everything into tables: freeze the memtable, drain the queue
+    // 1. everything into tables: freeze the memtable, drain the queue. For
+    //    a point cut this also guarantees every version <= `at` is in the
+    //    tables (`at` must predate the call, and the flush covers it).
     db.flush()?;
 
     // 2. pin an atomic cut. The manifest lock freezes structure (flush &
-    //    compaction installs); the registered snapshot at `cut` blocks vlog
-    //    GC victims from physical deletion while we link.
-    let (mdata, view, cut) = {
+    //    compaction installs) and serializes retired-vlog deletion, so
+    //    registering the cut inside it leaves no window where a vlog file
+    //    the view still references could be physically deleted. The
+    //    registered snapshot then blocks vlog GC victims for the build.
+    let (mdata, view, cut, head) = {
         let m = inner.manifest.lock();
         let view = inner.read_view();
-        (m.data.clone(), view, m.data.last_flushed_seqno)
+        let head = m.data.last_flushed_seqno;
+        let cut = at.unwrap_or(head);
+        if cut > head {
+            return Err(Error::InvalidArgument(format!(
+                "cannot fork at seqno {cut}: beyond the flushed head {head} at \
+                 the time of the cut (not committed before the fork began)"
+            )));
+        }
+        if cut < head {
+            // a point cut is only materializable while the GC watermark has
+            // not passed it — checked and registered atomically
+            inner.try_register_snapshot_at(cut)?;
+        } else {
+            // the head cut is always intact: the pinned view's tables hold
+            // exactly the flushed history
+            inner.register_snapshot_at(cut);
+        }
+        (m.data.clone(), view, cut, head)
     };
-    // register at the cut (not at visible): archives contain exactly the
-    // flushed history, and the registration blocks vlog victim deletion
-    inner.register_snapshot_at(cut);
     let _pin = CutPin {
         db: inner.clone(),
         seq: cut,
@@ -148,14 +175,34 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<ForkInfo> {
     })?;
     let mut tmp_guard = TmpDirGuard(Some(tmp_dir.clone()));
 
-    // tables (paths stay live: the pinned view holds their Arc handles and
-    // unlink only ever happens in handle Drop)
-    for run in view.version.runs_newest_first() {
-        for t in &run.tables {
-            let file_name = t.path.file_name().expect("table file name");
-            hard_link_or_copy(&t.path, &tmp_dir.join(file_name))?;
+    // tables. Head cut: hard-link the view's (immutable) table files
+    // verbatim — they contain exactly the flushed history (paths stay
+    // live: the pinned view holds their Arc handles and unlink only ever
+    // happens in handle Drop). Point cut: the view's files also hold
+    // versions above the cut, which the child's own seqnos would collide
+    // with — rewrite the tables to the state at the cut instead.
+    let levels: Vec<Vec<RunMeta>> = if cut == head {
+        for run in view.version.runs_newest_first() {
+            for t in &run.tables {
+                let file_name = t.path.file_name().expect("table file name");
+                hard_link_or_copy(&t.path, &tmp_dir.join(file_name))?;
+            }
         }
-    }
+        view.version
+            .levels
+            .iter()
+            .map(|runs| {
+                runs.iter()
+                    .map(|r| RunMeta {
+                        id: r.id,
+                        table_ids: r.tables.iter().map(|t| t.id).collect(),
+                    })
+                    .collect()
+            })
+            .collect()
+    } else {
+        write_snapshot_run(inner, &view, cut, &tmp_dir)?
+    };
 
     // vlog files: link sealed ones; bounded-copy the head
     inner.vlog.sync_head()?;
@@ -176,26 +223,20 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<ForkInfo> {
         }
     }
 
-    // archive manifest: structure from the pinned view
-    let levels: Vec<Vec<RunMeta>> = view
-        .version
-        .levels
-        .iter()
-        .map(|runs| {
-            runs.iter()
-                .map(|r| RunMeta {
-                    id: r.id,
-                    table_ids: r.tables.iter().map(|t| t.id).collect(),
-                })
-                .collect()
-        })
-        .collect();
+    // archive manifest. A point cut allocated fresh table ids from the
+    // parent's counter, so the archive's id floor must clear them; a head
+    // cut created no files and keeps the manifest's own floor.
+    let next_file_id = if cut == head {
+        mdata.next_file_id
+    } else {
+        inner.next_file_id.load(std::sync::atomic::Ordering::SeqCst)
+    };
     let vlog_live: Vec<u64> = view.version.vlogs.keys().copied().collect();
     let adata = ManifestData {
-        next_file_id: mdata.next_file_id,
+        next_file_id,
         last_flushed_seqno: cut,
         // no WALs in an archive: nothing below next_file_id can appear
-        wal_floor: mdata.next_file_id,
+        wal_floor: next_file_id,
         levels,
         vlog_live: vlog_live.clone(),
         vlog_head: view.version.vlog_head_id,
@@ -216,6 +257,9 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<ForkInfo> {
             cut_seqno: cut,
             name: name.to_string(),
         }),
+        // pins are per-store operational state, not data: a child holds no
+        // history above its cut for them to guard, and its GC is its own
+        pins: Vec::new(),
     };
     let tmp_paths = DbPaths::new(&tmp_dir);
     manifest::save(&tmp_paths, 1, &adata)?;
@@ -251,6 +295,86 @@ pub(crate) fn create(db: &Db, name: &str) -> Result<ForkInfo> {
         created_unix_ms,
         last_seqno: cut,
         path: final_dir,
+    })
+}
+
+/// Materialize the state at `cut` as a fresh, single-run table set inside
+/// `tmp_dir`: one full merge over the pinned view's runs keeping, per key,
+/// the newest version at-or-below the cut. Value reprs are copied verbatim
+/// so vlog pointers keep resolving against the hard-linked vlog files (the
+/// cut registration holds their GC); only the tables — the small side of
+/// the key-value separation — are rewritten. Keys whose newest version
+/// at-or-below the cut is a tombstone are omitted entirely: the output is
+/// a complete snapshot with nothing older beneath it, so it needs no
+/// tombstones. Table ids come from the parent's id counter; files are
+/// created only inside `tmp_dir`.
+fn write_snapshot_run(
+    inner: &Arc<DbInner>,
+    view: &ReadView,
+    cut: SeqNo,
+    tmp_dir: &Path,
+) -> Result<Vec<Vec<RunMeta>>> {
+    let tmp_paths = DbPaths::new(tmp_dir);
+    let children: Vec<Box<dyn InternalIterator>> = view
+        .version
+        .runs_newest_first()
+        .map(|r| Box::new(r.iter()) as Box<dyn InternalIterator>)
+        .collect();
+    let mut merge = MergeIterator::new(children, false);
+    merge.seek_to_first()?;
+
+    let run_id = inner.alloc_file_id();
+    let mut table_ids = Vec::new();
+    let mut builder: Option<(u64, TableBuilder)> = None;
+    let mut cur_ukey: Vec<u8> = Vec::new();
+    let mut have_key = false;
+    let mut emitted = false;
+    while merge.valid() {
+        let ikey = merge.ikey();
+        if !have_key || ikey_ukey(ikey) != cur_ukey.as_slice() {
+            cur_ukey = ikey_ukey(ikey).to_vec();
+            have_key = true;
+            emitted = false;
+        }
+        if ikey_seqno(ikey) <= cut && !emitted {
+            emitted = true;
+            if ikey_kind(ikey)? == ValueKind::Put {
+                // at most one entry per user key, so every add sits at a
+                // fragment-safe boundary; split by size alone
+                if builder
+                    .as_ref()
+                    .is_some_and(|(_, b)| b.estimated_size() >= inner.opts.target_file_size)
+                {
+                    let (id, b) = builder.take().unwrap();
+                    b.finish()?;
+                    table_ids.push(id);
+                }
+                if builder.is_none() {
+                    let id = inner.alloc_file_id();
+                    let file = inner.io.create_new(&tmp_paths.table(id))?;
+                    builder = Some((
+                        id,
+                        TableBuilder::new(
+                            file,
+                            inner.opts.block_size,
+                            inner.opts.bloom_bits_per_key,
+                            inner.opts.compression,
+                        ),
+                    ));
+                }
+                builder.as_mut().unwrap().1.add(ikey, merge.value())?;
+            }
+        }
+        merge.next()?;
+    }
+    if let Some((id, b)) = builder.take() {
+        b.finish()?;
+        table_ids.push(id);
+    }
+    Ok(if table_ids.is_empty() {
+        Vec::new()
+    } else {
+        vec![vec![RunMeta { id: run_id, table_ids }]]
     })
 }
 
@@ -298,7 +422,7 @@ pub(crate) fn list(paths: &DbPaths) -> Result<Vec<ForkInfo>> {
 }
 
 pub(crate) fn delete(paths: &DbPaths, name: &str) -> Result<()> {
-    validate_name(name)?;
+    validate_name("fork", name)?;
     let dir = paths.archive(name);
     if !dir.exists() {
         return Err(Error::InvalidArgument(format!(
