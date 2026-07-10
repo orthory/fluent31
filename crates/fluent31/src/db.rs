@@ -25,7 +25,7 @@ use crate::error::{corrupt, Error, Result};
 use crate::identity::StoreIdentity;
 use crate::io::{self, Io};
 use crate::iter::DbIterator;
-use crate::manifest::{self, ManifestData, RunMeta};
+use crate::manifest::{self, ManifestData, PinInfo, RunMeta};
 use crate::memtable::Memtable;
 use crate::table::{Table, TableBuilder};
 use crate::txn::Txn;
@@ -324,6 +324,34 @@ impl DbInner {
     pub fn register_snapshot_at(&self, seq: SeqNo) {
         debug_assert!(seq <= self.visible_seqno.load(Ordering::Acquire));
         self.snapshots.lock().register(seq);
+    }
+
+    /// Register a snapshot at `seq` only if the state at `seq` is still
+    /// fully materializable, i.e. no GC pass may have dropped versions it
+    /// needs. Check and registration are atomic under the snapshots lock,
+    /// so the watermark cannot race past `seq` in between. The state at
+    /// `seq` is intact iff `seq >= watermark` (compaction keeps everything
+    /// above the watermark verbatim plus the newest version at-or-below
+    /// it); `seq == visible` is additionally always safe — with no
+    /// registered snapshots the watermark sits at `visible + 1`, but the
+    /// newest version of every key IS the state at `visible`.
+    pub fn try_register_snapshot_at(&self, seq: SeqNo) -> Result<()> {
+        let mut g = self.snapshots.lock();
+        let visible = self.visible_seqno.load(Ordering::Acquire);
+        if seq > visible {
+            return Err(Error::InvalidArgument(format!(
+                "seqno {seq} has not been committed yet (visible seqno is {visible})"
+            )));
+        }
+        let wm = g.min().unwrap_or(visible + 1);
+        if seq < wm && seq != visible {
+            return Err(Error::InvalidArgument(format!(
+                "state at seqno {seq} is no longer retained (GC watermark is {wm}); \
+                 create a pin at the points you want to keep fork-able"
+            )));
+        }
+        g.register(seq);
+        Ok(())
     }
 
     pub fn deregister_snapshot(&self, seq: SeqNo) {
@@ -1497,15 +1525,25 @@ impl Db {
         crate::trigger::list_triggers(&self.inner)
     }
 
-    // -------------------------------------------------------- forks
+    // -------------------------------------------------------- forks & pins
 
     /// The directory this database was opened at.
     pub fn path(&self) -> &std::path::Path {
         &self.inner.paths.dir
     }
 
+    /// Fork from recent: cut at the current flushed head.
     pub fn fork(&self, name: &str) -> Result<ForkInfo> {
-        crate::fork::create(self, name)
+        crate::fork::create(self, name, None)
+    }
+
+    /// Fork from a specific point: cut at seqno `at`. The point must still
+    /// be materializable — the current head, or a seqno held by a [`pin`]
+    /// (or live snapshot); anything the GC watermark has passed is refused.
+    ///
+    /// [`pin`]: Db::pin
+    pub fn fork_at(&self, name: &str, at: SeqNo) -> Result<ForkInfo> {
+        crate::fork::create(self, name, Some(at))
     }
 
     pub fn list_forks(&self) -> Result<Vec<ForkInfo>> {
@@ -1514,6 +1552,89 @@ impl Db {
 
     pub fn delete_fork(&self, name: &str) -> Result<()> {
         crate::fork::delete(&self.inner.paths, name)
+    }
+
+    /// Create a durable named pin at the current visible seqno: a GC hold
+    /// that survives restarts, guaranteeing the pinned state stays
+    /// [`fork_at`]-able until [`unpin`]. Costs retention — versions and
+    /// vlog values from the pinned seqno forward cannot be reclaimed while
+    /// the pin exists (same as holding a snapshot open).
+    ///
+    /// [`fork_at`]: Db::fork_at
+    /// [`unpin`]: Db::unpin
+    pub fn pin(&self, name: &str) -> Result<PinInfo> {
+        crate::fork::validate_name("pin", name)?;
+        self.inner.check_bg_error()?;
+        // hold GC first (in-memory), so the state at `seq` stays intact
+        // while we make the pin durable
+        let seq = self.inner.register_snapshot();
+        // rollback guard: a pin is only real once the manifest carrying it
+        // is durable; any failure before that must release the GC hold
+        struct Hold<'a>(&'a DbInner, Option<SeqNo>);
+        impl Drop for Hold<'_> {
+            fn drop(&mut self) {
+                if let Some(seq) = self.1.take() {
+                    self.0.deregister_snapshot(seq);
+                }
+            }
+        }
+        let mut hold = Hold(&self.inner, Some(seq));
+
+        // durability barrier: everything at-or-below `seq` must survive a
+        // crash before the pin record does, or recovery could land below a
+        // persisted pin (rejected at open as history loss)
+        self.inner.sync_wal()?;
+
+        let created_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let info = PinInfo {
+            name: name.to_string(),
+            seqno: seq,
+            created_unix_ms,
+        };
+        let mut m = self.inner.manifest.lock();
+        if m.data.pins.iter().any(|p| p.name == name) {
+            return Err(Error::InvalidArgument(format!(
+                "pin {name:?} already exists"
+            )));
+        }
+        let mut data = m.data.clone();
+        data.pins.push(info.clone());
+        let gen = m.gen + 1;
+        manifest::save(&self.inner.paths, gen, &data)?;
+        m.gen = gen;
+        m.data = data;
+        hold.1 = None; // the pin owns the registration now
+        Ok(info)
+    }
+
+    /// Delete a pin and release its GC hold.
+    pub fn unpin(&self, name: &str) -> Result<()> {
+        crate::fork::validate_name("pin", name)?;
+        let seq = {
+            let mut m = self.inner.manifest.lock();
+            let Some(idx) = m.data.pins.iter().position(|p| p.name == name) else {
+                return Err(Error::InvalidArgument(format!("no pin named {name:?}")));
+            };
+            let mut data = m.data.clone();
+            let removed = data.pins.remove(idx);
+            let gen = m.gen + 1;
+            manifest::save(&self.inner.paths, gen, &data)?;
+            m.gen = gen;
+            m.data = data;
+            removed.seqno
+        };
+        // release AFTER the removal is durable: a crash in between leaves a
+        // conservative in-memory hold that the next open won't re-register
+        self.inner.deregister_snapshot(seq);
+        Ok(())
+    }
+
+    /// The store's durable pins, oldest first.
+    pub fn pins(&self) -> Vec<PinInfo> {
+        self.inner.manifest.lock().data.pins.clone()
     }
 }
 
@@ -2065,6 +2186,24 @@ fn open_inner_with(
         _lock_file: lock_file,
     });
 
+    // Re-register durable pins as snapshots BEFORE any background thread
+    // exists (they spawn after open returns), so no GC pass can ever run
+    // without the pins' holds in place. A pin above the recovered head is
+    // real history loss — pin() persists only after a durability barrier —
+    // so refuse to open rather than silently serve a hole.
+    {
+        let m = inner.manifest.lock();
+        for pin in &m.data.pins {
+            if pin.seqno > max_seq {
+                return Err(corrupt(format!(
+                    "pin {:?} at seqno {} is above the recovered head {max_seq}",
+                    pin.name, pin.seqno
+                )));
+            }
+            inner.register_snapshot_at(pin.seqno);
+        }
+    }
+
     // Flush the recovered memtable synchronously. Its wal_id is the newest
     // replayed WAL, so flush_one's manifest write records the recovery SST
     // AND advances the floor past every replayed WAL atomically — a crash
@@ -2140,6 +2279,7 @@ fn init_fresh(paths: &DbPaths, _io: &dyn Io) -> Result<()> {
         discard: Vec::new(),
         identity: None,
         pending_fork: None,
+        pins: Vec::new(),
     };
     manifest::save(paths, 1, &data)?;
     Ok(())

@@ -94,6 +94,42 @@ async fn fork_resolves_and_is_isolated() {
     assert_eq!(reg.open_count(), 1);
 }
 
+/// The from-a-specific-point flow end to end over GraphQL: pin, keep
+/// writing, fork at the pin's seqno (U64 travels as a decimal string),
+/// and the resolved instance serves exactly the pinned state.
+#[tokio::test]
+async fn pin_then_fork_at_serves_the_pinned_state() {
+    let (reg, _dir) = open_registry();
+    let primary = reg.primary();
+    put_text(&primary, "k", "v1").await;
+
+    let d = run(&primary, r#"mutation { pin(name: "p1") { name seqno } }"#).await;
+    assert_eq!(d["pin"]["name"], json!("p1"));
+    let seqno = d["pin"]["seqno"].as_str().unwrap().to_string();
+
+    put_text(&primary, "k", "v2").await;
+
+    let d = run(&primary, r#"{ pins { name seqno } }"#).await;
+    assert_eq!(d["pins"], json!([{"name": "p1", "seqno": seqno}]));
+
+    let d = run(
+        &primary,
+        &format!(r#"mutation {{ fork(name: "at-p1", at: "{seqno}") {{ instanceId lastSeqno }} }}"#),
+    )
+    .await;
+    assert_eq!(d["fork"]["lastSeqno"].as_str().unwrap(), seqno);
+    let id = d["fork"]["instanceId"].as_str().unwrap().to_string();
+
+    let inst = reg.resolve(&id).await.map_err(|_| "resolve").unwrap();
+    assert_eq!(get_text(&inst, "k").await.as_deref(), Some("v1"));
+    assert_eq!(get_text(&primary, "k").await.as_deref(), Some("v2"));
+
+    let d = run(&primary, r#"mutation { unpin(name: "p1") }"#).await;
+    assert_eq!(d["unpin"], json!(true));
+    let d = run(&primary, r#"{ pins { name } }"#).await;
+    assert_eq!(d["pins"], json!([]));
+}
+
 #[tokio::test]
 async fn fork_of_fork_resolves_recursively() {
     let (reg, _dir) = open_registry();

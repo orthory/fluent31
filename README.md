@@ -23,11 +23,15 @@ An embedded key-value database engine in Rust:
   values included). Events are durable (they commit atomically with the
   triggering write) and consumed exactly-once.
 - **Database forks** — not PITR (no log archiving, no
-  restore-to-arbitrary-time; a fork is a named cut): `fork("name")` pins an
-  MVCC snapshot and hard-links the immutable files into `archive/name/`, so
+  restore-to-arbitrary-time; a fork is a named cut, from recent or from a
+  specific point): `fork("name")` pins an MVCC snapshot at the current
+  head and hard-links the immutable files into `archive/name/`, so
   creation copies almost nothing and leaves live readers/writers
-  undisturbed. Each fork is itself a complete database directory — open it
-  read-write and it's a live, copy-on-write clone of the parent.
+  undisturbed. `pin("name")` durably marks the current seqno as fork-able
+  later; `fork_at("name", seqno)` then cuts at exactly that point (the
+  tables are rewritten to the cut, the value log stays hard-linked). Each
+  fork is itself a complete database directory — open it read-write and
+  it's a live, copy-on-write clone of the parent.
 - **Opt-in rebuild journal** — an off-by-default catastrophe-recovery net
   (`journal::Journal::attach`): a separate, async append-only record of every
   user-key mutation, independent of the store's own files, from which a fresh
@@ -65,6 +69,11 @@ for kv in db.iter(Some(b"user/"), Some(b"user0"), false)? {
 // fork — an MVCC cut, hard-linked; open it for a writable CoW clone
 let fork = db.fork("before-migration")?;
 let clone = Db::open(&fork.path, Options::default())?;
+
+// or address the cut explicitly: pin now, fork that exact point later
+let pin = db.pin("pre-import")?; // durable; holds GC until unpin
+// ... more writes ...
+let fork = db.fork_at("rollback-point", pin.seqno)?;
 ```
 
 ## WASM instead of SQL
@@ -209,7 +218,9 @@ mutation {
   installModule(name: "agg", wasm: {base64: "..."}) { name size }
   createTrigger(name: "idx", module: "customer_index",
                 lo: {text: "orders/"}, hi: {text: "orders0"})
-  fork(name: "snap1") { instanceId }   # branch this instance
+  fork(name: "snap1") { instanceId }   # branch this instance at its head
+  pin(name: "p1") { seqno }            # durably mark this point fork-able
+  fork(name: "rollback", at: "42") { instanceId }  # branch at a pinned seqno
 }
 ```
 

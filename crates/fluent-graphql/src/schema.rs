@@ -333,6 +333,19 @@ fn fork_object() -> Object {
         .field(value_field("path", TypeRef::named_nn(TypeRef::STRING)))
 }
 
+fn pin_object() -> Object {
+    Object::new("Pin")
+        .description(
+            "A durable named GC hold: the state at `seqno` stays fork-able (via \
+             fork(at:)) until the pin is deleted. Survives restarts. Retention \
+             cost: versions and value-log space from `seqno` forward cannot be \
+             reclaimed while the pin exists.",
+        )
+        .field(value_field("name", TypeRef::named_nn(TypeRef::STRING)))
+        .field(value_field("seqno", TypeRef::named_nn("U64")))
+        .field(value_field("createdUnixMs", TypeRef::named_nn("U64")))
+}
+
 fn trigger_object() -> Object {
     Object::new("Trigger")
         .description("A write-range trigger binding a key range to a WASM executor module.")
@@ -482,6 +495,7 @@ pub(crate) fn build(
         .register(scan_page_object())
         .register(module_object())
         .register(fork_object())
+        .register(pin_object())
         .register(trigger_object())
         .register(gc_result_object())
         .register(level_stats_object())

@@ -68,7 +68,8 @@ txn       begin | tget K | tput K V | tdel K | tlock K (get_for_update) | commit
 snapshots snap | snaps | sget ID K | snapdrop ID
 wasm      install NAME FILE.wasm | modules | uninstall NAME
           query NAME [INPUT] | exec NAME [INPUT]
-forks     fork NAME | forks | delfork NAME
+forks     fork NAME [AT] | forks | delfork NAME
+pins      pin NAME | pins | unpin NAME (pinned seqnos stay fork-able)
 triggers  mktrig NAME MODULE [LO|-] [HI|-] | deltrig NAME | triggers
 admin     flush | compact | gc | stats | help | exit
 bytes     plain utf-8 or hex:DEADBEEF";
@@ -333,10 +334,14 @@ impl Shell {
                     .join("\n"))
             }
             "fork" => {
-                let info = self
-                    .db
-                    .fork(tokens.get(1).ok_or("missing name")?)
-                    .map_err(err)?;
+                let name = tokens.get(1).ok_or("missing name")?;
+                let info = match tokens.get(2) {
+                    Some(at) => {
+                        let at: u64 = at.parse().map_err(|_| "AT must be a seqno")?;
+                        self.db.fork_at(name, at).map_err(err)?
+                    }
+                    None => self.db.fork(name).map_err(err)?,
+                };
                 Ok(format!(
                     "fork {} @ seq {} (instance {}) -> {}",
                     info.name,
@@ -366,6 +371,35 @@ impl Shell {
                     .delete_fork(tokens.get(1).ok_or("missing name")?)
                     .map_err(err)?;
                 Ok("deleted".into())
+            }
+            "pin" => {
+                let info = self
+                    .db
+                    .pin(tokens.get(1).ok_or("missing name")?)
+                    .map_err(err)?;
+                Ok(format!("pin {} @ seq {}", info.name, info.seqno))
+            }
+            "pins" => {
+                let pins = self.db.pins();
+                if pins.is_empty() {
+                    return Ok("(none)".into());
+                }
+                Ok(pins
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{} @ seq {} ({} ms epoch)",
+                            p.name, p.seqno, p.created_unix_ms
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+            "unpin" => {
+                self.db
+                    .unpin(tokens.get(1).ok_or("missing name")?)
+                    .map_err(err)?;
+                Ok("unpinned".into())
             }
             "flush" => {
                 self.db.flush().map_err(err)?;
