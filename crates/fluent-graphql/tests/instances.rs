@@ -130,6 +130,27 @@ async fn pin_then_fork_at_serves_the_pinned_state() {
     assert_eq!(d["pins"], json!([]));
 }
 
+/// `{ seqno }` addresses "now" without a pin: two fork(at:) cuts from one
+/// captured seqno are the same version.
+#[tokio::test]
+async fn seqno_addresses_now_over_graphql() {
+    let (reg, _dir) = open_registry();
+    let primary = reg.primary();
+    put_text(&primary, "k", "v1").await;
+
+    let d = run(&primary, r#"{ seqno }"#).await;
+    let s = d["seqno"].as_str().unwrap().to_string();
+
+    for name in ["det-a", "det-b"] {
+        let d = run(
+            &primary,
+            &format!(r#"mutation {{ fork(name: "{name}", at: "{s}") {{ lastSeqno }} }}"#),
+        )
+        .await;
+        assert_eq!(d["fork"]["lastSeqno"].as_str().unwrap(), s);
+    }
+}
+
 #[tokio::test]
 async fn fork_of_fork_resolves_recursively() {
     let (reg, _dir) = open_registry();

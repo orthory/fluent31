@@ -70,6 +70,7 @@ wasm      install NAME FILE.wasm | modules | uninstall NAME
           query NAME [INPUT] | exec NAME [INPUT]
 forks     fork NAME [AT] | forks | delfork NAME
 pins      pin NAME | pins | unpin NAME (pinned seqnos stay fork-able)
+          seqno (current visible seqno — the AT address of \"now\")
 triggers  mktrig NAME MODULE [LO|-] [HI|-] | deltrig NAME | triggers
 admin     flush | compact | gc | stats | help | exit
 bytes     plain utf-8 or hex:DEADBEEF";
@@ -401,6 +402,7 @@ impl Shell {
                     .map_err(err)?;
                 Ok("unpinned".into())
             }
+            "seqno" => Ok(self.db.seqno().to_string()),
             "flush" => {
                 self.db.flush().map_err(err)?;
                 Ok("flushed".into())

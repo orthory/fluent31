@@ -389,6 +389,23 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
                 })
             })
             .description("The MVCC sequence number this query operation reads at."),
+        )
+        .field(
+            Field::new("seqno", TypeRef::named_nn("U64"), |ctx| {
+                FieldFuture::new(async move {
+                    let mgr = manager(&ctx)?;
+                    let db = mgr.db.clone();
+                    let seq = mgr.blocking_read(move || Ok(db.seqno())).await?;
+                    Ok(Some(FieldValue::value(Value::String(seq.to_string()))))
+                })
+            })
+            .description(
+                "The current visible seqno (not snapshot-bound): the address of \
+                 the latest committed state. Capture it to cut deterministic \
+                 forks of one version via fork(at:); it stays fork-able only \
+                 while no later write moves the GC watermark past it — pin to \
+                 keep it.",
+            ),
         );
 
     let mutation = mutation

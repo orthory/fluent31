@@ -1323,6 +1323,18 @@ impl Db {
         }
     }
 
+    /// The current visible sequence number — the address of the latest
+    /// committed state. Capture it to cut deterministic forks of one
+    /// version (`fork_at(name, seqno)` for the same seqno yields the same
+    /// cut) without creating a pin first. Unlike [`pin`], this holds
+    /// nothing: the point stays fork-able only while no later write moves
+    /// the GC watermark past it — pin it to keep it fork-able.
+    ///
+    /// [`pin`]: Db::pin
+    pub fn seqno(&self) -> SeqNo {
+        self.inner.visible_seqno.load(Ordering::Acquire)
+    }
+
     pub fn get_at(&self, key: &[u8], snap: &Snapshot) -> Result<Option<Vec<u8>>> {
         validate_user_key(key)?;
         self.inner.get_at_seq(key, snap.seq)

@@ -74,6 +74,12 @@ let clone = Db::open(&fork.path, Options::default())?;
 let pin = db.pin("pre-import")?; // durable; holds GC until unpin
 // ... more writes ...
 let fork = db.fork_at("rollback-point", pin.seqno)?;
+
+// db.seqno() addresses "now" without the durable hold: capture once,
+// cut any number of deterministic forks of that same version
+let s = db.seqno();
+let a = db.fork_at("replica-a", s)?;
+let b = db.fork_at("replica-b", s)?; // same cut as replica-a
 ```
 
 ## WASM instead of SQL
@@ -201,6 +207,7 @@ isolation.
 ```graphql
 query {
   snapshotSeqno
+  seqno            # current visible seqno — the `at:` address of "now"
   get(key: {text: "user/1"}) { text }
   scan(prefix: {text: "user/"}, limit: 100) {
     pairs { key { text } value { base64 } }
