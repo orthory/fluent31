@@ -42,7 +42,7 @@ pub use db::{
 pub use error::{Error, Result};
 pub use identity::{InstanceId, StoreIdentity};
 pub use iter::DbIterator;
-pub use journal::{Journal, JournalStats, RebuildReport};
+pub use journal::{Journal, JournalConfig, JournalStats, RebuildReport};
 pub use manifest::PinInfo;
 
 /// IO backend traits, exposed only under the `fault-injection` feature so

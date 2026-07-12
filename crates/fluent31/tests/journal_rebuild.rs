@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fluent31::journal::{self, Journal};
+use fluent31::journal::{self, Journal, JournalConfig};
 use fluent31::{Db, Options, SyncMode};
 
 fn opts() -> Options {
@@ -42,6 +42,31 @@ fn wait_until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "not reached within {secs}s: {what}");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Tiny thresholds so a small workload forces rotation and compaction.
+fn tiny_compaction() -> JournalConfig {
+    JournalConfig {
+        rotate_bytes: 16 << 10,
+        compact_when_deltas_exceed: Some(1.0),
+        compact_min_bytes: 8 << 10,
+    }
+}
+
+/// (lowest file id, file count, total bytes) of the journal-*.log files.
+fn journal_disk(dir: &std::path::Path) -> (u64, usize, u64) {
+    let mut ids = Vec::new();
+    let mut total = 0u64;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let e = e.unwrap();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(num) = name.strip_prefix("journal-").and_then(|r| r.strip_suffix(".log")) {
+            ids.push(num.parse::<u64>().unwrap());
+            total += e.metadata().unwrap().len();
+        }
+    }
+    ids.sort_unstable();
+    (*ids.first().expect("journal dir has no log files"), ids.len(), total)
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +313,216 @@ fn torn_journal_tail_rebuilds_the_clean_prefix() {
     for i in 0..300u32 {
         assert_eq!(got.get(&k(i)).cloned(), Some(v(i, "a")), "key {i} after torn tail");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Compaction: journal disk stays bounded while deltas dwarf the live set
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compaction_bounds_journal_disk_and_rebuilds_exact_state() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+
+    let expected = {
+        // a small sub queue caps how far one drained batch can overshoot the
+        // compaction threshold, keeping the disk bound tight
+        let o = Options {
+            sub_queue_bytes: 32 << 10,
+            ..opts()
+        };
+        let db = Arc::new(Db::open(db_dir.path(), o).unwrap());
+        let journal =
+            Journal::attach_with_config(db.clone(), jrn_dir.path(), tiny_compaction()).unwrap();
+
+        // overwrite a fixed live set over and over: total deltas written
+        // (~500 KiB) dwarf the live data (~15 KiB), so on-disk size stays
+        // small only if compaction actually reclaims superseded files
+        for round in 0..45u32 {
+            for i in 0..150u32 {
+                db.put(k(i), v(i, &format!("r{round:02}"))).unwrap();
+            }
+        }
+        let expected = dump(&db);
+        let target = db.stats().visible_seqno;
+        wait_until("drain", 20, || journal.stats().last_seqno >= target);
+        let stats = journal.stats();
+        assert!(stats.compactions >= 2, "expected repeated compaction, got {}", stats.compactions);
+        assert!(stats.files_pruned > 0, "compaction never pruned a file");
+        drop(journal);
+        expected
+    };
+
+    let (min_id, _, total) = journal_disk(jrn_dir.path());
+    assert!(min_id > 1, "file 1 should have been pruned, lowest id is {min_id}");
+    assert!(total < 160 << 10, "journal disk not bounded: {total} bytes on disk");
+
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
+    let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(dump(&rebuilt), expected, "rebuilt state diverged after compaction");
+}
+
+// ---------------------------------------------------------------------------
+// Pruning file 1 must not lose the provenance header (it is re-emitted)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pruning_preserves_the_provenance_guard() {
+    let jrn_dir = tempfile::tempdir().unwrap();
+    let opts_a = || Options {
+        store_name: Some("store-a".into()),
+        ..opts()
+    };
+
+    // store A owns the journal dir; enough churn that compaction prunes file 1
+    let dir_a = tempfile::tempdir().unwrap();
+    let expected = {
+        let db = Arc::new(Db::open(dir_a.path(), opts_a()).unwrap());
+        let journal =
+            Journal::attach_with_config(db.clone(), jrn_dir.path(), tiny_compaction()).unwrap();
+        for round in 0..10u32 {
+            for i in 0..100u32 {
+                db.put(k(i), v(i, &format!("r{round}"))).unwrap();
+            }
+        }
+        let target = db.stats().visible_seqno;
+        wait_until("drain + compact", 20, || {
+            let s = journal.stats();
+            s.last_seqno >= target && s.compactions >= 1
+        });
+        let expected = dump(&db);
+        drop(journal);
+        expected
+    };
+    let (min_id, _, _) = journal_disk(jrn_dir.path());
+    assert!(min_id > 1, "compaction should have pruned file 1");
+
+    // the header lives on in the new anchor file: a foreign store is refused
+    let dir_b = tempfile::tempdir().unwrap();
+    let db_b = Arc::new(
+        Db::open(
+            dir_b.path(),
+            Options {
+                store_name: Some("store-b".into()),
+                ..opts()
+            },
+        )
+        .unwrap(),
+    );
+    assert!(
+        Journal::attach(db_b, jrn_dir.path()).is_err(),
+        "foreign store must still be refused after file 1 was pruned"
+    );
+
+    // ...while the owning store still re-attaches, and rebuild still works
+    {
+        let db = Arc::new(Db::open(dir_a.path(), opts_a()).unwrap());
+        let journal = Journal::attach(db.clone(), jrn_dir.path()).unwrap();
+        drop(journal);
+    }
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
+    let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(dump(&rebuilt), expected);
+}
+
+// ---------------------------------------------------------------------------
+// request_checkpoint() is the manual "compact now" hatch; None disables auto
+// ---------------------------------------------------------------------------
+
+#[test]
+fn manual_checkpoint_compacts_and_prunes() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+
+    let expected = {
+        let cfg = JournalConfig {
+            compact_when_deltas_exceed: None, // manual compaction only
+            ..tiny_compaction()
+        };
+        let db = Arc::new(Db::open(db_dir.path(), opts()).unwrap());
+        let journal = Journal::attach_with_config(db.clone(), jrn_dir.path(), cfg).unwrap();
+        for round in 0..8u32 {
+            for i in 0..100u32 {
+                db.put(k(i), v(i, &format!("r{round}"))).unwrap();
+            }
+        }
+        let expected = dump(&db);
+        let target = db.stats().visible_seqno;
+        wait_until("drain", 20, || journal.stats().last_seqno >= target);
+        assert_eq!(journal.stats().compactions, 0, "auto-compaction must stay off");
+        let (min_id, files, _) = journal_disk(jrn_dir.path());
+        assert_eq!(min_id, 1, "nothing may be pruned before the manual request");
+        assert!(files > 1, "writes should have rotated into several files");
+
+        journal.request_checkpoint();
+        wait_until("manual compact", 10, || journal.stats().compactions >= 1);
+        assert!(journal.stats().files_pruned > 0);
+        drop(journal);
+        expected
+    };
+
+    let (min_id, _, _) = journal_disk(jrn_dir.path());
+    assert!(min_id > 1, "manual checkpoint should have pruned the old files");
+
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
+    let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(dump(&rebuilt), expected);
+}
+
+// ---------------------------------------------------------------------------
+// Re-attach after a crash tail: post-reattach writes must survive to rebuild
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reattach_after_torn_tail_still_captures_new_writes() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+
+    // session 1: journal some writes, then a crash leaves a torn tail
+    {
+        let db = Arc::new(Db::open(db_dir.path(), opts()).unwrap());
+        let journal = Journal::attach(db.clone(), jrn_dir.path()).unwrap();
+        for i in 0..100u32 {
+            db.put(k(i), v(i, "s1")).unwrap();
+        }
+        let target = db.stats().visible_seqno;
+        wait_until("drain s1", 10, || journal.stats().last_seqno >= target);
+        drop(journal);
+    }
+    let newest = std::fs::read_dir(jrn_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .max()
+        .unwrap();
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&newest).unwrap();
+        f.write_all(&[0xff; 40]).unwrap(); // partial/garbage frame
+    }
+
+    // session 2: re-attach over the torn journal and keep writing
+    let expected = {
+        let db = Arc::new(Db::open(db_dir.path(), opts()).unwrap());
+        let journal = Journal::attach(db.clone(), jrn_dir.path()).unwrap();
+        for i in 100..200u32 {
+            db.put(k(i), v(i, "s2")).unwrap();
+        }
+        let expected = dump(&db);
+        let target = db.stats().visible_seqno;
+        wait_until("drain s2", 10, || journal.stats().last_seqno >= target);
+        drop(journal);
+        expected
+    };
+
+    // rebuild must reflect session 2, not silently stop at the torn junk
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
+    let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(dump(&rebuilt), expected, "post-reattach writes lost behind torn tail");
 }
 
 // ---------------------------------------------------------------------------
