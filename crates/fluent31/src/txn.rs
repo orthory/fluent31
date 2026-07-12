@@ -190,7 +190,11 @@ impl Txn {
         // validation keys: the queue moving underneath us must not conflict
         // this commit. System transactions (the trigger runner itself)
         // never capture — the no-stacking rule.
+        #[cfg(feature = "wasm")]
         let capture = !self.system;
+        // No triggers without wasm: capture_events ignores the flag.
+        #[cfg(not(feature = "wasm"))]
+        let capture = false;
 
         if self.db.opts.sync == SyncMode::Always {
             let keys: Vec<Vec<u8>> = self

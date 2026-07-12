@@ -21,6 +21,24 @@ libc = "0.2"
 tempfile = "3"
 serde_json = "1"
 
+# These examples demo the wasm plane (executors/triggers/queries); without the
+# feature they have no API to call, so cargo must skip them rather than fail.
+[[example]]
+name = "cascade_delete"
+required-features = ["wasm"]
+
+[[example]]
+name = "claim"
+required-features = ["wasm"]
+
+[[example]]
+name = "dynamic_index"
+required-features = ["wasm"]
+
+[[example]]
+name = "live_stats"
+required-features = ["wasm"]
+
 [features]
 default = ["wasm"]
 # In-database WASM execution (queries/executors). Disable for a pure
