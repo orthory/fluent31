@@ -13,7 +13,8 @@
 //!   "description": "optional docs for the root field",
 //!   "args": [{"name": "customer", "type": "String!", "description": "..."}],
 //!   "types": [{"name": "OrderStats", "fields": [{"name": "orders", "type": "U64!"}]}],
-//!   "output": "OrderStats!"
+//!   "output": "OrderStats!",
+//!   "feed": {"prefix": "feed/", "event": "OrderStats!"}
 //! }
 //! ```
 //!
@@ -24,6 +25,11 @@
 //!   of the provided arguments; when absent, the field takes a single
 //!   optional `input: BytesInput` and the guest receives raw bytes.
 //! - Guest output is parsed as JSON and validated against `output`.
+//! - `kind`+`output` (the root field) and `feed` (the Subscription field,
+//!   backed by an `on_apply` export — see `subscriptions.rs`) are each
+//!   optional, but at least one must be present. A `feed` declares the
+//!   module's event range: values the module writes under `prefix` are the
+//!   subscription's events, parsed as JSON and validated against `event`.
 //! - The size cap below is checked after the describe run completes, so a
 //!   hostile describe can still transiently buffer up to the engine's
 //!   `max_wasm_output`; the content-hash cache in `SchemaManager` limits
@@ -44,6 +50,7 @@ pub const SCALARS: &[&str] = &["String", "Int", "Float", "Boolean", "U64", "Json
 /// Root field names owned by the built-in API. A module may not shadow any
 /// of them (on either root, to keep one namespace).
 pub const RESERVED_FIELDS: &[&str] = &[
+    "changes",
     "get",
     "scan",
     "wasm",
@@ -80,6 +87,8 @@ pub const RESERVED_TYPES: &[&str] = &[
     "Json",
     "Pair",
     "ScanPage",
+    "ChangeEvent",
+    "ChangeKind",
     "Module",
     "Fork",
     "Trigger",
@@ -174,24 +183,46 @@ pub enum ModuleKind {
     Execute,
 }
 
-/// A module's validated, GraphQL-ready schema declaration.
+/// A module's declared event range: the values it writes under `prefix`
+/// become its Subscription field's events.
+#[derive(Clone, Debug)]
+pub struct FeedSpec {
+    pub prefix: Vec<u8>,
+    /// Per-event payload type; event values are parsed as JSON and
+    /// validated against it exactly like root-field output.
+    pub event: TypeRefSpec,
+    /// Generated name of the subscription payload wrapper object
+    /// (`<Module>Event`, module first letter uppercased). Participates in
+    /// the cross-module type-collision check via [`ModuleSchema::type_names`].
+    pub payload_type: String,
+}
+
+/// A module's validated, GraphQL-ready schema declaration. At least one of
+/// the root field (`kind` + `output`) and the subscription feed (`feed`)
+/// is present.
 #[derive(Clone, Debug)]
 pub struct ModuleSchema {
     /// Module name == root field name.
     pub module: String,
-    pub kind: ModuleKind,
+    pub kind: Option<ModuleKind>,
     pub description: Option<String>,
     /// None → single optional `input: BytesInput` argument, raw bytes in.
     /// Some → typed arguments, JSON object in.
     pub args: Option<Vec<FieldSpec>>,
     pub types: Vec<ObjectSpec>,
-    pub output: TypeRefSpec,
+    /// Present exactly when `kind` is.
+    pub output: Option<TypeRefSpec>,
+    pub feed: Option<FeedSpec>,
 }
 
 impl ModuleSchema {
-    /// Type names this module registers in the schema.
+    /// Type names this module registers in the schema (declared objects
+    /// plus the generated feed payload wrapper).
     pub fn type_names(&self) -> impl Iterator<Item = &str> {
-        self.types.iter().map(|t| t.name.as_str())
+        self.types
+            .iter()
+            .map(|t| t.name.as_str())
+            .chain(self.feed.iter().map(|f| f.payload_type.as_str()))
     }
 }
 
@@ -252,10 +283,15 @@ pub fn parse_descriptor(module: &str, bytes: &[u8]) -> Result<ModuleSchema, Stri
         .as_object()
         .ok_or_else(|| "descriptor must be a JSON object".to_string())?;
 
-    let kind = match obj.get("kind").and_then(Json::as_str) {
-        Some("query") => ModuleKind::Query,
-        Some("execute") => ModuleKind::Execute,
-        other => return Err(format!("kind must be \"query\" or \"execute\", got {other:?}")),
+    let kind = match obj.get("kind") {
+        None | Some(Json::Null) => None,
+        Some(raw) => match raw.as_str() {
+            Some("query") => Some(ModuleKind::Query),
+            Some("execute") => Some(ModuleKind::Execute),
+            other => {
+                return Err(format!("kind must be \"query\" or \"execute\", got {other:?}"))
+            }
+        },
     };
     let description = obj
         .get("description")
@@ -331,13 +367,71 @@ pub fn parse_descriptor(module: &str, bytes: &[u8]) -> Result<ModuleSchema, Stri
         }
     };
 
-    let output = parse_type_ref(
-        obj.get("output")
-            .and_then(Json::as_str)
-            .ok_or_else(|| "descriptor missing \"output\"".to_string())?,
-    )?;
-    if !known(&output.base) {
-        return Err(format!("output references unknown type {:?}", output.base));
+    let output = match (kind, obj.get("output").and_then(Json::as_str)) {
+        (Some(_), Some(raw)) => {
+            let output = parse_type_ref(raw)?;
+            if !known(&output.base) {
+                return Err(format!("output references unknown type {:?}", output.base));
+            }
+            Some(output)
+        }
+        (Some(_), None) => return Err("descriptor missing \"output\"".to_string()),
+        (None, Some(_)) => return Err("\"output\" requires \"kind\"".to_string()),
+        (None, None) => None,
+    };
+    if kind.is_none() && args.is_some() {
+        return Err("\"args\" require \"kind\" (feeds take no arguments)".to_string());
+    }
+
+    let feed = match obj.get("feed") {
+        None | Some(Json::Null) => None,
+        Some(raw) => {
+            let f = raw
+                .as_object()
+                .ok_or_else(|| "feed must be an object".to_string())?;
+            let prefix = f
+                .get("prefix")
+                .and_then(Json::as_str)
+                .ok_or_else(|| "feed missing \"prefix\"".to_string())?;
+            if prefix.is_empty() || prefix.contains('\0') {
+                return Err("feed prefix must be a non-empty string without NUL".to_string());
+            }
+            let event = parse_type_ref(
+                f.get("event")
+                    .and_then(Json::as_str)
+                    .ok_or_else(|| "feed missing \"event\"".to_string())?,
+            )?;
+            if !known(&event.base) {
+                return Err(format!("feed event references unknown type {:?}", event.base));
+            }
+            // the generated payload wrapper claims a type name of its own
+            let payload_type: String = module
+                .chars()
+                .enumerate()
+                .map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c })
+                .chain("Event".chars())
+                .collect();
+            if RESERVED_TYPES.contains(&payload_type.as_str()) {
+                return Err(format!(
+                    "feed payload type {payload_type:?} (generated from the module name) \
+                     is reserved — rename the module"
+                ));
+            }
+            if declared.contains(&payload_type) {
+                return Err(format!(
+                    "feed payload type {payload_type:?} (generated from the module name) \
+                     collides with a declared type"
+                ));
+            }
+            Some(FeedSpec {
+                prefix: prefix.as_bytes().to_vec(),
+                event,
+                payload_type,
+            })
+        }
+    };
+    if kind.is_none() && feed.is_none() {
+        return Err("descriptor declares neither \"kind\" nor \"feed\"".to_string());
     }
 
     Ok(ModuleSchema {
@@ -347,6 +441,7 @@ pub fn parse_descriptor(module: &str, bytes: &[u8]) -> Result<ModuleSchema, Stri
         args,
         types,
         output,
+        feed,
     })
 }
 
@@ -461,14 +556,19 @@ fn coerce(
     }
 }
 
-/// Parse a guest's output bytes as JSON and validate/normalize them against
-/// the module's declared output type.
-pub fn normalize_output(schema: &ModuleSchema, raw: &[u8]) -> Result<Value, String> {
+/// Parse guest-produced bytes as JSON and validate/normalize them against
+/// one of the module's declared types — the root field's `output`, or the
+/// feed's `event` for subscription payloads.
+pub fn normalize_output(
+    schema: &ModuleSchema,
+    ty: &TypeRefSpec,
+    raw: &[u8],
+) -> Result<Value, String> {
     let json: Json = serde_json::from_slice(raw)
         .map_err(|e| format!("module output is not valid JSON: {e}"))?;
     let objects: BTreeMap<&str, &ObjectSpec> =
         schema.types.iter().map(|t| (t.name.as_str(), t)).collect();
-    coerce(&schema.output, &json, &objects, "output")
+    coerce(ty, &json, &objects, "output")
 }
 
 #[cfg(test)]
@@ -524,8 +624,10 @@ mod tests {
             "output": "Report!"
         }"#;
         let s = parse_descriptor("report", d).unwrap();
+        let out_ty = s.output.clone().unwrap();
         let out = normalize_output(
             &s,
+            &out_ty,
             br#"{"n": 2, "top": [{"who": "acme", "cents": 12345678901234567890}], "junk": true}"#,
         )
         .unwrap();
@@ -538,9 +640,62 @@ mod tests {
         assert_eq!(m["extra"], Value::Null);
 
         // violations
-        assert!(normalize_output(&s, br#"{"n": null, "top": []}"#).is_err());
-        assert!(normalize_output(&s, br#"{"n": 1, "top": [null]}"#).is_err());
-        assert!(normalize_output(&s, b"not json").is_err());
-        assert!(normalize_output(&s, br#"{"n": 4000000000, "top": []}"#).is_err());
+        assert!(normalize_output(&s, &out_ty, br#"{"n": null, "top": []}"#).is_err());
+        assert!(normalize_output(&s, &out_ty, br#"{"n": 1, "top": [null]}"#).is_err());
+        assert!(normalize_output(&s, &out_ty, b"not json").is_err());
+        assert!(normalize_output(&s, &out_ty, br#"{"n": 4000000000, "top": []}"#).is_err());
+    }
+
+    #[test]
+    fn feed_descriptors() {
+        // feed-only: no kind, no output, payload type generated
+        let d = br#"{
+            "feed": {"prefix": "feed/", "event": "Entry!"},
+            "types": [{"name": "Entry", "fields": [{"name": "n", "type": "Int!"}]}]
+        }"#;
+        let s = parse_descriptor("orderFeed", d).unwrap();
+        assert!(s.kind.is_none() && s.output.is_none());
+        let feed = s.feed.as_ref().unwrap();
+        assert_eq!(feed.prefix, b"feed/");
+        assert_eq!(feed.payload_type, "OrderFeedEvent");
+        assert!(
+            s.type_names().any(|t| t == "OrderFeedEvent"),
+            "payload type participates in collision checks"
+        );
+
+        // feed alongside kind (dynamic-index style module)
+        let d = br#"{
+            "kind": "query", "output": "Int!",
+            "feed": {"prefix": "idx/", "event": "Json"}
+        }"#;
+        let s = parse_descriptor("liveIdx", d).unwrap();
+        assert!(s.kind.is_some() && s.feed.is_some());
+
+        // rejections
+        let cases: &[(&[u8], &str)] = &[
+            (br#"{"output": "Int!"}"#, "requires \"kind\""),
+            (br#"{"feed": {"prefix": "f/", "event": "Int!"}, "args": []}"#, "args"),
+            (br#"{}"#, "neither"),
+            (br#"{"feed": {"prefix": "", "event": "Int!"}}"#, "non-empty"),
+            (br#"{"feed": {"prefix": "f/"}}"#, "missing \"event\""),
+            (br#"{"feed": {"event": "Int!"}}"#, "missing \"prefix\""),
+            (br#"{"feed": {"prefix": "f/", "event": "Nope!"}}"#, "unknown type"),
+            (br#"{"kind": "query"}"#, "missing \"output\""),
+        ];
+        for (d, needle) in cases {
+            let err = parse_descriptor("m", d).unwrap_err();
+            assert!(err.contains(needle), "{err:?} should mention {needle:?}");
+        }
+
+        // generated payload name collisions
+        let d = br#"{"feed": {"prefix": "f/", "event": "Json"}}"#;
+        assert!(parse_descriptor("change", d)
+            .unwrap_err()
+            .contains("reserved"));
+        let d = br#"{
+            "feed": {"prefix": "f/", "event": "Json"},
+            "types": [{"name": "MyModEvent", "fields": [{"name": "n", "type": "Int"}]}]
+        }"#;
+        assert!(parse_descriptor("myMod", d).unwrap_err().contains("collides"));
     }
 }

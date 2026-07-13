@@ -33,7 +33,7 @@ const MAX_SCAN_LIMIT: i64 = 10_000;
 
 /// Smallest key strictly greater than every key with this prefix, or None
 /// when the prefix is all 0xFF (the range is unbounded above).
-fn prefix_end(p: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn prefix_end(p: &[u8]) -> Option<Vec<u8>> {
     let mut end = p.to_vec();
     while let Some(last) = end.last_mut() {
         if *last == 0xFF {
@@ -50,7 +50,7 @@ fn arg_bytes(ctx: &ResolverContext<'_>, name: &str) -> Result<Vec<u8>, Error> {
     decode_bytes_input(&ctx.args.try_get(name)?.object()?)
 }
 
-fn opt_arg_bytes(ctx: &ResolverContext<'_>, name: &str) -> Result<Option<Vec<u8>>, Error> {
+pub(crate) fn opt_arg_bytes(ctx: &ResolverContext<'_>, name: &str) -> Result<Option<Vec<u8>>, Error> {
     match ctx.args.get(name) {
         None => Ok(None),
         Some(v) if v.is_null() => Ok(None),
@@ -767,11 +767,11 @@ async fn install_task(
                 "invalid module schema: type {t:?} is already declared by another module"
             )));
         }
-        // the declared kind must be backed by the matching role entry point
+        // every declaration must be backed by its matching role entry point
         let db = mgr.db.clone();
         let probe = wasm.clone();
         let entries = mgr.blocking_write(move || db.wasm_entries(&probe)).await?;
-        if let Some(e) = crate::schema::kind_entry_mismatch(parsed.kind, &entries) {
+        if let Some(e) = crate::schema::entry_mismatch(&parsed, &entries) {
             return Err(Error::new(format!("invalid module schema: {e}")));
         }
         typed = true;

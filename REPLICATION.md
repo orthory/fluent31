@@ -105,7 +105,7 @@ pushes frames with `request_id = 0`:
 
 | op | name | payload |
 |---|---|---|
-| 0x10 | STREAM | `[u32 count]` then per entry `[u8 kind (1=put, 0=del)][u64 seqno][blob key]` + `[blob value]` for puts |
+| 0x10 | STREAM | `[u32 count]` then per entry `[u8 kind (1=put, 0=del)][u64 seqno][u64 commit_seqno][blob key]` + `[blob value]` for puts |
 | 0x11 | PING | (empty) — sent on idle so the edge can detect a dead master |
 | 0x12 | LAGGED | (empty) — the subscriber fell behind and was cut off; connection closes |
 
