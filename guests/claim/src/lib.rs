@@ -27,7 +27,7 @@ struct Input {
     owner: String,
 }
 
-#[fluent_guest::main]
+#[fluent_guest::execute]
 fn claim(raw: Vec<u8>) -> Result<String, Fail> {
     let input: Input = serde_json::from_slice(&raw)
         .map_err(|_| Fail::new(2, "input is not {\"username\", \"owner\"} JSON"))?;

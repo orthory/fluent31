@@ -14,9 +14,9 @@
 //!
 //! A trigger consumes committed writes in one of two modes, auto-detected
 //! at registration from the module's exports (`on_apply` present → changes
-//! mode; plain `run` → keys mode):
+//! mode; `on_touch` → keys mode):
 //!
-//! **Keys mode** (module entry `run`):
+//! **Keys mode** (module entry `on_touch`):
 //!
 //! - An event means "this key was touched", NOT "here is the op that
 //!   touched it". Queue keys are the touched user keys, so a hot key
@@ -104,7 +104,7 @@ fn parse_event_key(key: &[u8]) -> Option<(&str, &[u8])> {
 /// How a trigger consumes committed writes (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerMode {
-    /// Coalesced touched-key events delivered to the module's `run`.
+    /// Coalesced touched-key events delivered to the module's `on_touch`.
     Keys,
     /// Ordered per-op change events delivered to the module's `on_apply`.
     Changes,
@@ -114,7 +114,7 @@ impl TriggerMode {
     /// The module export a drain invokes for this mode.
     pub fn entry(self) -> &'static str {
         match self {
-            TriggerMode::Keys => "run",
+            TriggerMode::Keys => "on_touch",
             TriggerMode::Changes => "on_apply",
         }
     }
@@ -442,11 +442,18 @@ pub(crate) fn create_trigger(
         )));
     }
     // the module declares its consumption mode through its exports:
-    // `on_apply` → the ordered change feed, plain `run` → coalesced keys
+    // `on_apply` → the ordered change feed, `on_touch` → coalesced keys
+    // (`on_apply` wins when a module exports both — the complete feed is
+    // the safer default for a module that can consume it)
     let mode = if crate::wasm::module_exports_func(db, module, "on_apply")? {
         TriggerMode::Changes
-    } else {
+    } else if crate::wasm::module_exports_func(db, module, "on_touch")? {
         TriggerMode::Keys
+    } else {
+        return Err(Error::InvalidArgument(format!(
+            "module {module:?} exports neither `on_apply` nor `on_touch` — \
+             not a trigger consumer"
+        )));
     };
     let def = TriggerDef {
         name: name.to_string(),

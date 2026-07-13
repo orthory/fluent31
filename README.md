@@ -91,7 +91,7 @@ it, run it:
 // guests/agg/src/lib.rs — "SELECT count,sum,min,max WHERE prefix"
 use fluent_guest::Fail;
 
-#[fluent_guest::main]                       // exports the `run` entry point
+#[fluent_guest::query]                      // exports the `query` entry point
 fn agg(prefix: Vec<u8>) -> Result<Vec<u8>, Fail> {
     let scan = fluent_guest::scan_prefix(&prefix).map_err(|_| Fail::new(3, "scan failed"))?;
     let (mut count, mut sum) = (0u64, 0u64);
@@ -103,10 +103,13 @@ fn agg(prefix: Vec<u8>) -> Result<Vec<u8>, Fail> {
 }
 ```
 
-`Ok` output becomes the invocation's result; `Err(Fail { code, message })`
-becomes a non-zero exit with the message in the output buffer. (The raw
-`fluent_main!(fn() -> i32)` layer still exists for exit-code-speaking
-modules.)
+The exported entry point IS the module's role: `#[fluent_guest::query]`
+(read-only), `#[fluent_guest::execute]` (transactional), and the trigger
+hooks `#[on_touch]`/`#[on_apply]` — each invocation path requires its
+matching entry. `Ok` output becomes the invocation's result;
+`Err(Fail { code, message })` becomes a non-zero exit with the message in
+the output buffer. (The raw `fluent_query!`/`fluent_execute!`/...
+`fn() -> i32` layer still exists for exit-code-speaking modules.)
 
 ```rust
 db.install_module("agg", &std::fs::read("agg.wasm")?)?;

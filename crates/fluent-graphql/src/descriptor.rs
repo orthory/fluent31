@@ -1,4 +1,4 @@
-//! Module schema descriptors — "fluentabi v1 describe".
+//! Module schema descriptors — "fluentabi describe".
 //!
 //! A WASM module may export `describe: () -> i32` that writes a JSON
 //! descriptor declaring its GraphQL surface. The server calls it at

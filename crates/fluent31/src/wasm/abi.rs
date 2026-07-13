@@ -1,6 +1,6 @@
 //! The `fluent` syscall module — the kernel-like API guests import.
 //!
-//! Conventions ("fluentabi v1"):
+//! Conventions ("fluentabi v2"):
 //! - all pointers/lengths are u32 (passed as wasm i32; negative values fail
 //!   range checks and trap)
 //! - memory-safety violations TRAP; semantic misuse returns an errno
@@ -38,7 +38,8 @@ pub(crate) const EIO: i32 = -8;
 
 pub(crate) enum Access {
     ReadOnly(SeqNo),
-    /// Option so the driver can take the Txn out for commit after `run`.
+    /// Option so the driver can take the Txn out for commit after the
+    /// entry returns.
     Txn(Option<Txn>),
 }
 

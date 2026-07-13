@@ -1778,7 +1778,7 @@ const MIRROR_WAT: &str = r#"
   (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 2)
   (data (i32.const 0) "idx/last")
-  (func (export "run") (result i32)
+  (func (export "on_touch") (result i32)
     (local $len i32) (local $off i32) (local $klen i32)
     (local.set $len (call $ilen))
     (drop (call $iread (i32.const 1024) (local.get $len) (i32.const 0)))

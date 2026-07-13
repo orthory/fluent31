@@ -84,11 +84,11 @@ const TRAP_ON_APPLY: &str = r#"
   (func (export "on_apply") (result i32) (unreachable)))
 "#;
 
-/// A classic keys-mode module (exports `run` only).
-const RUN_ONLY: &str = r#"
+/// A classic keys-mode module (exports `on_touch` only).
+const ON_TOUCH_ONLY: &str = r#"
 (module
   (memory (export "memory") 1)
-  (func (export "run") (result i32) (i32.const 0)))
+  (func (export "on_touch") (result i32) (i32.const 0)))
 "#;
 
 /// Exports nothing callable: must be rejected at install.
@@ -332,9 +332,9 @@ fn oversized_values_are_elided_not_dropped() {
     assert_eq!(entries[1]["record"]["v"], 2, "small value inline");
 }
 
-/// An on_apply-only module installs (no `run` required), cannot be invoked
-/// as an executor, and selects changes mode; run-only modules stay keys
-/// mode; a module with neither entry point is rejected.
+/// An on_apply-only module installs (no other entry required), cannot be
+/// invoked as an executor, and selects changes mode; on_touch-only modules
+/// stay keys mode; a module with no role entry point at all is rejected.
 #[test]
 fn install_validation_and_mode_detection() {
     let dir = tempfile::tempdir().unwrap();
@@ -342,13 +342,20 @@ fn install_validation_and_mode_detection() {
 
     db.install_module("feedmod", &guest_wasm("order_feed")).unwrap();
     match db.execute("feedmod", b"") {
-        Err(fluent31::Error::Wasm(msg)) => {
-            assert!(msg.contains("run"), "missing-run error names the entry: {msg}")
+        Err(fluent31::Error::InvalidArgument(msg)) => {
+            assert!(msg.contains("`execute`"), "names the missing entry: {msg}")
         }
         other => panic!("executing an on_apply-only module: {other:?}"),
     }
+    // and a consumer-only module is no querier either
+    match db.query("feedmod", b"") {
+        Err(fluent31::Error::InvalidArgument(msg)) => {
+            assert!(msg.contains("`query`"), "names the missing entry: {msg}")
+        }
+        other => panic!("querying an on_apply-only module: {other:?}"),
+    }
 
-    db.install_module("keysmod", RUN_ONLY.as_bytes()).unwrap();
+    db.install_module("keysmod", ON_TOUCH_ONLY.as_bytes()).unwrap();
     assert_eq!(
         db.create_trigger("k", "keysmod", None, None).unwrap(),
         TriggerMode::Keys
@@ -374,15 +381,16 @@ fn install_validation_and_mode_detection() {
     }
 }
 
-/// The mode is fixed at registration: replacing the module with run-only
-/// bytes makes drains fail LOUDLY (lastError names on_apply, events keep
-/// queueing); restoring an on_apply module drains the full backlog.
+/// The mode is fixed at registration: replacing the module with
+/// on_touch-only bytes makes drains fail LOUDLY (lastError names on_apply,
+/// events keep queueing); restoring an on_apply module drains the full
+/// backlog.
 #[test]
 fn mode_survives_module_replacement_and_recovers() {
     let dir = tempfile::tempdir().unwrap();
     let db = order_feed_db(dir.path(), opts());
 
-    db.install_module("order_feed", RUN_ONLY.as_bytes()).unwrap();
+    db.install_module("order_feed", ON_TOUCH_ONLY.as_bytes()).unwrap();
     db.put(b"orders/00000001".to_vec(), br#"{"v":1}"#.to_vec()).unwrap();
     wait_until("drain failure surfaces", 30, || {
         last_error(&db, "feed").is_some_and(|e| e.contains("on_apply"))

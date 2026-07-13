@@ -1,5 +1,5 @@
-//! `topCustomers` — the demo *reader* query, typed via fluentabi v1
-//! describe.
+//! `topCustomers` — the demo *reader* query (a `query`-entry module), typed
+//! via fluentabi describe.
 //!
 //! Aggregates the `customers/` index written by `placeOrder` at the GraphQL
 //! operation's pinned snapshot: ranks customers by lifetime spend, computes
@@ -34,7 +34,7 @@ fluent_guest::fluent_describe!(
 
 const PREFIX: &[u8] = b"customers/";
 
-#[fluent_guest::main]
+#[fluent_guest::query]
 fn top_customers(raw: Vec<u8>) -> Result<String, Fail> {
     let input: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
     let limit = input["limit"].as_i64().unwrap_or(10);

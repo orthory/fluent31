@@ -384,7 +384,7 @@ const ECHO_WAT: &str = r#"
   (import "fluent" "input_read" (func $input_read (param i32 i32 i32) (result i32)))
   (import "fluent" "output_write" (func $output_write (param i32 i32) (result i32)))
   (memory (export "memory") 1)
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (local $n i32)
     (local.set $n (call $input_len))
     (drop (call $input_read (i32.const 0) (local.get $n) (i32.const 0)))
@@ -400,7 +400,7 @@ const PUT_INPUT_WAT: &str = r#"
   (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 1024) "wk")
-  (func (export "run") (result i32)
+  (func (export "execute") (result i32)
     (local $n i32)
     (local.set $n (call $input_len))
     (drop (call $input_read (i32.const 0) (local.get $n) (i32.const 0)))
@@ -413,7 +413,7 @@ const FAIL_WAT: &str = r#"
   (import "fluent" "output_write" (func $output_write (param i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "boom")
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (drop (call $output_write (i32.const 0) (i32.const 4)))
     (i32.const 7)))
 "#;
@@ -856,7 +856,7 @@ const COUNTER_WAT: &str = r#"
   (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "ctr")
-  (func (export "run") (result i32)
+  (func (export "execute") (result i32)
     (local $r i64)
     (local.set $r (call $gfu (i32.const 0) (i32.const 3) (i32.const 0) (i32.const 16) (i32.const 8)))
     (if (i64.lt_s (local.get $r) (i64.const 0))
@@ -911,10 +911,12 @@ mod hex {
 }
 
 // ---------------------------------------------------------------------------
-// typed module schema (fluentabi v1 describe)
+// typed module schema (fluentabi describe)
 // ---------------------------------------------------------------------------
 
-/// Emit `$json` from a `describe` export; `run` outputs `$out` (both static).
+/// Emit `$json` from a `describe` export; a dual-role entry (exported as
+/// both `query` and `execute`, so either declared kind is backed) outputs
+/// `$out` (all static).
 fn wat_typed(describe_json: &str, run_out: &str) -> String {
     let d_len = describe_json.len();
     let r_off = d_len.next_multiple_of(4096);
@@ -931,15 +933,15 @@ fn wat_typed(describe_json: &str, run_out: &str) -> String {
   (func (export "describe") (result i32)
     (drop (call $ow (i32.const 0) (i32.const {d_len})))
     (i32.const 0))
-  (func (export "run") (result i32)
+  (func (export "query") (export "execute") (result i32)
     (drop (call $ow (i32.const {r_off}) (i32.const {r_len})))
     (i32.const 0)))
 "#
     )
 }
 
-/// Typed executor: `describe` declares args; `run` puts the raw input JSON
-/// at key "targs" and echoes it (output type Json).
+/// Typed executor: `describe` declares args; `execute` puts the raw input
+/// JSON at key "targs" and echoes it (output type Json).
 const TYPED_EXEC_WAT: &str = r#"
 (module
   (import "fluent" "input_len" (func $il (result i32)))
@@ -952,7 +954,7 @@ const TYPED_EXEC_WAT: &str = r#"
   (func (export "describe") (result i32)
     (drop (call $ow (i32.const 0) (i32.const 101)))
     (i32.const 0))
-  (func (export "run") (result i32)
+  (func (export "execute") (result i32)
     (local $len i32)
     (local.set $len (call $il))
     (drop (call $ir (i32.const 8192) (local.get $len) (i32.const 0)))
@@ -1111,6 +1113,55 @@ async fn invalid_descriptor_rejects_install() {
     assert_eq!(d["modules"].as_array().unwrap().len(), 0);
 }
 
+/// A descriptor's kind must be backed by the matching role entry point:
+/// `kind: "execute"` with only a `query` export is a contradiction —
+/// rejected at installModule, degraded to schemaError when installed
+/// out-of-band.
+#[tokio::test]
+async fn descriptor_kind_must_match_role_entry() {
+    let (schema, _dir) = open_schema();
+    // the module exports `query` only; the descriptor claims execute
+    let wat = r#"
+(module
+  (import "fluent" "output_write" (func $ow (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "{\"kind\":\"execute\",\"output\":\"Json\"}")
+  (func (export "describe") (result i32)
+    (drop (call $ow (i32.const 0) (i32.const 34)))
+    (i32.const 0))
+  (func (export "query") (result i32)
+    (i32.const 0)))
+"#;
+    let errs = run_err(
+        &schema,
+        r#"mutation I($w: BytesInput!) { installModule(name: "mismatch", wasm: $w) { name } }"#,
+        json!({"w": {"text": wat.clone()}}),
+    )
+    .await;
+    assert!(
+        errs[0].message.contains("`execute` entry point"),
+        "{errs:?}"
+    );
+    let d = run(&schema, r#"{ modules { name } }"#, json!({})).await;
+    assert_eq!(d["modules"].as_array().unwrap().len(), 0, "nothing installed");
+
+    // out-of-band install degrades to schemaError instead of a typed field
+    schema.db_handle().install_module("mismatch", wat.as_bytes()).unwrap();
+    run(&schema, r#"mutation { reloadSchema }"#, json!({})).await;
+    let d = run(&schema, r#"{ modules { name typed schemaError } }"#, json!({})).await;
+    assert_eq!(d["modules"][0]["typed"], json!(false));
+    assert!(
+        d["modules"][0]["schemaError"]
+            .as_str()
+            .unwrap()
+            .contains("`execute` entry point"),
+        "{d}"
+    );
+    // still callable through the generic surface its entries DO support
+    let d = run(&schema, r#"{ wasm(module: "mismatch") { len } }"#, json!({})).await;
+    assert_eq!(d["wasm"]["len"], json!(0));
+}
+
 #[tokio::test]
 async fn typed_output_violation_is_an_error_not_garbage() {
     let (schema, _dir) = open_schema();
@@ -1265,7 +1316,7 @@ async fn typed_int_args_enforce_32bit_range_and_singleton_lists_coerce() {
   (func (export "describe") (result i32)
     (drop (call $ow (i32.const 0) (i32.const 97)))
     (i32.const 0))
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (local $len i32)
     (local.set $len (call $il))
     (drop (call $ir (i32.const 8192) (local.get $len) (i32.const 0)))
@@ -1324,7 +1375,7 @@ const MIRROR_WAT: &str = r#"
   (import "fluent" "input_read" (func $iread (param i32 i32 i32) (result i32)))
   (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 2)
-  (func (export "run") (result i32)
+  (func (export "on_touch") (result i32)
     (local $len i32) (local $off i32) (local $klen i32)
     (local.set $len (call $ilen))
     (drop (call $iread (i32.const 1024) (local.get $len) (i32.const 0)))

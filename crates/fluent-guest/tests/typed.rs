@@ -79,6 +79,13 @@ fn from_input_and_into_output_conversions() {
     assert_eq!(err.code, 3);
     let err = Vec::<Change>::from_input(b"nonsense".to_vec()).unwrap_err();
     assert_eq!(err.code, 3);
+    // packed trigger keys: [klen uvarint][key bytes] repeated
+    assert_eq!(
+        Vec::<Vec<u8>>::from_input(b"\x01a\x02bc".to_vec()).unwrap(),
+        vec![b"a".to_vec(), b"bc".to_vec()]
+    );
+    let err = Vec::<Vec<u8>>::from_input(b"\x05ab".to_vec()).unwrap_err();
+    assert_eq!(err.code, 3);
 
     assert_eq!(b"bytes".to_vec().into_output(), b"bytes");
     assert_eq!("text".to_string().into_output(), b"text");
@@ -98,9 +105,20 @@ fn fail_conversions_carry_code_and_message() {
 // The attribute macros must expand on typed functions on any target (the
 // generated exports only ever RUN inside the database). Calling them here
 // would hit the host ABI stubs, so this is a compile-level assertion only.
-#[fluent_guest::main]
-fn typed_main(input: Vec<u8>) -> Result<Vec<u8>, Fail> {
+#[fluent_guest::query]
+fn typed_query(input: Vec<u8>) -> Result<Vec<u8>, Fail> {
     Ok(input)
+}
+
+#[fluent_guest::execute]
+fn typed_execute(input: Vec<u8>) -> Result<Vec<u8>, Fail> {
+    Ok(input)
+}
+
+#[fluent_guest::on_touch]
+fn typed_on_touch(keys: Vec<Vec<u8>>) -> Result<(), Fail> {
+    let _ = keys;
+    Ok(())
 }
 
 #[fluent_guest::on_apply]
@@ -112,6 +130,8 @@ fn typed_on_apply(changes: Vec<Change>) -> Result<(), Fail> {
 #[test]
 fn attribute_macros_export_the_entry_symbols() {
     // the wrappers exist with the right signatures
-    let _run: extern "C" fn() -> i32 = run;
+    let _query: extern "C" fn() -> i32 = query;
+    let _execute: extern "C" fn() -> i32 = execute;
+    let _on_touch: extern "C" fn() -> i32 = on_touch;
     let _on_apply: extern "C" fn() -> i32 = on_apply;
 }

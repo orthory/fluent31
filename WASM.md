@@ -1,8 +1,13 @@
 # fluent31 WASM modules — authoring manual & ABI spec
 
 Everything needed to write, describe, install, and invoke an in-database
-WASM module ("fluentabi v1"). Self-contained: an agent with only this file
+WASM module ("fluentabi v2"). Self-contained: an agent with only this file
 and a Rust (or WAT) toolchain can produce a working, typed module.
+
+v2 in one line: the exported entry point IS the module's role — v1's
+single `run` (which served queries, executors, and keys-mode triggers
+depending on how it was invoked) split into `query`, `execute`, and
+`on_touch`; `on_apply` and `describe` are unchanged.
 
 Source of truth if this file ever drifts: `crates/fluent31/src/wasm/abi.rs`
 (host ABI), `crates/fluent-graphql/src/descriptor.rs` (describe spec),
@@ -14,23 +19,32 @@ Source of truth if this file ever drifts: `crates/fluent31/src/wasm/abi.rs`
 ## 1. What a module is
 
 A WASM binary (`wasm32-unknown-unknown`) stored *inside* the database
-(versioned and recovered like any key) and executed by the engine in one of
-two modes:
+(versioned and recovered like any key). A module declares its role(s) by
+which entry points it exports — the export IS the role, and every
+invocation path requires its matching entry (a mismatch is rejected at
+the boundary, before execution):
 
-| Mode | Entry | Access | Invoked via |
+| Role | Entry | Access | Invoked via |
 |---|---|---|---|
-| **query** | `run` | read-only at a pinned MVCC snapshot; `put`/`delete` return `EROFS` | `Db::query`, GraphQL `wasm(module:, input:)`, or its own typed Query field |
-| **executor** | `run` | a fresh optimistic transaction; guest exit `0` commits, anything else aborts | `Db::execute`, GraphQL `wasmExecute(module:, input:)`, its own typed Mutation field — or by the engine itself as a **keys-mode write-range trigger** (section 8) |
+| **querier** | `query` | read-only at a pinned MVCC snapshot; `put`/`delete` return `EROFS` | `Db::query`, GraphQL `wasm(module:, input:)`, or its own typed Query field |
+| **executor** | `execute` | a fresh optimistic transaction; guest exit `0` commits, anything else aborts | `Db::execute`, GraphQL `wasmExecute(module:, input:)`, or its own typed Mutation field |
+| **touch consumer** | `on_touch` | same as executor | ONLY by the engine, as a **keys-mode write-range trigger** (section 8): the input is the coalesced touched keys |
 | **change consumer** | `on_apply` | same as executor | ONLY by the engine, as a **changes-mode write-range trigger** (section 8): the input is the ordered list of committed changes |
 
-**Executor retry semantics (critical):** on commit conflict the WHOLE
+A module may export any combination — e.g. a *dynamic index* pairs an
+`on_apply` (the index creator, folding committed changes into a derived
+keyspace) with a `query` (the dynamic view serving reads over it) in one
+module.
+
+**Transactional retry semantics (critical):** on commit conflict the WHOLE
 attempt is discarded and re-run against a fresh snapshot — fresh Store,
 fresh memory, fresh fuel, fresh output — up to `execute_retries` times
-(default 3). Your `run` may execute several times per logical call, so it
-must be a pure function of (input bytes, database state): no side channels,
-no assuming a previous attempt's effects. Writes are buffered in the
-transaction and only become visible on commit, so re-runs are safe as long
-as you don't smuggle state out through `log` or panic-once logic.
+(default 3). Your `execute` (or trigger entry) may run several times per
+logical call, so it must be a pure function of (input bytes, database
+state): no side channels, no assuming a previous attempt's effects. Writes
+are buffered in the transaction and only become visible on commit, so
+re-runs are safe as long as you don't smuggle state out through `log` or
+panic-once logic.
 
 Module bytes are resolved at the invocation's snapshot: `query_at`
 time-travels code together with data, and each execute attempt sees a
@@ -44,18 +58,22 @@ need entropy or time, take it as input.
 ## 2. Required exports
 
 ```
-memory   : (export "memory" (memory ...))       — REQUIRED
-run      : (export "run" (func (result i32)))   — no params
-on_apply : (export "on_apply" (func (result i32))) — same shape as run
-describe : (export "describe" (func (result i32))) — OPTIONAL, same shape as run
+memory   : (export "memory" (memory ...))          — REQUIRED
+query    : (export "query" (func (result i32)))    — no params
+execute  : (export "execute" (func (result i32)))  — same shape
+on_touch : (export "on_touch" (func (result i32))) — same shape
+on_apply : (export "on_apply" (func (result i32))) — same shape
+describe : (export "describe" (func (result i32))) — OPTIONAL, same shape
 ```
 
-Install is rejected unless `memory` plus at least one of `run` /
-`on_apply` exist. `run` serves queries, executors, and keys-mode
-triggers; `on_apply` is the changes-mode trigger entry (section 8) — a
-module may export either or both. `describe`, when present, is executed
-by the GraphQL server (read-only, empty input) at install / schema-build
-time; its output bytes must be a descriptor (section 5).
+Install is rejected unless `memory` plus at least one role entry
+(`query` / `execute` / `on_touch` / `on_apply`) exist — a v1 module
+exporting only `run` is rejected with a hint at the role split. A module
+may export any combination of role entries. `describe`, when present, is
+executed by the GraphQL server (read-only, empty input) at install /
+schema-build time; its output bytes must be a descriptor (section 5), and
+its declared `kind` must be backed by the matching entry (`kind: "query"`
+→ `query`, `kind: "execute"` → `execute`).
 
 **Exit codes:** `0` = success (and, for executors, commit). Any non-zero
 exit aborts the transaction and surfaces to callers as
@@ -133,7 +151,7 @@ Open an iterator over `[lo, hi)` at the snapshot. Zero-length `lo`/`hi`
 mean unbounded. `flags`: bit 0 = reverse; all other bits `EINVAL`.
 Returns a handle (≥ 0), or `ELIMIT` after `max_wasm_scans` (default 64)
 concurrently open handles. Handles are per-invocation and never survive
-`run` returning.
+the entry returning.
 
 ```
 scan_next : (h: i32, buf: i32, cap: i32) -> i32
@@ -200,19 +218,31 @@ fluent_guest::scan_prefix(&[u8]) -> Result<Scan, i32>
 ### Typed entry points (the primary interface)
 
 Annotate a plain function taking one [`FromInput`] value and returning
-`Result<impl IntoOutput, Fail>`; the attribute macro exports the entry
-point and maps the result — `Ok` → exit 0 with the encoded output,
-`Err(Fail { code, message })` → non-zero exit with the message in the
-output buffer (a `Fail` code of 0 is coerced to 1: exit 0 must always
-mean success).
+`Result<impl IntoOutput, Fail>` with the role it serves; the attribute
+macro exports the matching entry point and maps the result — `Ok` → exit 0
+with the encoded output, `Err(Fail { code, message })` → non-zero exit
+with the message in the output buffer (a `Fail` code of 0 is coerced to 1:
+exit 0 must always mean success).
 
 ```rust
 use fluent_guest::Fail;
 
-#[fluent_guest::main]                       // exports `run`
-fn my_module(input: Vec<u8>) -> Result<String, Fail> {
-    // ... validate, read, write ...
+#[fluent_guest::query]                      // exports `query` (read-only)
+fn my_view(input: Vec<u8>) -> Result<String, Fail> {
+    // ... validate, read, respond ...
     Err(Fail::new(2, "distinct code per failure class"))
+}
+
+#[fluent_guest::execute]                    // exports `execute` (transactional)
+fn my_writer(input: Vec<u8>) -> Result<String, Fail> {
+    // ... validate, read, write ...
+    Ok("committed".into())
+}
+
+#[fluent_guest::on_touch]                   // exports `on_touch` (section 8)
+fn my_index(keys: Vec<Vec<u8>>) -> Result<(), Fail> {
+    for key in keys { /* reconcile against current state */ }
+    Ok(())
 }
 
 #[fluent_guest::on_apply]                   // exports `on_apply` (section 8)
@@ -225,17 +255,20 @@ fluent_guest::fluent_describe!(r#"{...}"#); // optional: exports `describe` (sec
 ```
 
 `FromInput` is implemented for `Vec<u8>` (raw bytes), `String` (UTF-8,
-code-3 `Fail` on invalid), and `Vec<Change>` (the changes-mode trigger
-input; code-3 `Fail` on anything else). `IntoOutput` covers `Vec<u8>`,
-`String`, and `()`.
+code-3 `Fail` on invalid), `Vec<Vec<u8>>` (the keys-mode trigger input;
+code-3 `Fail` on anything else), and `Vec<Change>` (the changes-mode
+trigger input; likewise). `IntoOutput` covers `Vec<u8>`, `String`, and
+`()`.
 
 The declarative raw layer remains for modules that want to speak exit
-codes directly: `fluent_main!(f)` / `fluent_on_apply!(f)` export an
-`fn() -> i32` unchanged (pair the latter with `fluent_guest::changes()`).
+codes directly: `fluent_query!(f)` / `fluent_execute!(f)` /
+`fluent_on_touch!(f)` / `fluent_on_apply!(f)` export an `fn() -> i32`
+unchanged (pair the trigger forms with `fluent_guest::trigger_keys()` /
+`fluent_guest::changes()`).
 
 NOTE: both macro styles generate the exported symbol themselves — the
-annotated/inner function must NOT itself be named `run` / `on_apply`
-(duplicate definition).
+annotated/inner function must NOT itself be named `query` / `execute` /
+`on_touch` / `on_apply` (duplicate definition).
 
 Build:
 
@@ -264,7 +297,7 @@ WAT text is also accepted by `installModule` (`wasm: {text: "(module ...)"}`)
 — handy for tests; see the WAT fixtures in
 `crates/fluent-graphql/tests/graphql.rs`.
 
-## 5. Typed GraphQL surface — "fluentabi v1 describe"
+## 5. Typed GraphQL surface — "fluentabi describe"
 
 A module that exports `describe` becomes **its own typed root field**:
 `kind: "query"` modules appear on `Query`, `kind: "execute"` on `Mutation`.
@@ -274,7 +307,9 @@ demand via `mutation { reloadSchema }` (the resync path after installing
 through the CLI or engine API directly).
 
 `describe` runs read-only with EMPTY input and must write the descriptor
-JSON to its output and exit 0. It should be static — just emit a constant
+JSON to its output and exit 0. The declared `kind` must be backed by the
+matching role entry (`"query"` → a `query` export, `"execute"` →
+`execute`): a mismatch rejects the install. It should be static — just emit a constant
 string (`fluent_describe!` does exactly this). Descriptor max size:
 **64 KiB**.
 
@@ -328,7 +363,7 @@ A module whose descriptor fails these rules *after* it is already on disk
 generic `wasm`/`wasmExecute`, and `modules { name typed schemaError }`
 reports why it has no typed field.
 
-### Input mapping (what your `run` receives)
+### Input mapping (what your entry receives)
 
 - **With `args`:** ONE JSON object containing EVERY declared arg — omitted
   optional args are `null`. Example: field call
@@ -337,11 +372,11 @@ reports why it has no typed field.
   `U64` args arrive as JSON numbers. Non-null (`!`) args are enforced by
   GraphQL before your code runs.
 - **Without `args`:** the field gets a single optional
-  `input: BytesInput` (oneof `text`/`base64`/`hex`) and your `run`
+  `input: BytesInput` (oneof `text`/`base64`/`hex`) and your entry
   receives the raw decoded bytes (empty if omitted) — identical to the
   generic `wasm`/`wasmExecute` path.
 
-### Output mapping (what your `run` must produce)
+### Output mapping (what your entry must produce)
 
 Output bytes are parsed as JSON and validated against `output`:
 
@@ -380,7 +415,7 @@ declaration.
 | `guests/top_customers` | query | typed output list, `scan_prefix` aggregation at a snapshot, limit clamping |
 | `guests/agg` | query (untyped) | raw-bytes input/output, chunked scan aggregation |
 | `guests/transfer` | execute (untyped) | OCC transfer with conflict retries |
-| `guests/customer_index` | execute (keys-mode trigger) | trigger-maintained secondary index: `parse_trigger_keys()`, reconcile-against-current-state, the back-pointer pattern for updates/deletes |
+| `guests/customer_index` | touch consumer (keys-mode trigger) | trigger-maintained secondary index: typed `on_touch` keys input, reconcile-against-current-state, the back-pointer pattern for updates/deletes |
 | `guests/order_feed` | change consumer (changes-mode trigger) | ordered changefeed materialization: `#[fluent_guest::on_apply]`, per-op kinds/values/seqnos, in-code filtering, elided-value handling |
 | `guests/dynamic_index` | change consumer (changes-mode trigger) | DYNAMIC index generation: index specs stored as keys, scan-backfill on spec write, fold-style live maintenance, teardown on spec delete |
 | `guests/live_stats` | change consumer (changes-mode trigger) | always-fresh `GROUP BY` aggregates: exactly-once delta folding (updates move groups, deletes subtract) that provably never drifts |
@@ -397,8 +432,9 @@ pair.
 
 ## 7. Authoring checklist
 
-1. Decide **query** (pure read) vs **execute** (writes; must tolerate
-   re-execution).
+1. Decide the role(s) and export the matching entries: **query** (pure
+   read) vs **execute** (writes; must tolerate re-execution) vs the
+   trigger consumers (section 8). The export IS the role.
 2. Define your keyspace layout; validate any user input that becomes a key
    segment (reject `/`, empty, oversized — see `place_order`).
 3. Use `get_for_update` for every read-modify-write key.
@@ -426,10 +462,14 @@ key range and code.
 A trigger consumes writes in one of two **modes**, detected from the
 module's exports at registration (and fixed for the trigger's lifetime):
 
-| Mode | Module exports | Entry | Input | Coalescing |
-|---|---|---|---|---|
-| **keys** | `run` only | `run` | touched keys, no values/kinds/order | re-touches coalesce to one pending event |
-| **changes** | `on_apply` | `on_apply` | the ordered list of committed changes: seqno + kind + key + value | none — one event per committed op |
+| Mode | Entry | Input | Coalescing |
+|---|---|---|---|
+| **keys** | `on_touch` | touched keys, no values/kinds/order | re-touches coalesce to one pending event |
+| **changes** | `on_apply` | the ordered list of committed changes: seqno + kind + key + value | none — one event per committed op |
+
+A module exporting both trigger entries registers as **changes** mode
+(`on_apply` wins — the complete feed is the safer default); one exporting
+neither is rejected at `create_trigger`.
 
 ```
 Db::create_trigger(name, module, lo, hi)   # None/omitted bound = open end;
@@ -449,11 +489,12 @@ changes-mode trigger whose module loses its `on_apply` export fails
 drains loudly (`lastError`) and holds its events until the module is
 repaired.
 
-### Keys mode — the contract your `run` must satisfy
+### Keys mode — the contract your `on_touch` must satisfy
 
 - **Input is packed touched keys**: `[klen uvarint][key bytes]` repeated —
-  `fluent_guest::trigger_keys()` / `parse_trigger_keys()` parses it. Up
-  to `trigger_batch` (default 512) keys per invocation.
+  the `Vec<Vec<u8>>` input of `#[fluent_guest::on_touch]` decodes it
+  (raw layer: `fluent_guest::trigger_keys()` / `parse_trigger_keys()`).
+  Up to `trigger_batch` (default 512) keys per invocation.
 - **An event means "this key was touched", not "here is what happened".**
   Events carry no values, no op kind, no order: re-touches of one key
   coalesce into a single pending event while a backlog exists. Read the

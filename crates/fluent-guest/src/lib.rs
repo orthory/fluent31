@@ -1,21 +1,32 @@
-//! Guest-side SDK for fluent31 WASM modules ("fluentabi v1").
+//! Guest-side SDK for fluent31 WASM modules ("fluentabi v2").
 //!
-//! Write a typed function returning `Result` and annotate it — the
-//! attribute macro exports the entry point and maps `Ok` to exit 0 (output
-//! encoded via [`IntoOutput`]) and `Err(Fail)` to a non-zero exit with the
-//! message in the output buffer:
+//! A module declares its role(s) by which entry points it exports — the
+//! export name IS the role. Write a typed function returning `Result` and
+//! annotate it with the role — the attribute macro exports the entry point
+//! and maps `Ok` to exit 0 (output encoded via [`IntoOutput`]) and
+//! `Err(Fail)` to a non-zero exit with the message in the output buffer:
 //!
 //! ```ignore
-//! #[fluent_guest::main]                       // exports `run`
+//! #[fluent_guest::query]                      // exports `query` (read-only)
 //! fn lookup(who: Vec<u8>) -> Result<Vec<u8>, fluent_guest::Fail> {
 //!     fluent_guest::get(&who).ok_or(fluent_guest::Fail::new(1, "no such key"))
 //! }
+//!
+//! #[fluent_guest::execute]                    // exports `execute` (transactional)
+//! fn claim(input: Vec<u8>) -> Result<String, fluent_guest::Fail> { /* ... */ }
 //! ```
 //!
-//! A changes-mode trigger module consumes the ordered list of committed
-//! changes instead (see [`Change`]):
+//! Trigger consumers take the trigger input instead: a keys-mode module
+//! receives the coalesced touched keys, a changes-mode module the ordered
+//! list of committed changes (see [`Change`]):
 //!
 //! ```ignore
+//! #[fluent_guest::on_touch]                   // exports `on_touch`
+//! fn index(keys: Vec<Vec<u8>>) -> Result<(), fluent_guest::Fail> {
+//!     for key in keys { /* reconcile against current state */ }
+//!     Ok(())
+//! }
+//!
 //! #[fluent_guest::on_apply]                   // exports `on_apply`
 //! fn feed(changes: Vec<fluent_guest::Change>) -> Result<(), fluent_guest::Fail> {
 //!     for c in changes { /* filter, then index/materialize */ }
@@ -23,13 +34,14 @@
 //! }
 //! ```
 //!
-//! The declarative [`fluent_main!`] macro remains as the raw layer for
-//! modules that want to speak exit codes directly.
+//! The declarative [`fluent_query!`] / [`fluent_execute!`] /
+//! [`fluent_on_touch!`] / [`fluent_on_apply!`] macros remain as the raw
+//! layer for modules that want to speak exit codes directly.
 //!
 //! Build with `--target wasm32-unknown-unknown` as a `cdylib`, then install
 //! the artifact with `db.install_module(name, bytes)`.
 
-pub use fluent_guest_macros::{main, on_apply};
+pub use fluent_guest_macros::{execute, on_apply, on_touch, query};
 
 pub mod errno {
     pub const NOT_FOUND: i32 = -1;
@@ -140,9 +152,9 @@ pub fn trigger_keys() -> Option<Vec<Vec<u8>>> {
     parse_trigger_keys(&input())
 }
 
-/// [`trigger_keys`] over an explicit buffer (the form typed
-/// `#[fluent_guest::main]` functions use, having already received the
-/// input as their argument).
+/// [`trigger_keys`] over an explicit buffer (what `Vec<Vec<u8>>`'s
+/// [`FromInput`] uses — a typed `#[fluent_guest::on_touch]` function
+/// receives the parsed keys as its argument directly).
 pub fn parse_trigger_keys(input: &[u8]) -> Option<Vec<Vec<u8>>> {
     let mut keys = Vec::new();
     let mut pos = 0usize;
@@ -168,8 +180,9 @@ pub fn parse_trigger_keys(input: &[u8]) -> Option<Vec<Vec<u8>>> {
 }
 
 // ---------------------------------------------------------------------------
-// typed entry points (the #[fluent_guest::main] / #[fluent_guest::on_apply]
-// layer): Result-returning functions over FromInput/IntoOutput values
+// typed entry points (the #[fluent_guest::query] / #[execute] / #[on_touch]
+// / #[on_apply] layer): Result-returning functions over FromInput/IntoOutput
+// values
 // ---------------------------------------------------------------------------
 
 /// A guest failure: a non-zero exit code plus a human-readable message
@@ -304,6 +317,13 @@ pub fn changes() -> Option<Vec<Change>> {
 impl FromInput for Vec<Change> {
     fn from_input(bytes: Vec<u8>) -> Result<Self, Fail> {
         parse_changes(&bytes).ok_or_else(|| Fail::new(3, "input is not a fluent change list"))
+    }
+}
+
+/// The touched keys of a keys-mode (`on_touch`) trigger invocation.
+impl FromInput for Vec<Vec<u8>> {
+    fn from_input(bytes: Vec<u8>) -> Result<Self, Fail> {
+        parse_trigger_keys(&bytes).ok_or_else(|| Fail::new(3, "input is not packed trigger keys"))
     }
 }
 
@@ -616,12 +636,40 @@ pub fn scan_prefix(prefix: &[u8]) -> Result<Scan, i32> {
     Scan::open(Some(prefix), Some(&hi), 0)
 }
 
-/// Export `$f` as the module entry point.
+/// Export `$f` as the module's raw read-only `query` entry point. Prefer
+/// `#[fluent_guest::query]` on a typed function; this is the
+/// exit-code-speaking escape hatch.
 #[macro_export]
-macro_rules! fluent_main {
+macro_rules! fluent_query {
     ($f:path) => {
         #[no_mangle]
-        pub extern "C" fn run() -> i32 {
+        pub extern "C" fn query() -> i32 {
+            $f()
+        }
+    };
+}
+
+/// Export `$f` as the module's raw transactional `execute` entry point.
+/// Prefer `#[fluent_guest::execute]` on a typed function; this is the
+/// exit-code-speaking escape hatch.
+#[macro_export]
+macro_rules! fluent_execute {
+    ($f:path) => {
+        #[no_mangle]
+        pub extern "C" fn execute() -> i32 {
+            $f()
+        }
+    };
+}
+
+/// Export `$f` as the module's raw `on_touch` entry point (keys-mode
+/// triggers). Prefer `#[fluent_guest::on_touch]` on a typed function; this
+/// is the exit-code-speaking escape hatch, paired with [`trigger_keys`].
+#[macro_export]
+macro_rules! fluent_on_touch {
+    ($f:path) => {
+        #[no_mangle]
+        pub extern "C" fn on_touch() -> i32 {
             $f()
         }
     };
@@ -641,7 +689,7 @@ macro_rules! fluent_on_apply {
 }
 
 /// Export a static JSON schema descriptor as the module's `describe`
-/// entry point. Hosts that understand "fluentabi v1 describe" (e.g. the
+/// entry point. Hosts that understand "fluentabi describe" (e.g. the
 /// GraphQL server) call it at install/schema-build time to generate typed
 /// API surface for the module.
 #[macro_export]

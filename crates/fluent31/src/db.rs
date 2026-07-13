@@ -1469,7 +1469,8 @@ impl Db {
         crate::wasm::list_modules(&self.inner)
     }
 
-    /// Run a read-only WASM query against the current visible state.
+    /// Run a module's read-only `query` entry against the current visible
+    /// state. Rejects modules that export no `query` entry point.
     #[cfg(feature = "wasm")]
     pub fn query(&self, name: &str, input: &[u8]) -> Result<Vec<u8>> {
         crate::wasm::query(&self.inner, name, input, None)
@@ -1480,11 +1481,27 @@ impl Db {
         crate::wasm::query(&self.inner, name, input, Some(snap.seq))
     }
 
-    /// Run a WASM executor inside a transaction; commits on guest exit 0,
-    /// retries automatically on conflict.
+    /// Run a module's `execute` entry inside a transaction; commits on
+    /// guest exit 0, retries automatically on conflict. Rejects modules
+    /// that export no `execute` entry point.
     #[cfg(feature = "wasm")]
     pub fn execute(&self, name: &str, input: &[u8]) -> Result<Vec<u8>> {
         crate::wasm::execute(&self.inner, name, input)
+    }
+
+    /// The role entry points an installed module exports (any of `query`,
+    /// `execute`, `on_touch`, `on_apply`) — which invocation paths accept
+    /// it.
+    #[cfg(feature = "wasm")]
+    pub fn module_entries(&self, name: &str) -> Result<Vec<String>> {
+        crate::wasm::module_entries(&self.inner, name)
+    }
+
+    /// Like [`Db::module_entries`], but for candidate module bytes that are
+    /// not (yet) installed.
+    #[cfg(feature = "wasm")]
+    pub fn wasm_entries(&self, wasm: &[u8]) -> Result<Vec<String>> {
+        crate::wasm::wasm_entries(&self.inner, wasm)
     }
 
     /// Run an installed module's optional `describe` export (read-only,
@@ -1509,8 +1526,9 @@ impl Db {
     /// user key in `[lo, hi)` (None = unbounded end), the executor module
     /// `module` is asynchronously invoked. The module's exports pick the
     /// consumption mode, returned for confirmation: `on_apply` present →
-    /// [`TriggerMode::Changes`], the ordered per-op change feed; otherwise
-    /// [`TriggerMode::Keys`], the coalesced touched keys handed to `run`.
+    /// [`TriggerMode::Changes`], the ordered per-op change feed; `on_touch`
+    /// → [`TriggerMode::Keys`], the coalesced touched keys; neither →
+    /// rejected.
     /// Events are durable (they commit atomically with the triggering
     /// write) and consumption is exactly-once — see `Db::list_triggers` for
     /// backlog and failure visibility.

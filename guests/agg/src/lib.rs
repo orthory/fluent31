@@ -14,7 +14,7 @@ fn le_u64(v: &[u8]) -> Option<u64> {
     v.get(..8).map(|b| u64::from_le_bytes(b.try_into().unwrap()))
 }
 
-#[fluent_guest::main]
+#[fluent_guest::query]
 fn agg(prefix: Vec<u8>) -> Result<Vec<u8>, Fail> {
     if prefix.is_empty() {
         return Err(Fail::new(2, "empty prefix not allowed"));

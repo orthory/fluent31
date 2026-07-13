@@ -112,6 +112,26 @@ pub(crate) fn value_field(name: &str, ty: TypeRef) -> Field {
 // module status collection (engine side of a rebuild)
 // ---------------------------------------------------------------------------
 
+/// A described module must back its declared kind with the matching role
+/// entry point (`kind: "query"` → `query`, `kind: "execute"` → `execute`);
+/// returns the schema error when it doesn't.
+pub(crate) fn kind_entry_mismatch(
+    kind: descriptor::ModuleKind,
+    entries: &[String],
+) -> Option<String> {
+    let required = match kind {
+        descriptor::ModuleKind::Query => "query",
+        descriptor::ModuleKind::Execute => "execute",
+    };
+    (!entries.iter().any(|e| e == required)).then(|| {
+        format!(
+            "descriptor kind \"{required}\" requires a `{required}` entry point \
+             (module exports: [{}])",
+            entries.join(", ")
+        )
+    })
+}
+
 /// Describe every installed module, reusing `prev` outcomes for modules
 /// whose content hash is unchanged (a rebuild only runs `describe` — an
 /// untrusted WASM execution — for modules that actually changed). Engine
@@ -132,7 +152,16 @@ pub(crate) fn collect_outcomes(
         let outcome = match db.describe_module(&info.name) {
             Ok(None) => DescribeOutcome::NoDescribe,
             Ok(Some(bytes)) => match descriptor::parse_descriptor(&info.name, &bytes) {
-                Ok(schema) => DescribeOutcome::Described(Arc::new(schema)),
+                // the declared kind must be invocable (out-of-band installs
+                // bypass installModule's pre-check, so re-check here)
+                Ok(schema) => match db.module_entries(&info.name) {
+                    Ok(entries) => match kind_entry_mismatch(schema.kind, &entries) {
+                        None => DescribeOutcome::Described(Arc::new(schema)),
+                        Some(e) => DescribeOutcome::DescribeError(e),
+                    },
+                    Err(e @ (fluent31::Error::Io(_) | fluent31::Error::Closed)) => return Err(e),
+                    Err(e) => DescribeOutcome::DescribeError(e.to_string()),
+                },
                 Err(e) => DescribeOutcome::DescribeError(e),
             },
             // engine-level breakage aborts; module-level breakage degrades
@@ -393,7 +422,7 @@ fn trigger_object() -> Object {
         )
         .description(
             "How the trigger consumes committed writes: \"keys\" (coalesced \
-             touched keys to the module's `run`) or \"changes\" (the ordered \
+             touched keys to the module's `on_touch`) or \"changes\" (the ordered \
              per-op change feed to its `on_apply`). Detected from the \
              module's exports at registration.",
         ))

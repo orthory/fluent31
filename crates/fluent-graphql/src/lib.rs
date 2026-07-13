@@ -6,7 +6,7 @@
 //!    module/maintenance admin (see `builtins.rs`).
 //! 2. **Generic WASM access** — `Query.wasm` / `Mutation.wasmExecute` run
 //!    any installed module with raw byte input/output.
-//! 3. **Typed module fields** — a module exporting `describe` (fluentabi v1
+//! 3. **Typed module fields** — a module exporting `describe` (fluentabi
 //!    describe, see `descriptor.rs`) becomes its own typed root field:
 //!    `kind: "query"` modules on Query, `kind: "execute"` on Mutation. The
 //!    schema is rebuilt and hot-swapped whenever `installModule` /

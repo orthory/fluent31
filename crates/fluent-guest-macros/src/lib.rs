@@ -4,9 +4,17 @@
 //! exit code) happens in `fluent_guest::__entry`, where the compiler checks
 //! the annotated signature against the `FromInput`/`IntoOutput` traits.
 //!
+//! The export name IS the module's role (fluentabi v2):
+//!
 //! ```ignore
-//! #[fluent_guest::main]                 // exports `run`
+//! #[fluent_guest::query]                // exports `query` (read-only)
 //! fn top_customers(input: Vec<u8>) -> Result<String, fluent_guest::Fail> { ... }
+//!
+//! #[fluent_guest::execute]              // exports `execute` (transactional)
+//! fn place_order(input: Vec<u8>) -> Result<String, fluent_guest::Fail> { ... }
+//!
+//! #[fluent_guest::on_touch]             // exports `on_touch`
+//! fn index(keys: Vec<Vec<u8>>) -> Result<(), fluent_guest::Fail> { ... }
 //!
 //! #[fluent_guest::on_apply]             // exports `on_apply`
 //! fn feed(changes: Vec<fluent_guest::Change>) -> Result<(), fluent_guest::Fail> { ... }
@@ -15,10 +23,27 @@
 use proc_macro::{TokenStream, TokenTree};
 
 /// Export the annotated `fn name(input: T) -> Result<O, Fail>` as the
-/// module's `run` entry point (query and executor invocations).
+/// module's read-only `query` entry point (`Db::query`, GraphQL `wasm`, or
+/// the module's own typed Query field).
 #[proc_macro_attribute]
-pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
-    entry_attribute(attr, item, "main", "run")
+pub fn query(attr: TokenStream, item: TokenStream) -> TokenStream {
+    entry_attribute(attr, item, "query", "query")
+}
+
+/// Export the annotated `fn name(input: T) -> Result<O, Fail>` as the
+/// module's transactional `execute` entry point (`Db::execute`, GraphQL
+/// `wasmExecute`, or the module's own typed Mutation field).
+#[proc_macro_attribute]
+pub fn execute(attr: TokenStream, item: TokenStream) -> TokenStream {
+    entry_attribute(attr, item, "execute", "execute")
+}
+
+/// Export the annotated `fn name(keys: Vec<Vec<u8>>) -> Result<O, Fail>`
+/// as the module's `on_touch` entry point — the keys-mode trigger hook
+/// receiving the coalesced touched keys.
+#[proc_macro_attribute]
+pub fn on_touch(attr: TokenStream, item: TokenStream) -> TokenStream {
+    entry_attribute(attr, item, "on_touch", "on_touch")
 }
 
 /// Export the annotated `fn name(changes: Vec<Change>) -> Result<O, Fail>`

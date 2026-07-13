@@ -89,7 +89,7 @@ const SLOW_WAT: &str = r#"
   (import "fluent" "output_write" (func $ow (param i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "slow-done")
-  (func (export "run") (result i32)
+  (func (export "execute") (result i32)
     (local $i i32)
     (local.set $i (i32.const 120000000))
     (block $out
