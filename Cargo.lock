@@ -783,6 +783,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluent-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "fluent-graphql",
+ "fluent-replication",
+ "fluent-wire",
+ "fluent31",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fluent-wire"
 version = "0.1.0"
 dependencies = [

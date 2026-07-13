@@ -1,0 +1,139 @@
+//! End-to-end server-mode tests over real TCP: one process, one store,
+//! all three planes. A write over the wire pipe is read back over
+//! GraphQL, an edge cache joins with a key-range scope, a full replica
+//! joins unbounded, and both see streamed writes. An unnamed store serves
+//! graphql + wire but keeps the replication join point closed.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use fluent31::{Db, Options, SyncMode};
+use fluent_replication::{EdgeReplica, EdgeReplicaConfig};
+use fluent_server::{Server, ServerConfig};
+use fluent_wire::WireClient;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn ephemeral_cfg() -> ServerConfig {
+    ServerConfig {
+        graphql: "127.0.0.1:0".into(),
+        wire: "127.0.0.1:0".into(),
+        replication: "127.0.0.1:0".into(),
+        ..ServerConfig::default()
+    }
+}
+
+async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !cond() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Minimal HTTP/1.1 POST — enough to hit the GraphQL plane without
+/// pulling an HTTP client into the dev-dependencies.
+async fn graphql_post(addr: SocketAddr, body: &str) -> String {
+    let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "POST /graphql HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    sock.write_all(req.as_bytes()).await.unwrap();
+    let mut resp = Vec::new();
+    sock.read_to_end(&mut resp).await.unwrap();
+    String::from_utf8_lossy(&resp).into_owned()
+}
+
+fn edge_cfg(addr: SocketAddr, dir: &std::path::Path, lo: &[u8], hi: Option<&[u8]>) -> EdgeReplicaConfig {
+    EdgeReplicaConfig::new(addr.to_string(), dir, lo.to_vec(), hi.map(<[u8]>::to_vec))
+}
+
+async fn attach(cfg: EdgeReplicaConfig) -> Arc<EdgeReplica> {
+    let replica = tokio::task::spawn_blocking(move || EdgeReplica::start(cfg))
+        .await
+        .unwrap()
+        .unwrap();
+    Arc::new(replica)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn all_planes_over_one_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = Options {
+        sync: SyncMode::Never,
+        store_name: Some("srv-test".to_string()),
+        ..Options::default()
+    };
+    let db = Arc::new(Db::open(dir.path(), opts.clone()).unwrap());
+    let server = Server::start(db, dir.path(), opts, ephemeral_cfg())
+        .await
+        .unwrap();
+    let repl_addr = server
+        .replication_addr
+        .expect("named store must open the join point");
+
+    // write over the wire pipe
+    let wc = WireClient::connect(&server.wire_addr.to_string()).await.unwrap();
+    wc.put(b"user/1", b"ada").await.unwrap();
+    assert_eq!(wc.get(b"user/1").await.unwrap().unwrap(), b"ada");
+
+    // read the same key back over GraphQL — both planes serve one store
+    let resp = graphql_post(
+        server.graphql_addr,
+        r#"{"query":"{ get(key: {text: \"user/1\"}) { text } }"}"#,
+    )
+    .await;
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    assert!(resp.contains(r#""text":"ada""#), "{resp}");
+
+    // an edge cache joins the replication plane with a key-range scope
+    let edir = tempfile::tempdir().unwrap();
+    let edge = attach(edge_cfg(repl_addr, &edir.path().join("e"), b"user/", Some(b"user0"))).await;
+    assert_eq!(edge.master().name, "srv-test");
+    assert_eq!(edge.store().get(b"user/1").unwrap().unwrap(), b"ada");
+
+    // a full replica joins the same point with an unbounded scope
+    let rdir = tempfile::tempdir().unwrap();
+    let replica = attach(edge_cfg(repl_addr, &rdir.path().join("r"), b"", None)).await;
+    assert_eq!(replica.store().get(b"user/1").unwrap().unwrap(), b"ada");
+
+    // a write over the pipe streams to both attached nodes
+    wc.put(b"user/2", b"grace").await.unwrap();
+    wait_for("edge to stream user/2", || {
+        edge.store().get(b"user/2").unwrap() == Some(b"grace".to_vec())
+    })
+    .await;
+    wait_for("replica to stream user/2", || {
+        replica.store().get(b"user/2").unwrap() == Some(b"grace".to_vec())
+    })
+    .await;
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unnamed_store_keeps_join_point_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = Options {
+        sync: SyncMode::Never,
+        ..Options::default()
+    };
+    let db = Arc::new(Db::open(dir.path(), opts.clone()).unwrap());
+    let server = Server::start(db, dir.path(), opts, ephemeral_cfg())
+        .await
+        .unwrap();
+    assert!(server.replication_addr.is_none());
+
+    // graphql + wire still serve
+    let wc = WireClient::connect(&server.wire_addr.to_string()).await.unwrap();
+    wc.put(b"k", b"v").await.unwrap();
+    let resp = graphql_post(
+        server.graphql_addr,
+        r#"{"query":"{ get(key: {text: \"k\"}) { text } }"}"#,
+    )
+    .await;
+    assert!(resp.contains(r#""text":"v""#), "{resp}");
+
+    server.shutdown().await;
+}
