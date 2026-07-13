@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use fluent31::{Db, Options, SyncMode};
+use fluent31::{Db, Error, Options, SyncMode};
 
 fn opts() -> Options {
     Options {
@@ -301,4 +301,68 @@ fn trigger_admin_churn_races_writes_safely() {
         db.get(b"m/u/final").unwrap().is_some() && pending(&db, "t") == 0
     });
     assert_eq!(last_error(&db, "t"), None);
+}
+
+/// `Options::wasm_enabled = false` is the runtime mirror of building
+/// without the wasm feature: module/trigger APIs refuse, the runner does
+/// not start, and committed writes never capture events — the off-window
+/// is skipped, not queued. Definitions and modules stay inert and
+/// listable; re-enabling resumes capture for new writes only, and a
+/// keys-mode trigger self-heals the skipped key on its next touch.
+#[test]
+fn disabled_wasm_layer_is_inert_and_skips_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // enabled: install the mirror trigger and prove it fires
+    {
+        let db = Db::open(dir.path(), opts()).unwrap();
+        db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
+        db.create_trigger("t", "mirror", Some(b"k/"), Some(b"k0")).unwrap();
+        db.put("k/1", "a").unwrap();
+        wait_until("k/1 mirrored", 10, || db.get(b"m/k/1").unwrap().is_some());
+    }
+
+    // disabled: every module/trigger API refuses, in-range writes capture
+    // nothing (pending stays 0 — capture is synchronous with the commit)
+    {
+        let off = Options {
+            wasm_enabled: false,
+            ..opts()
+        };
+        let db = Db::open(dir.path(), off).unwrap();
+        assert!(matches!(db.query("mirror", b""), Err(Error::Wasm(_))));
+        assert!(matches!(db.execute("mirror", b""), Err(Error::Wasm(_))));
+        assert!(matches!(
+            db.install_module("x", MIRROR_WAT.as_bytes()),
+            Err(Error::Wasm(_))
+        ));
+        assert!(matches!(
+            db.create_trigger("t2", "mirror", None, None),
+            Err(Error::Wasm(_))
+        ));
+        assert!(matches!(db.delete_trigger("t"), Err(Error::Wasm(_))));
+
+        // inert state stays visible
+        assert_eq!(db.list_modules().unwrap().len(), 1);
+        assert_eq!(pending(&db, "t"), 0);
+
+        db.put("k/2", "b").unwrap();
+        assert_eq!(pending(&db, "t"), 0, "no capture while disabled");
+        assert!(db.get(b"m/k/2").unwrap().is_none());
+    }
+
+    // re-enabled: the off-window write never fires; new writes do; the
+    // skipped key reconciles on its next touch
+    let db = Db::open(dir.path(), opts()).unwrap();
+    assert_eq!(pending(&db, "t"), 0);
+    db.put("k/3", "c").unwrap();
+    wait_until("k/3 mirrored", 10, || db.get(b"m/k/3").unwrap().is_some());
+    assert!(
+        db.get(b"m/k/2").unwrap().is_none(),
+        "off-window write must not fire after re-enable"
+    );
+    db.put("k/2", "b2").unwrap();
+    wait_until("k/2 reconciled on re-touch", 10, || {
+        db.get(b"m/k/2").unwrap().is_some()
+    });
 }

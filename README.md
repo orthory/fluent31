@@ -248,6 +248,8 @@ max-frame-bytes = 1048576
 ping-every-ms = 2000
 
 [engine]                      # every fluent31::Options tunable, kebab-case
+wasm-enabled = true           # false = WASM layer inert: module/trigger APIs
+                              # refuse, writes never fire triggers
 io-backend = "auto"           # auto | uring | std
 compression = "none"          # none | lz4
 memtable-size = 8388608
