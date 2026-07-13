@@ -21,6 +21,8 @@
 //! write, wire 128 + 32, replication 64); the combined worst case of 384
 //! parked engine calls stays under tokio's default 512 blocking threads.
 
+mod config;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,6 +33,8 @@ use fluent_replication::{ReplServer, ReplServerConfig};
 use fluent_wire::{ServerConfig as WireConfig, WireServer};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+
+pub use config::{parse_sync, ConfigError, FileConfig};
 
 /// Listen addresses for the three planes. Every plane is always served;
 /// replication additionally needs a named store and is skipped (leaving

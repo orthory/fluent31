@@ -216,6 +216,20 @@ every later start; without a name, graphql + wire still serve and the
 join point stays closed. `--graphql/--wire/--replication` rebind the
 ports, `--sync` picks the durability mode.
 
+Settings can live in a TOML file instead — `fluent-server --config
+server.toml` — with every key mirroring its flag; an explicit flag
+overrides the file, and unknown keys are an error:
+
+```toml
+dir = "./data"
+store-name = "prod"
+sync = "periodic:50"          # always | never | periodic:<ms>
+graphql = "127.0.0.1:8317"
+wire = "127.0.0.1:8427"
+replication = "127.0.0.1:8428"
+max-body-bytes = 33554432
+```
+
 When you want exactly one surface, each plane also runs standalone
 (`fluent-graphql`, `fluent-wire`, `fluent-replication master`) with the
 same defaults — those binaries are documented in the sections below.

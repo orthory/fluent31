@@ -137,3 +137,70 @@ async fn unnamed_store_keeps_join_point_closed() {
 
     server.shutdown().await;
 }
+
+/// Drive the real binary: every setting — including the db dir — sourced
+/// from a TOML file via `--config`, no other arguments.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_sources_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("server.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "dir = \"{}\"\nstore-name = \"cfg-test\"\nsync = \"never\"\ngraphql = \"127.0.0.1:0\"\nwire = \"127.0.0.1:0\"\nreplication = \"127.0.0.1:0\"\n",
+            dir.path().join("db").display()
+        ),
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-server"))
+        .arg("--config")
+        .arg(&cfg_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // the binary announces each plane's bound address on stdout
+    let mut graphql: Option<SocketAddr> = None;
+    let mut replication_line = String::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while graphql.is_none() || replication_line.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = rx.recv_timeout(left) else {
+            child.kill().ok();
+            panic!("binary did not announce its planes in time");
+        };
+        if let Some(rest) = line.strip_prefix("fluent-server: graphql") {
+            let addr = rest.trim_start().strip_prefix("http://").unwrap();
+            graphql = Some(addr[..addr.find("/graphql").unwrap()].parse().unwrap());
+        } else if line.starts_with("fluent-server: replication") {
+            replication_line = line;
+        }
+    }
+    assert!(
+        replication_line.contains("\"cfg-test\""),
+        "store name not sourced from the config file: {replication_line}"
+    );
+
+    let resp = graphql_post(
+        graphql.unwrap(),
+        r#"{"query":"mutation { put(key: {text: \"cfg\"}, value: {text: \"file\"}) }"}"#,
+    )
+    .await;
+    assert!(resp.contains(r#""put":true"#), "{resp}");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
