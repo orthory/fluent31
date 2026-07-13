@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use fluent31::{Db, Options, SyncMode};
-use fluent_server::{parse_sync, FileConfig, Server, ServerConfig};
+use fluent_server::{parse_sync, FileConfig, GraphqlSection, ListenSection, Server, ServerConfig};
 
 const USAGE: &str = "\
 usage: fluent-server <db-dir> [--config FILE] [--store-name NAME]
@@ -19,13 +19,20 @@ serves every plane of one store in one process:
                key-range edge caches (REPLICATION.md); needs a named store:
                pass --store-name once, the name persists
 
---config FILE reads TOML defaults for every setting above (kebab-case keys:
-  dir, store-name, sync, graphql, wire, replication, max-body-bytes);
-  explicit flags override the file";
+--config FILE reads TOML settings, kebab-case: top-level dir / store-name /
+  sync, [listen] graphql/wire/replication, and the file-only tuning
+  sections [graphql] [wire] [replication] [engine] — [engine] covers every
+  fluent31::Options tunable. Explicit flags override the file. Annotated
+  example: crates/fluent-server/src/config.rs";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
     ExitCode::FAILURE
+}
+
+/// The `[listen]` slots the address flags write into.
+fn listen(cli: &mut FileConfig) -> &mut ListenSection {
+    cli.listen.get_or_insert_with(ListenSection::default)
 }
 
 fn main() -> ExitCode {
@@ -39,15 +46,15 @@ fn main() -> ExitCode {
                 None => return usage(),
             },
             "--graphql" => match args.next() {
-                Some(v) => cli.graphql = Some(v),
+                Some(v) => listen(&mut cli).graphql = Some(v),
                 None => return usage(),
             },
             "--wire" => match args.next() {
-                Some(v) => cli.wire = Some(v),
+                Some(v) => listen(&mut cli).wire = Some(v),
                 None => return usage(),
             },
             "--replication" => match args.next() {
-                Some(v) => cli.replication = Some(v),
+                Some(v) => listen(&mut cli).replication = Some(v),
                 None => return usage(),
             },
             "--store-name" => match args.next() {
@@ -59,7 +66,11 @@ fn main() -> ExitCode {
                 _ => return usage(),
             },
             "--max-body-bytes" => match args.next().and_then(|v| v.parse().ok()) {
-                Some(v) => cli.max_body_bytes = Some(v),
+                Some(v) => {
+                    cli.graphql
+                        .get_or_insert_with(GraphqlSection::default)
+                        .max_body_bytes = Some(v)
+                }
                 None => return usage(),
             },
             "--help" | "-h" => {
@@ -92,7 +103,7 @@ fn main() -> ExitCode {
     }
     let eff = cli.overlay(file);
 
-    let Some(dir) = eff.dir else {
+    let Some(dir) = eff.dir.clone() else {
         eprintln!("fluent-server: missing <db-dir> (positional argument, or `dir` in the --config file)\n");
         return usage();
     };
@@ -101,25 +112,8 @@ fn main() -> ExitCode {
         .as_deref()
         .map(|s| parse_sync(s).expect("sync validated at intake"))
         .unwrap_or(SyncMode::Always);
-    let mut cfg = ServerConfig::default();
-    if let Some(v) = eff.graphql {
-        cfg.graphql = v;
-    }
-    if let Some(v) = eff.wire {
-        cfg.wire = v;
-    }
-    if let Some(v) = eff.replication {
-        cfg.replication = v;
-    }
-    if let Some(v) = eff.max_body_bytes {
-        cfg.max_body_bytes = v;
-    }
-
-    let opts = Options {
-        sync,
-        store_name: eff.store_name,
-        ..Options::default()
-    };
+    let cfg = eff.server_config();
+    let opts = eff.engine_options(sync);
     let db = match Db::open(&dir, opts.clone()) {
         Ok(d) => Arc::new(d),
         Err(e) => {

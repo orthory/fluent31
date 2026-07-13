@@ -220,17 +220,41 @@ join point stays closed. `--graphql/--wire/--replication` rebind the
 ports, `--sync` picks the durability mode.
 
 Settings can live in a TOML file instead — `fluent-server --config
-server.toml` — with every key mirroring its flag; an explicit flag
-overrides the file, and unknown keys are an error:
+server.toml`. Top-level keys and `[listen]` mirror the flags (an explicit
+flag overrides the file); the tuning sections are file-only and cover
+everything the composed layers expose: `[engine]` is the full
+`fluent31::Options` tunable surface. Unknown keys are an error:
 
 ```toml
 dir = "./data"
 store-name = "prod"
 sync = "periodic:50"          # always | never | periodic:<ms>
+
+[listen]
 graphql = "127.0.0.1:8317"
 wire = "127.0.0.1:8427"
 replication = "127.0.0.1:8428"
+
+[graphql]
 max-body-bytes = 33554432
+fork-max-open = 8             # open fork instances beyond the primary
+fork-idle-ttl-secs = 300
+
+[wire]
+max-frame-bytes = 269484032
+
+[replication]
+max-frame-bytes = 1048576
+ping-every-ms = 2000
+
+[engine]                      # every fluent31::Options tunable, kebab-case
+io-backend = "auto"           # auto | uring | std
+compression = "none"          # none | lz4
+memtable-size = 8388608
+block-cache-size = 67108864
+value-threshold = 4096
+wasm-fuel = 1000000000
+# ... full annotated list: crates/fluent-server/src/config.rs
 ```
 
 When you want exactly one surface, each plane also runs standalone
