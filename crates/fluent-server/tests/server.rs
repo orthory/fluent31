@@ -16,9 +16,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn ephemeral_cfg() -> ServerConfig {
     ServerConfig {
-        graphql: "127.0.0.1:0".into(),
-        wire: "127.0.0.1:0".into(),
-        replication: "127.0.0.1:0".into(),
+        graphql_addr: "127.0.0.1:0".into(),
+        wire_addr: "127.0.0.1:0".into(),
+        replication_addr: "127.0.0.1:0".into(),
         ..ServerConfig::default()
     }
 }
@@ -138,6 +138,30 @@ async fn unnamed_store_keeps_join_point_closed() {
     server.shutdown().await;
 }
 
+/// A plane tunable set through ServerConfig must reach the running
+/// plane: with a tiny wire max-frame, an oversized request is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plane_tunables_flow_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = Options {
+        sync: SyncMode::Never,
+        ..Options::default()
+    };
+    let db = Arc::new(Db::open(dir.path(), opts.clone()).unwrap());
+    let mut cfg = ephemeral_cfg();
+    cfg.wire.max_frame = 64;
+    let server = Server::start(db, dir.path(), opts, cfg).await.unwrap();
+
+    let wc = WireClient::connect(&server.wire_addr.to_string()).await.unwrap();
+    wc.put(b"k", b"v").await.unwrap();
+    assert!(
+        wc.put(b"big", &[0u8; 128]).await.is_err(),
+        "frame above the configured cap must be refused"
+    );
+
+    server.shutdown().await;
+}
+
 /// Drive the real binary: every setting — including the db dir — sourced
 /// from a TOML file via `--config`, no other arguments.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -147,7 +171,23 @@ async fn binary_sources_config_file() {
     std::fs::write(
         &cfg_path,
         format!(
-            "dir = \"{}\"\nstore-name = \"cfg-test\"\nsync = \"never\"\ngraphql = \"127.0.0.1:0\"\nwire = \"127.0.0.1:0\"\nreplication = \"127.0.0.1:0\"\n",
+            r#"
+dir = "{}"
+store-name = "cfg-test"
+sync = "never"
+
+[listen]
+graphql = "127.0.0.1:0"
+wire = "127.0.0.1:0"
+replication = "127.0.0.1:0"
+
+[graphql]
+max-body-bytes = 1048576
+
+[engine]
+io-backend = "std"
+memtable-size = 4194304
+"#,
             dir.path().join("db").display()
         ),
     )

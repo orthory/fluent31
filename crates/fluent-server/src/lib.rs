@@ -34,26 +34,39 @@ use fluent_wire::{ServerConfig as WireConfig, WireServer};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-pub use config::{parse_sync, ConfigError, FileConfig};
+pub use config::{
+    parse_sync, CompressionKey, ConfigError, EngineSection, FileConfig, GraphqlSection,
+    IoBackendKey, ListenSection, ReplicationSection, WireSection,
+};
 
-/// Listen addresses for the three planes. Every plane is always served;
-/// replication additionally needs a named store and is skipped (leaving
-/// [`Server::replication_addr`] `None`) when the store is anonymous.
+/// Listen addresses plus each composed plane's tunables. Every plane is
+/// always served; replication additionally needs a named store and is
+/// skipped (leaving [`Server::replication_addr`] `None`) when the store
+/// is anonymous.
 pub struct ServerConfig {
-    pub graphql: String,
-    pub wire: String,
-    pub replication: String,
+    pub graphql_addr: String,
+    pub wire_addr: String,
+    pub replication_addr: String,
     /// GraphQL HTTP request body cap in bytes.
     pub max_body_bytes: usize,
+    /// Fork-instance registry tuning (GraphQL plane).
+    pub registry: RegistryConfig,
+    /// Wire plane limits.
+    pub wire: WireConfig,
+    /// Replication plane limits.
+    pub replication: ReplServerConfig,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
-            graphql: "127.0.0.1:8317".into(),
-            wire: "127.0.0.1:8427".into(),
-            replication: "127.0.0.1:8428".into(),
+            graphql_addr: "127.0.0.1:8317".into(),
+            wire_addr: "127.0.0.1:8427".into(),
+            replication_addr: "127.0.0.1:8428".into(),
             max_body_bytes: 32 << 20,
+            registry: RegistryConfig::default(),
+            wire: WireConfig::default(),
+            replication: ReplServerConfig::default(),
         }
     }
 }
@@ -128,17 +141,17 @@ impl Server {
             store_name: None,
             ..opts
         };
-        let registry = InstanceRegistry::new(mgr, root_dir, fork_opts, RegistryConfig::default());
+        let registry = InstanceRegistry::new(mgr, root_dir, fork_opts, cfg.registry.clone());
 
         let repl = match db.identity() {
-            Some(_) => Some(ReplServer::new(db.clone(), ReplServerConfig::default()).map_err(StartError::Engine)?),
+            Some(_) => Some(ReplServer::new(db.clone(), cfg.replication).map_err(StartError::Engine)?),
             None => None,
         };
 
-        let graphql_listener = bind("graphql", &cfg.graphql).await?;
-        let wire_listener = bind("wire", &cfg.wire).await?;
+        let graphql_listener = bind("graphql", &cfg.graphql_addr).await?;
+        let wire_listener = bind("wire", &cfg.wire_addr).await?;
         let repl_listener = match &repl {
-            Some(_) => Some(bind("replication", &cfg.replication).await?),
+            Some(_) => Some(bind("replication", &cfg.replication_addr).await?),
             None => None,
         };
         let local = |plane: &'static str, addr: &str, l: &TcpListener| {
@@ -148,10 +161,10 @@ impl Server {
                 err,
             })
         };
-        let graphql_addr = local("graphql", &cfg.graphql, &graphql_listener)?;
-        let wire_addr = local("wire", &cfg.wire, &wire_listener)?;
+        let graphql_addr = local("graphql", &cfg.graphql_addr, &graphql_listener)?;
+        let wire_addr = local("wire", &cfg.wire_addr, &wire_listener)?;
         let replication_addr = match &repl_listener {
-            Some(l) => Some(local("replication", &cfg.replication, l)?),
+            Some(l) => Some(local("replication", &cfg.replication_addr, l)?),
             None => None,
         };
 
@@ -183,7 +196,7 @@ impl Server {
             }
         }));
 
-        let wire = WireServer::new(db.clone(), WireConfig::default());
+        let wire = WireServer::new(db.clone(), cfg.wire);
         accept_tasks.push(tokio::spawn(async move {
             if let Err(e) = wire.serve(wire_listener).await {
                 eprintln!("fluent-server: wire plane failed: {e}");
