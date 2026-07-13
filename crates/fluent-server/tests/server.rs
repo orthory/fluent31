@@ -244,3 +244,62 @@ memtable-size = 4194304
     child.kill().unwrap();
     child.wait().unwrap();
 }
+
+/// Echo module (query + execute) for the wasm-disabled test.
+const ECHO_WAT: &str = r#"
+(module
+  (import "fluent" "input_len" (func $input_len (result i32)))
+  (import "fluent" "input_read" (func $input_read (param i32 i32 i32) (result i32)))
+  (import "fluent" "output_write" (func $output_write (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "query") (export "execute") (result i32)
+    (local $n i32)
+    (local.set $n (call $input_len))
+    (drop (call $input_read (i32.const 0) (local.get $n) (i32.const 0)))
+    (drop (call $output_write (i32.const 0) (local.get $n)))
+    (i32.const 0)))
+"#;
+
+/// A server with `Options::wasm_enabled = false` boots fine on a store
+/// that has modules installed: the KV planes are unaffected, the module
+/// stays listed (inert), and wasm invocations answer with an error
+/// instead of running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wasm_disabled_server_serves_inert_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = Options {
+        sync: SyncMode::Never,
+        ..Options::default()
+    };
+    {
+        let db = Db::open(dir.path(), opts.clone()).unwrap();
+        db.install_module("echo", ECHO_WAT.as_bytes()).unwrap();
+    }
+    let opts = Options {
+        wasm_enabled: false,
+        ..opts
+    };
+    let db = Arc::new(Db::open(dir.path(), opts.clone()).unwrap());
+    let server = Server::start(db, dir.path(), opts, ephemeral_cfg())
+        .await
+        .unwrap();
+
+    // KV planes unaffected
+    let wc = WireClient::connect(&server.wire_addr.to_string()).await.unwrap();
+    wc.put(b"k", b"v").await.unwrap();
+    assert_eq!(wc.get(b"k").await.unwrap().unwrap(), b"v");
+
+    // the installed module stays visible (inert)...
+    let resp = graphql_post(server.graphql_addr, r#"{"query":"{ modules { name } }"}"#).await;
+    assert!(resp.contains(r#""name":"echo""#), "{resp}");
+
+    // ...but invoking it answers with the disabled error
+    let resp = graphql_post(
+        server.graphql_addr,
+        r#"{"query":"{ wasm(module: \"echo\", input: {text: \"x\"}) { hex } }"}"#,
+    )
+    .await;
+    assert!(resp.contains("disabled"), "{resp}");
+
+    server.shutdown().await;
+}

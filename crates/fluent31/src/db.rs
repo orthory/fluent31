@@ -703,7 +703,7 @@ impl DbInner {
     #[inline]
     fn capture_events(&self, ops: &[BatchOp], base: SeqNo, capture: bool) -> Vec<BatchOp> {
         #[cfg(feature = "wasm")]
-        if capture {
+        if capture && self.opts.wasm_enabled {
             return self.triggers.capture_ops(ops, base, &self.opts);
         }
         let _ = (ops, base, capture);
@@ -1281,7 +1281,7 @@ impl Db {
             );
         }
         #[cfg(feature = "wasm")]
-        {
+        if inner.opts.wasm_enabled {
             let i = inner.clone();
             threads.push(
                 std::thread::Builder::new()
@@ -1454,13 +1454,27 @@ impl Db {
 
     // -------------------------------------------------------------- wasm
 
+    /// Refuse module/trigger work when the layer is disabled at runtime
+    /// (`Options::wasm_enabled = false`). Listing (`list_modules`,
+    /// `list_triggers`) stays open — inert state remains visible.
+    #[cfg(feature = "wasm")]
+    fn wasm_gate(&self) -> Result<()> {
+        if self.inner.opts.wasm_enabled {
+            Ok(())
+        } else {
+            Err(Error::Wasm("wasm layer is disabled (Options::wasm_enabled = false)".into()))
+        }
+    }
+
     #[cfg(feature = "wasm")]
     pub fn install_module(&self, name: &str, wasm: &[u8]) -> Result<()> {
+        self.wasm_gate()?;
         crate::wasm::install_module(&self.inner, name, wasm)
     }
 
     #[cfg(feature = "wasm")]
     pub fn uninstall_module(&self, name: &str) -> Result<()> {
+        self.wasm_gate()?;
         crate::wasm::uninstall_module(&self.inner, name)
     }
 
@@ -1473,11 +1487,13 @@ impl Db {
     /// state. Rejects modules that export no `query` entry point.
     #[cfg(feature = "wasm")]
     pub fn query(&self, name: &str, input: &[u8]) -> Result<Vec<u8>> {
+        self.wasm_gate()?;
         crate::wasm::query(&self.inner, name, input, None)
     }
 
     #[cfg(feature = "wasm")]
     pub fn query_at(&self, name: &str, input: &[u8], snap: &Snapshot) -> Result<Vec<u8>> {
+        self.wasm_gate()?;
         crate::wasm::query(&self.inner, name, input, Some(snap.seq))
     }
 
@@ -1486,6 +1502,7 @@ impl Db {
     /// that export no `execute` entry point.
     #[cfg(feature = "wasm")]
     pub fn execute(&self, name: &str, input: &[u8]) -> Result<Vec<u8>> {
+        self.wasm_gate()?;
         crate::wasm::execute(&self.inner, name, input)
     }
 
@@ -1494,6 +1511,7 @@ impl Db {
     /// it.
     #[cfg(feature = "wasm")]
     pub fn module_entries(&self, name: &str) -> Result<Vec<String>> {
+        self.wasm_gate()?;
         crate::wasm::module_entries(&self.inner, name)
     }
 
@@ -1501,6 +1519,7 @@ impl Db {
     /// not (yet) installed.
     #[cfg(feature = "wasm")]
     pub fn wasm_entries(&self, wasm: &[u8]) -> Result<Vec<String>> {
+        self.wasm_gate()?;
         crate::wasm::wasm_entries(&self.inner, wasm)
     }
 
@@ -1509,6 +1528,7 @@ impl Db {
     /// not export `describe`.
     #[cfg(feature = "wasm")]
     pub fn describe_module(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        self.wasm_gate()?;
         crate::wasm::describe_module(&self.inner, name)
     }
 
@@ -1517,6 +1537,7 @@ impl Db {
     /// accepting an install.
     #[cfg(feature = "wasm")]
     pub fn describe_wasm(&self, wasm: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.wasm_gate()?;
         crate::wasm::describe_wasm(&self.inner, wasm)
     }
 
@@ -1540,12 +1561,14 @@ impl Db {
         lo: Option<&[u8]>,
         hi: Option<&[u8]>,
     ) -> Result<crate::trigger::TriggerMode> {
+        self.wasm_gate()?;
         crate::trigger::create_trigger(&self.inner, name, module, lo, hi)
     }
 
     /// Unregister a trigger and discard its pending events.
     #[cfg(feature = "wasm")]
     pub fn delete_trigger(&self, name: &str) -> Result<()> {
+        self.wasm_gate()?;
         crate::trigger::delete_trigger(&self.inner, name)
     }
 
@@ -2290,7 +2313,9 @@ fn open_inner_with(
     }
 
     // recovered state is fully readable from here: load persisted trigger
-    // definitions so capture is active before the first user write
+    // definitions so capture is active before the first user write (and,
+    // with the wasm layer disabled, so list_triggers still answers —
+    // capture and the runner are gated separately on wasm_enabled).
     #[cfg(feature = "wasm")]
     crate::trigger::load_registry(&inner)?;
 

@@ -32,6 +32,8 @@
 //!
 //! [engine]
 //! create-if-missing = true
+//! wasm-enabled = true           # false = inert WASM layer: module/trigger
+//!                               # APIs refuse, no trigger capture/runs
 //! io-backend = "auto"           # auto | uring | std
 //! compression = "none"          # none | lz4
 //! memtable-size = 8388608
@@ -157,6 +159,10 @@ impl From<CompressionKey> for Compression {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct EngineSection {
     pub create_if_missing: Option<bool>,
+    /// Runtime kill-switch for the WASM layer (modules, typed GraphQL
+    /// fields, triggers). Writes made while disabled never fire triggers —
+    /// see `fluent31::Options::wasm_enabled`.
+    pub wasm_enabled: Option<bool>,
     pub io_backend: Option<IoBackendKey>,
     pub compression: Option<CompressionKey>,
     pub memtable_size: Option<usize>,
@@ -306,7 +312,7 @@ impl FileConfig {
             o.io_backend = e.io_backend.map_or(o.io_backend, IoBackend::from);
             o.compression = e.compression.map_or(o.compression, Compression::from);
             apply!(e => o, {
-                create_if_missing, memtable_size, max_immutable_memtables,
+                create_if_missing, wasm_enabled, memtable_size, max_immutable_memtables,
                 block_size, bloom_bits_per_key, block_cache_size,
                 l0_compaction_trigger, tier_width, max_levels,
                 l0_stall_trigger, target_file_size, value_threshold,
@@ -430,6 +436,7 @@ mod tests {
             store-name = "prod"
             [engine]
             io-backend = "std"
+            wasm-enabled = false
             memtable-size = 65536
             execute-retries = 9
             "#,
@@ -437,6 +444,7 @@ mod tests {
         .unwrap();
         let o = cfg.engine_options(SyncMode::Never);
         assert_eq!(o.io_backend, IoBackend::Std);
+        assert!(!o.wasm_enabled);
         assert_eq!(o.memtable_size, 65536);
         assert_eq!(o.execute_retries, 9);
         assert_eq!(o.store_name.as_deref(), Some("prod"));

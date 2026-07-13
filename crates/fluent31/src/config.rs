@@ -48,6 +48,19 @@ pub struct Options {
     pub sync: SyncMode,
     pub io_backend: IoBackend,
 
+    /// Runtime kill-switch for the WASM layer — the `Options` mirror of
+    /// building without the `wasm` cargo feature. When `false`: module and
+    /// trigger invocation/admin APIs refuse with [`crate::Error::Wasm`],
+    /// the trigger runner does not start, and committed writes do not
+    /// capture trigger events — writes made while disabled never fire
+    /// triggers, exactly as under a no-WASM build (keys-mode triggers
+    /// reconcile on the next touch after re-enabling; changes-mode feeds
+    /// miss the window). Installed modules, trigger definitions, and
+    /// already-pending events stay inert on disk; `list_modules` /
+    /// `list_triggers` still answer. No effect on builds without the
+    /// `wasm` feature (the layer is already compiled out).
+    pub wasm_enabled: bool,
+
     /// Operator-chosen, fleet-unique store name. Fixes the deterministic
     /// store identity (see `identity.rs`): used at creation to mint it, on
     /// reopen it must match the persisted name, and an existing unnamed
@@ -137,6 +150,7 @@ impl Default for Options {
             create_if_missing: true,
             sync: SyncMode::Always,
             io_backend: IoBackend::Auto,
+            wasm_enabled: true,
             store_name: None,
             memtable_size: 8 << 20,
             max_immutable_memtables: 2,
