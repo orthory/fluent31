@@ -38,6 +38,11 @@ An embedded key-value database engine in Rust:
   database is rebuilt from zero (`journal::rebuild`) for the day a disk block
   goes bad or the directory is lost. It never sits on the commit path — the DB
   stays the fast source of truth and the journal trails it.
+- **Server mode** — `fluent-server` serves one store over every network
+  plane in one process: GraphQL (typed/admin plane, where installed WASM
+  modules surface as their own query/mutation fields), the binary wire
+  pipe (data plane), and a replication join point where full replicas and
+  key-range edge caches attach.
 
 See [DESIGN.md](DESIGN.md) for the full architecture.
 
@@ -117,6 +122,10 @@ let out = db.query("agg", b"metric/")?;          // read-only, snapshot-bound
 let out = db.execute("transfer", &input)?;        // transactional, auto-retried
 ```
 
+The same modules surface over the server: a module that describes its
+interface becomes its own typed GraphQL query or mutation field the
+moment it's installed (see [Server mode](#server-mode)).
+
 Executors run inside a transaction: guest exit `0` commits, anything else
 aborts; commit conflicts re-run the module against a fresh snapshot
 automatically. Guests are sandboxed hard: fuel-metered, memory-capped,
@@ -187,17 +196,62 @@ Every command prints its wall-clock latency. `begin/tput/commit` drive
 transactions, `install/query/exec` drive WASM, `mktrig/deltrig/triggers`
 manage write-range triggers, `gc` runs value-log GC.
 
-## The GraphQL server
+## Server mode
+
+The engine embeds, but it also serves. `fluent-server` is the formal
+server mode: one process, one `Db`, all three network planes —
 
 ```sh
+cargo run -p fluent-server -- ./data --store-name prod
+# graphql      http://127.0.0.1:8317/graphql   typed/admin plane, GraphiQL at /
+# wire         tcp 127.0.0.1:8427              binary data-plane pipe (WIRE.md)
+# replication  tcp 127.0.0.1:8428              join point (REPLICATION.md)
+```
+
+The store directory is flocked — the planes cannot be split across
+processes, so server mode is how they share one database handle. From the
+replication join point, two kinds of node attach (via `fluent-replication
+edge`): a **full replica** (unbounded scope) or an **edge cache** holding
+only a key-range slice. Replication anchors provenance on the
+deterministic store identity, so the join point opens only on a named
+store: pass `--store-name` once — the name persists — and it opens on
+every later start; without a name, graphql + wire still serve and the
+join point stays closed. `--graphql/--wire/--replication` rebind the
+ports, `--sync` picks the durability mode.
+
+Settings can live in a TOML file instead — `fluent-server --config
+server.toml` — with every key mirroring its flag; an explicit flag
+overrides the file, and unknown keys are an error:
+
+```toml
+dir = "./data"
+store-name = "prod"
+sync = "periodic:50"          # always | never | periodic:<ms>
+graphql = "127.0.0.1:8317"
+wire = "127.0.0.1:8427"
+replication = "127.0.0.1:8428"
+max-body-bytes = 33554432
+```
+
+When you want exactly one surface, each plane also runs standalone
+(`fluent-graphql`, `fluent-wire`, `fluent-replication master`) with the
+same defaults — those binaries are documented in the sections below.
+
+## The GraphQL plane
+
+```sh
+cargo run -p fluent-server -- ./data             # or standalone, one plane only:
 cargo run -p fluent-graphql -- ./data            # http://127.0.0.1:8317/graphql, GraphiQL at /
 cargo run -p fluent-graphql -- ./data --sync periodic:50   # memory-speed acks, <=50ms loss window
 cargo run -p fluent-graphql -- --print-schema    # dump the SDL
 ```
 
-One schema covers both the direct operations and the registered WASM
-programs. Every field of a single GraphQL query operation executes at one
-pinned MVCC snapshot, so multi-field reads are mutually consistent.
+One schema covers the direct operations **and every installed WASM
+module**: a module that declares its interface becomes its own typed root
+field on `Query` or `Mutation` the moment it's installed (next section) —
+the schema is dynamic, not fixed. Every field of a single GraphQL query
+operation executes at one pinned MVCC snapshot, so multi-field reads are
+mutually consistent.
 
 The server routes by instance: the primary database answers at
 `/graphql`, and every fork answers at `/graphql/<instanceId>` with the
@@ -217,14 +271,16 @@ query {
     hasMore
     nextAfter { base64 }        # pass back as `after` to paginate
   }
-  wasm(module: "agg", input: {text: "user/"}) { hex }   # read-only WASM query
+  topCustomers(limit: 3) { customer totalCents }   # an installed module's own typed field
+  wasm(module: "agg", input: {text: "user/"}) { hex }   # generic fallback: raw bytes in/out
 }
 
 mutation {
   put(key: {text: "user/3"}, value: {text: "carol"})
   writeBatch(ops: [{put: {key: {text: "a"}, value: {text: "1"}}},
                    {delete: {text: "b"}}])                # atomic
-  wasmExecute(module: "transfer", input: {base64: "..."}) { base64 }  # transactional
+  placeOrder(customer: "acme", amountCents: "4200") { id }  # typed executor module
+  wasmExecute(module: "transfer", input: {base64: "..."}) { base64 }  # generic fallback
   installModule(name: "agg", wasm: {base64: "..."}) { name size }
   createTrigger(name: "idx", module: "customer_index",
                 lo: {text: "orders/"}, hi: {text: "orders0"})
@@ -241,19 +297,24 @@ GraphQL's 32-bit `Int` or JS double precision. Engine failures map to
 `extensions.code` (`CONFLICT`, `INVALID_ARGUMENT`, `GUEST_FAILED` with the
 guest's exit code and output, ...).
 
-### Typed WASM root fields
+### Every module can be its own query or mutation
 
-A module that exports `describe` (emitting a JSON schema descriptor — see
+Installing a WASM module doesn't just make it callable through the generic
+`wasm`/`wasmExecute` byte pipes — a module that exports `describe`
+(emitting a JSON schema descriptor — see
 `crates/fluent-graphql/src/descriptor.rs`) becomes its **own typed root
-field**: `kind: "query"` modules land on `Query`, `kind: "execute"` on
-`Mutation`. The GraphQL schema is rebuilt and hot-swapped on every
-`installModule`/`uninstallModule`, and at server startup for already-installed
-modules. Described modules must use a valid GraphQL field name and may not
-shadow built-in fields or redeclare reserved/claimed type names — enforced at
-install time. Modules without `describe` stay reachable through the generic
-`wasm`/`wasmExecute` fields. `mutation { reloadSchema }` re-describes
-everything — the resync path after installing modules through the CLI (or
-after a failed post-install rebuild).
+field**, dynamically: `kind: "query"` modules land on `Query`, `kind:
+"execute"` on `Mutation`, named after the module, with declared arguments
+and a declared output type. The GraphQL schema is rebuilt and hot-swapped
+on every `installModule`/`uninstallModule`, and at server startup for
+already-installed modules — install `placeOrder`, and `mutation {
+placeOrder(...) }` exists; uninstall it, and it's gone. Described modules
+must use a valid GraphQL field name and may not shadow built-in fields or
+redeclare reserved/claimed type names — enforced at install time. Modules
+without `describe` stay reachable through the generic `wasm`/`wasmExecute`
+fields. `mutation { reloadSchema }` re-describes everything — the resync
+path after installing modules through the CLI (or after a failed
+post-install rebuild).
 
 The full authoring manual and ABI spec live in [`WASM.md`](WASM.md).
 In a Rust guest this is one macro next to the entry-point function:
@@ -292,11 +353,12 @@ mutation { placeOrder(customer: "you", amountCents: "4200") { id customerTotalCe
 query    { topCustomers(limit: 3) { customer orders totalCents avgCents } }
 ```
 
-## The wire protocol
+## The wire pipe
 
 For the data-plane heat lane — raw bytes, request/response correlation by
 id, out-of-order completion on one connection (a slow `EXEC` never blocks
-the `GET`s pipelined behind it):
+the `GET`s pipelined behind it). `fluent-server` opens it alongside
+GraphQL; standalone:
 
 ```sh
 cargo run -p fluent-wire -- ./data --sync periodic:50    # tcp 127.0.0.1:8427
@@ -305,17 +367,22 @@ cargo run -p fluent-wire -- ./data --sync periodic:50    # tcp 127.0.0.1:8427
 Spec in [`WIRE.md`](WIRE.md); reference client `fluent_wire::WireClient`.
 GraphQL stays the general/typed/admin plane.
 
-## Edge replication
+## Replicas and edge caches
 
-Small ephemeral read replicas that hold only a key-range slice of one
-master: the overlapping index fragments copied locally, values fetched
-lazily and cached, committed writes streamed in. Provenance is anchored
-on a deterministic store identity — a restored/forked master re-mints
-its instance id and every edge invalidates wholesale instead of serving
-a divergent history.
+Read replicas that attach to a running server's replication join point
+(`fluent-server`'s `:8428`, or the standalone master below) and hold a
+key-range slice of it — `[lo, hi)` unbounded for a full replica, narrow
+for an edge cache: the overlapping index fragments copied locally, values
+fetched lazily and cached, committed writes streamed in. Provenance is
+anchored on a deterministic store identity — a restored/forked master
+re-mints its instance id and every edge invalidates wholesale instead of
+serving a divergent history.
 
 ```sh
+cargo run -p fluent-server -- ./data --store-name prod                    # join point on :8428
+# or serve only the replication plane:
 cargo run -p fluent-replication -- master ./data --store-name prod       # tcp 127.0.0.1:8428
+
 cargo run -p fluent-replication -- edge --master 127.0.0.1:8428 \
     --dir /tmp/edge-cache --lo user/ --hi user0 --serve 127.0.0.1:8427   # wire-v1 reads
 ```
@@ -326,8 +393,9 @@ Spec in [`REPLICATION.md`](REPLICATION.md); identity model in
 ## Testing
 
 ```sh
-cargo test --workspace           # randomized model, group commit, wasm, graphql & replication e2e,
-                                 # plus durability: hard-crash recovery, corruption fuzz, journal rebuild
+cargo test --workspace           # randomized model, group commit, wasm, graphql, server-mode &
+                                 # replication e2e, plus durability: hard-crash recovery,
+                                 # corruption fuzz, journal rebuild
 cargo test -p fluent31 --features fault-injection   # fsync-failure / ENOSPC / read-fault paths
 cargo test --test backup_and_soak -- --ignored      # opt-in endurance soak
 ```
@@ -356,6 +424,7 @@ the WASM layer (no wasmtime).
 crates/fluent31           the engine (lib), incl. store identity + edge store
 crates/fluent-guest       guest-side SDK for WASM modules
 crates/fluent-cli         interactive shell
+crates/fluent-server      server mode: all three planes below in one process
 crates/fluent-graphql     GraphQL server (axum + async-graphql)
 crates/fluent-wire        binary wire-protocol server + reference client
 crates/fluent-replication edge replication channel: master server + replica driver

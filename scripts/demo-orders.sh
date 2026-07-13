@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Demo: install the typed placeOrder/topCustomers WASM pair and seed sample
-# orders through GraphQL. Run `cargo run -p fluent-graphql -- <dir>` first.
+# orders through GraphQL. Run `cargo run -p fluent-server -- <dir>` (or
+# `cargo run -p fluent-graphql -- <dir>` for the GraphQL plane alone) first.
 #
 #   scripts/demo-orders.sh [endpoint]     default http://127.0.0.1:8317/graphql
 set -euo pipefail
