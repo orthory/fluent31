@@ -11,7 +11,7 @@
 
 use fluent_guest::Fail;
 
-#[fluent_guest::main]
+#[fluent_guest::execute]
 fn transfer(input: Vec<u8>) -> Result<Vec<u8>, Fail> {
     let mut pos = 0usize;
     let mut take = |n: usize| -> Option<Vec<u8>> {

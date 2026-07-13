@@ -20,13 +20,14 @@ fn opts() -> Options {
 // WAT conformance
 // ---------------------------------------------------------------------------
 
+/// Dual-role (query + execute): a module may export both entries.
 const ECHO: &str = r#"
 (module
   (import "fluent" "input_len" (func $input_len (result i32)))
   (import "fluent" "input_read" (func $input_read (param i32 i32 i32) (result i32)))
   (import "fluent" "output_write" (func $output_write (param i32 i32) (result i32)))
   (memory (export "memory") 1)
-  (func (export "run") (result i32)
+  (func (export "query") (export "execute") (result i32)
     (local $n i32)
     (local.set $n (call $input_len))
     (drop (call $input_read (i32.const 0) (local.get $n) (i32.const 0)))
@@ -42,20 +43,21 @@ const PUT_INPUT: &str = r#"
   (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 1024) "wk")
-  (func (export "run") (result i32)
+  (func (export "execute") (result i32)
     (local $n i32)
     (local.set $n (call $input_len))
     (drop (call $input_read (i32.const 0) (local.get $n) (i32.const 0)))
     (call $put (i32.const 1024) (i32.const 2) (i32.const 0) (local.get $n))))
 "#;
 
-/// Tries to put from a read-only query; returns the errno as exit code.
+/// Tries to put from either entry; returns the errno as exit code —
+/// dual-role so the EROFS wall can be probed through the query path.
 const PUT_ALWAYS: &str = r#"
 (module
   (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "k")
-  (func (export "run") (result i32)
+  (func (export "query") (export "execute") (result i32)
     (call $put (i32.const 0) (i32.const 1) (i32.const 0) (i32.const 1))))
 "#;
 
@@ -65,14 +67,14 @@ const PUT_RESERVED: &str = r#"
   (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "\00wasm\00agg")
-  (func (export "run") (result i32)
+  (func (export "execute") (result i32)
     (call $put (i32.const 0) (i32.const 9) (i32.const 0) (i32.const 4))))
 "#;
 
 const INFINITE_LOOP: &str = r#"
 (module
   (memory (export "memory") 1)
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (loop $l (br $l))
     (i32.const 0)))
 "#;
@@ -84,7 +86,7 @@ const GET_ECHO: &str = r#"
   (import "fluent" "output_write" (func $output_write (param i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "gk")
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (local $r i64)
     (local.set $r (call $get (i32.const 0) (i32.const 2) (i32.const 0) (i32.const 128) (i32.const 4096)))
     (if (i64.lt_s (local.get $r) (i64.const 0)) (then (return (i32.const 1))))
@@ -97,7 +99,7 @@ const OOB_READ: &str = r#"
 (module
   (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
-  (func (export "run") (result i32)
+  (func (export "execute") (result i32)
     (call $put (i32.const 0) (i32.const -1) (i32.const 0) (i32.const 1))))
 "#;
 
@@ -109,7 +111,7 @@ fn version_module(tag: &str) -> String {
   (import "fluent" "output_write" (func $output_write (param i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "{tag}")
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (drop (call $output_write (i32.const 0) (i32.const 2)))
     (i32.const 0)))
 "#
@@ -123,9 +125,37 @@ fn wat_echo_query() {
     db.install_module("echo", ECHO.as_bytes()).unwrap();
     let out = db.query("echo", b"hello wasm").unwrap();
     assert_eq!(out, b"hello wasm");
-    // executors can run read-only modules too
+    // a dual-role module (both entries exported) accepts both paths
     let out = db.execute("echo", b"exec path").unwrap();
     assert_eq!(out, b"exec path");
+}
+
+/// The export IS the role: an invocation path without its matching entry
+/// point is rejected up front, not at the first EROFS write.
+#[test]
+fn role_entries_are_enforced() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), opts()).unwrap();
+    db.install_module("reader", GET_ECHO.as_bytes()).unwrap();
+    db.install_module("writer", PUT_INPUT.as_bytes()).unwrap();
+    match db.execute("reader", b"") {
+        Err(Error::InvalidArgument(msg)) => {
+            assert!(msg.contains("`execute`"), "names the missing entry: {msg}")
+        }
+        other => panic!("expected InvalidArgument, got {other:?}"),
+    }
+    match db.query("writer", b"") {
+        Err(Error::InvalidArgument(msg)) => {
+            assert!(msg.contains("`query`"), "names the missing entry: {msg}")
+        }
+        other => panic!("expected InvalidArgument, got {other:?}"),
+    }
+    assert_eq!(db.module_entries("reader").unwrap(), ["query"]);
+    assert_eq!(db.module_entries("writer").unwrap(), ["execute"]);
+    assert_eq!(
+        db.wasm_entries(ECHO.as_bytes()).unwrap(),
+        ["query", "execute"]
+    );
 }
 
 #[test]
@@ -250,12 +280,23 @@ fn install_rejects_garbage_and_bad_exports() {
         db.install_module("bad", b"not wasm at all"),
         Err(Error::Wasm(_))
     ));
-    // valid wasm but no run/memory exports
+    // valid wasm but no entry/memory exports
     let no_exports = "(module)";
     assert!(matches!(
         db.install_module("bad", no_exports.as_bytes()),
         Err(Error::Wasm(_))
     ));
+    // a fluentabi v1 module (single `run` entry) is rejected with a hint
+    // pointing at the role split
+    let legacy = r#"(module
+      (memory (export "memory") 1)
+      (func (export "run") (result i32) (i32.const 0)))"#;
+    match db.install_module("legacy", legacy.as_bytes()) {
+        Err(Error::Wasm(msg)) => {
+            assert!(msg.contains("fluentabi v2"), "hints at the rename: {msg}")
+        }
+        other => panic!("expected Wasm error, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -12,10 +12,10 @@
 //!   index:    idx/customer/<name>/<id>    "" — scan a customer's orders
 //!   backptr:  idx/order/<id>              customer currently indexed
 //!
-//! The keys-mode trigger contract this demonstrates:
-//! - input is `trigger_keys()`: the touched keys, nothing else. An event
-//!   means "reconcile this key", so the module reads CURRENT state and
-//!   converges — replays and coalesced re-touches are harmless.
+//! The keys-mode (`on_touch`) trigger contract this demonstrates:
+//! - input is the touched keys, nothing else. An event means "reconcile
+//!   this key", so the module reads CURRENT state and converges — replays
+//!   and coalesced re-touches are harmless.
 //! - deletes/updates need the module's own back-pointer (`idx/order/<id>`)
 //!   to find the stale index entry: the event does not carry the old value.
 //!   (Contrast with `order_feed`, the changes-mode reference, whose events
@@ -25,10 +25,8 @@
 
 use fluent_guest::Fail;
 
-#[fluent_guest::main]
-fn customer_index(raw: Vec<u8>) -> Result<(), Fail> {
-    let keys = fluent_guest::parse_trigger_keys(&raw)
-        .ok_or(Fail::new(2, "input is not packed trigger keys"))?;
+#[fluent_guest::on_touch]
+fn customer_index(keys: Vec<Vec<u8>>) -> Result<(), Fail> {
     for key in keys {
         // record keys are orders/<8 digits>; skip anything else the range
         // catches (the orders/next counter)

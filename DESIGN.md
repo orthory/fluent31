@@ -246,15 +246,19 @@ dataset stay memory-resident, and compaction moves pointers, not payloads.
   (old pointers surface only when merges reach them); `stats` exposes
   pending-retired and discardable bytes.
 
-## 9. WASM execution layer ("fluentabi v1")
+## 9. WASM execution layer ("fluentabi v2")
 
 wasmtime, cranelift, fuel metering (default 1e9/invocation), memory cap
 via StoreLimits (64 MiB), NaN canonicalization, deterministic relaxed-SIMD,
 no WASI — the only imports are the `fluent` module. Compiled modules are
 LRU-cached by content hash (`wasm_module_cache` entries).
 
-- `install_module` compiles/validates first (must export `run() -> i32`
-  and `memory`), then stores bytes at `\x00wasm\x00<name>`.
+- `install_module` compiles/validates first (must export `memory` plus at
+  least one role entry point `query`/`execute`/`on_touch`/`on_apply`, each
+  `() -> i32`), then stores bytes at `\x00wasm\x00<name>`. The export IS
+  the role: `Db::query` requires `query`, `Db::execute` requires
+  `execute`, triggers bind `on_touch`/`on_apply` — a role misuse is
+  rejected at the boundary, before execution.
 - **Queries** run read-only against a registered snapshot (pinned for the
   whole invocation, so GC can't outrun a slow guest). `query_at`
   time-travels: module bytes AND data resolve at the given snapshot.
@@ -288,9 +292,10 @@ them. The reserved keyspace is invisible through the ABI: writes EINVAL,
 scans clamped to the user keyspace.
 
 Guest SDK: `fluent-guest` (safe wrappers, growable scan batches, chunked
-big-value reads, typed `#[fluent_guest::main]`/`#[fluent_guest::on_apply]`
-attribute entry points over `FromInput`/`IntoOutput`/`Fail`, with
-`fluent_main!`/`fluent_on_apply!` as the raw exit-code layer; the
+big-value reads, typed `#[fluent_guest::query]`/`#[execute]`/
+`#[on_touch]`/`#[on_apply]` attribute entry points over
+`FromInput`/`IntoOutput`/`Fail`, with `fluent_query!`/`fluent_execute!`/
+`fluent_on_touch!`/`fluent_on_apply!` as the raw exit-code layer; the
 attribute macros live in the dependency-free proc-macro crate
 `fluent-guest-macros`). Example guests in `guests/`:
 **agg** (prefix count/sum/min/max — the `SELECT agg WHERE prefix`
@@ -341,7 +346,7 @@ keys), so a busy range cannot starve its own feed.
 **Runner.** A dedicated thread (parked on a signal notified by capturing
 commits) discovers backlogged triggers by skip-seeking the queue prefix,
 then drains each in chunks of `trigger_batch`: it invokes the module as a
-normal executor — entry `run` with packed touched keys (keys mode) or
+normal executor — entry `on_touch` with packed touched keys (keys mode) or
 `on_apply` with the wire-framed change list (changes mode) — whose
 transaction is pre-seeded: marked *system* and carrying deletes of the
 consumed queue entries. The module's writes and the queue consumption

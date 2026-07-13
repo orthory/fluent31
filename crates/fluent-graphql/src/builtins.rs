@@ -562,7 +562,7 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
                 "Register a write-range trigger: whenever a committed write touches a \
                  key in [lo, hi) (omit either bound for an open end), the given WASM \
                  executor module is asynchronously invoked — with the coalesced \
-                 touched keys (module exports `run`), or with the ordered per-op \
+                 touched keys (module exports `on_touch`), or with the ordered per-op \
                  change feed when the module exports `on_apply` (changes mode). \
                  Events are durable and consumed exactly once; the module's \
                  writes never fire further triggers.",
@@ -766,6 +766,13 @@ async fn install_task(
             return Err(Error::new(format!(
                 "invalid module schema: type {t:?} is already declared by another module"
             )));
+        }
+        // the declared kind must be backed by the matching role entry point
+        let db = mgr.db.clone();
+        let probe = wasm.clone();
+        let entries = mgr.blocking_write(move || db.wasm_entries(&probe)).await?;
+        if let Some(e) = crate::schema::kind_entry_mismatch(parsed.kind, &entries) {
+            return Err(Error::new(format!("invalid module schema: {e}")));
         }
         typed = true;
     }

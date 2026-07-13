@@ -1,5 +1,5 @@
-//! `placeOrder` — the demo *writer* executor, typed via fluentabi v1
-//! describe.
+//! `placeOrder` — the demo *writer* executor (an `execute`-entry module),
+//! typed via fluentabi describe.
 //!
 //! One transaction does three coordinated writes (the point of an executor
 //! over plain `put`): allocate a monotonically increasing order id from a
@@ -50,7 +50,7 @@ struct Input {
     note: Option<String>,
 }
 
-#[fluent_guest::main]
+#[fluent_guest::execute]
 fn place_order(raw: Vec<u8>) -> Result<String, Fail> {
     let input = serde_json::from_slice::<Input>(&raw)
         .map_err(|_| Fail::new(2, "input is not valid placeOrder JSON"))?;

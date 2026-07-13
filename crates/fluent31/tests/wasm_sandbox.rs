@@ -21,11 +21,11 @@ fn opts() -> Options {
     }
 }
 
-/// A do-nothing valid module: memory + `run` returning 0.
+/// A do-nothing valid module: memory + `query` returning 0.
 const NOOP: &str = r#"
 (module
   (memory (export "memory") 1)
-  (func (export "run") (result i32) (i32.const 0)))
+  (func (export "query") (result i32) (i32.const 0)))
 "#;
 
 // ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ const NOOP: &str = r#"
 const MEMORY_BOMB: &str = r#"
 (module
   (memory (export "memory") 1)
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (drop (memory.grow (i32.const 10000)))       ;; ask for ~640 MiB; capped
     (i32.store (i32.const 0x20000000) (i32.const 1)) ;; 512 MiB: OOB -> trap
     (i32.const 0)))
@@ -66,7 +66,7 @@ const OUTPUT_FLOOD: &str = r#"
 (module
   (import "fluent" "output_write" (func $ow (param i32 i32) (result i32)))
   (memory (export "memory") 1)
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (local $i i32)
     (loop $l
       (if (i32.ne (call $ow (i32.const 0) (i32.const 4096)) (i32.const 0))
@@ -97,7 +97,7 @@ const LOG_FLOOD: &str = r#"
 (module
   (import "fluent" "log" (func $log (param i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (local $i i32)
     (loop $l
       (if (i32.ne (call $log (i32.const 0) (i32.const 0) (i32.const 4096)) (i32.const 0))
@@ -126,7 +126,7 @@ const SCAN_LEAK: &str = r#"
   (import "fluent" "scan_open"
     (func $so (param i32 i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
-  (func (export "run") (result i32)
+  (func (export "query") (result i32)
     (local $i i32)
     (loop $l
       (if (i32.lt_s (call $so (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))
@@ -158,7 +158,7 @@ const WRITESET_FLOOD: &str = r#"
   (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "k")
-  (func (export "run") (result i32)
+  (func (export "execute") (result i32)
     (local $i i32)
     (loop $l
       (i32.store (i32.const 1) (local.get $i))   ;; counter into key[1..5]
@@ -202,7 +202,7 @@ fn garbage_and_truncated_modules_are_rejected_at_install() {
     ));
     // syntactically truncated WAT
     assert!(matches!(
-        db.install_module("t", b"(module (memory (export \"memory\") 1) (func (export \"run\""),
+        db.install_module("t", b"(module (memory (export \"memory\") 1) (func (export \"query\""),
         Err(Error::Wasm(_))
     ));
     // valid module but missing the required exports
@@ -214,14 +214,14 @@ fn garbage_and_truncated_modules_are_rejected_at_install() {
     assert!(db.list_modules().unwrap().is_empty());
 }
 
-/// Valid shape (run + memory) but imports a host function that does not exist.
+/// Valid shape (query + memory) but imports a host function that does not exist.
 /// Install compiles fine; the failure is deferred to instantiation and must be
 /// a clean Wasm error, not a panic.
 const BOGUS_IMPORT: &str = r#"
 (module
   (import "fluent" "does_not_exist" (func $x (result i32)))
   (memory (export "memory") 1)
-  (func (export "run") (result i32) (call $x)))
+  (func (export "query") (result i32) (call $x)))
 "#;
 
 /// Imports a real host function under the wrong signature.
@@ -229,7 +229,7 @@ const WRONG_SIG_IMPORT: &str = r#"
 (module
   (import "fluent" "input_len" (func $x (param i32 i32 i32 i32) (result i64)))
   (memory (export "memory") 1)
-  (func (export "run") (result i32) (i32.const 0)))
+  (func (export "query") (result i32) (i32.const 0)))
 "#;
 
 /// Imports from a module the linker doesn't provide at all.
@@ -237,7 +237,7 @@ const FOREIGN_IMPORT: &str = r#"
 (module
   (import "wasi_snapshot_preview1" "proc_exit" (func $x (param i32)))
   (memory (export "memory") 1)
-  (func (export "run") (result i32) (i32.const 0)))
+  (func (export "query") (result i32) (i32.const 0)))
 "#;
 
 #[test]
@@ -265,11 +265,11 @@ fn modules_with_bad_imports_fail_cleanly_at_invocation() {
 // describe abuse
 // ---------------------------------------------------------------------------
 
-/// `describe` traps; `run` is valid.
+/// `describe` traps; `query` is valid.
 const DESCRIBE_TRAPS: &str = r#"
 (module
   (memory (export "memory") 1)
-  (func (export "run") (result i32) (i32.const 0))
+  (func (export "query") (result i32) (i32.const 0))
   (func (export "describe") (result i32) (unreachable)))
 "#;
 
@@ -277,7 +277,7 @@ const DESCRIBE_TRAPS: &str = r#"
 const DESCRIBE_FAILS: &str = r#"
 (module
   (memory (export "memory") 1)
-  (func (export "run") (result i32) (i32.const 0))
+  (func (export "query") (result i32) (i32.const 0))
   (func (export "describe") (result i32) (i32.const 9)))
 "#;
 
@@ -308,7 +308,7 @@ const DELETE_RESERVED: &str = r#"
   (import "fluent" "delete" (func $del (param i32 i32) (result i32)))
   (memory (export "memory") 1)
   (data (i32.const 0) "\00wasm\00x")
-  (func (export "run") (result i32)
+  (func (export "execute") (result i32)
     (local $r i32)
     (local.set $r (call $del (i32.const 0) (i32.const 7)))
     (if (i32.lt_s (local.get $r) (i32.const 0))
@@ -353,9 +353,9 @@ fn store_integrity_survives_an_abuse_barrage() {
 
     // install every hostile module and hammer them
     let spin = r#"(module (memory (export "memory") 1)
-        (func (export "run") (result i32) (loop $l (br $l)) (i32.const 0)))"#;
+        (func (export "query") (result i32) (loop $l (br $l)) (i32.const 0)))"#;
     let trap = r#"(module (memory (export "memory") 1)
-        (func (export "run") (result i32) (unreachable)))"#;
+        (func (export "query") (export "execute") (result i32) (unreachable)))"#;
     db.install_module("spin", spin.as_bytes()).unwrap();
     db.install_module("trap", trap.as_bytes()).unwrap();
     db.install_module("bomb", MEMORY_BOMB.as_bytes()).unwrap();

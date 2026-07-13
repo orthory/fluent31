@@ -1,15 +1,21 @@
 //! In-database WASM execution — the SQL replacement.
 //!
 //! Modules are installed *into* the store (bytes live at
-//! `\x00wasm\x00<name>`, versioned and recovered like any key) and invoked
-//! two ways:
+//! `\x00wasm\x00<name>`, versioned and recovered like any key). A module
+//! declares its role(s) through which fluentabi v2 entry points it exports —
+//! the export IS the role, and each invocation path requires the matching
+//! entry:
 //!
-//! - **query**: read-only, bound to a registered snapshot; `put`/`delete`
-//!   return EROFS.
-//! - **executor**: runs inside a fresh optimistic transaction; guest exit 0
-//!   commits, anything else aborts. On commit conflict the WHOLE attempt is
-//!   discarded and re-run against a fresh snapshot (fresh Store, fresh Txn,
-//!   fresh fuel, fresh output) up to `execute_retries` times.
+//! - **`query`** (querier): read-only, bound to a registered snapshot;
+//!   `put`/`delete` return EROFS. Invoked by `Db::query`/`query_at`.
+//! - **`execute`** (executor): runs inside a fresh optimistic transaction;
+//!   guest exit 0 commits, anything else aborts. On commit conflict the
+//!   WHOLE attempt is discarded and re-run against a fresh snapshot (fresh
+//!   Store, fresh Txn, fresh fuel, fresh output) up to `execute_retries`
+//!   times. Invoked by `Db::execute`.
+//! - **`on_touch`** / **`on_apply`** (trigger consumers): executor-style
+//!   system transactions driven only by the trigger runner — keys mode and
+//!   changes mode respectively (see `trigger.rs`).
 //!
 //! Module bytes are resolved at the invocation's snapshot, so `query_at`
 //! time-travels code together with data, and each execute attempt sees a
@@ -109,6 +115,16 @@ impl WasmRuntime {
     }
 }
 
+/// The fluentabi v2 role entry points. A module exports the roles it
+/// serves: `query` (read-only querier), `execute` (transactional executor),
+/// `on_touch` (keys-mode trigger consumer), `on_apply` (changes-mode
+/// trigger consumer). `describe` is metadata, not a role.
+pub(crate) const ROLE_ENTRIES: [&str; 4] = ["query", "execute", "on_touch", "on_apply"];
+
+fn exports_func(module: &Module, name: &str) -> bool {
+    module.get_export(name).is_some_and(|e| e.func().is_some())
+}
+
 fn validate_module_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
@@ -131,18 +147,23 @@ pub(crate) fn install_module(db: &Arc<DbInner>, name: &str, wasm: &[u8]) -> Resu
     // shared cache fills at first invocation instead).
     let module = Module::new(&db.wasm.engine, wasm)
         .map_err(|e| Error::Wasm(format!("compile: {e}")))?;
-    let has_entry = ["run", "on_apply"]
-        .iter()
-        .any(|f| module.get_export(f).is_some_and(|e| e.func().is_some()));
+    let has_entry = ROLE_ENTRIES.iter().any(|f| exports_func(&module, f));
     let has_memory = module
         .get_export("memory")
         .is_some_and(|e| e.memory().is_some());
     if !has_entry || !has_memory {
-        return Err(Error::Wasm(
-            "module must export `memory` and `run: () -> i32` \
-             (or `on_apply` for a changes-mode trigger module)"
-                .into(),
-        ));
+        // point fluentabi v1 modules (whose single `run` served every role)
+        // at the rename instead of a generic rejection
+        let hint = if exports_func(&module, "run") {
+            " — fluentabi v2 split `run` by role: export `query` (read-only), \
+             `execute` (transactional), and/or `on_touch` (keys-mode trigger)"
+        } else {
+            ""
+        };
+        return Err(Error::Wasm(format!(
+            "module must export `memory` and at least one role entry point \
+             `query`/`execute`/`on_touch`/`on_apply`, each `() -> i32`{hint}"
+        )));
     }
     let mut b = WriteBatch::new();
     b.put(sys_wasm_key(name), wasm.to_vec());
@@ -267,8 +288,15 @@ pub(crate) fn query(
         }
     };
     let module = load_module_at(db, name, guard.seq)?;
+    // role check up front: misuse is a caller error at the boundary, not a
+    // mid-execution EROFS surprise
+    if !exports_func(&module, "query") {
+        return Err(Error::InvalidArgument(format!(
+            "module {name:?} has no `query` entry point — not invocable as a query"
+        )));
+    }
     let ctx = HostCtx::new(db.clone(), Access::ReadOnly(guard.seq), input.to_vec());
-    let (code, ctx) = run_instance(db, &module, ctx, "run")?;
+    let (code, ctx) = run_instance(db, &module, ctx, "query")?;
     if code != 0 {
         return Err(Error::GuestFailed {
             code,
@@ -279,14 +307,37 @@ pub(crate) fn query(
 }
 
 pub(crate) fn execute(db: &Arc<DbInner>, name: &str, input: &[u8]) -> Result<Vec<u8>> {
-    execute_impl(db, name, input, &[], false, "run")
+    execute_impl(db, name, input, &[], false, "execute")
 }
 
 /// Whether an installed module exports a function named `func` (probes the
 /// current module bytes; errors if no such module is installed).
 pub(crate) fn module_exports_func(db: &Arc<DbInner>, name: &str, func: &str) -> Result<bool> {
     let module = load_module_at(db, name, crate::types::MAX_SEQNO)?;
-    Ok(module.get_export(func).is_some_and(|e| e.func().is_some()))
+    Ok(exports_func(&module, func))
+}
+
+fn role_entries_of(module: &Module) -> Vec<String> {
+    ROLE_ENTRIES
+        .iter()
+        .filter(|f| exports_func(module, f))
+        .map(|f| f.to_string())
+        .collect()
+}
+
+/// The role entry points an installed module exports — its declared roles.
+pub(crate) fn module_entries(db: &Arc<DbInner>, name: &str) -> Result<Vec<String>> {
+    let module = load_module_at(db, name, crate::types::MAX_SEQNO)?;
+    Ok(role_entries_of(&module))
+}
+
+/// Role entry points of candidate (not installed) module bytes. Compiles
+/// uncached for the same reason as `describe_wasm`: rejected candidates
+/// must not evict installed modules' artifacts.
+pub(crate) fn wasm_entries(db: &Arc<DbInner>, wasm: &[u8]) -> Result<Vec<String>> {
+    let module = Module::new(&db.wasm.engine, wasm)
+        .map_err(|e| Error::Wasm(format!("compile: {e}")))?;
+    Ok(role_entries_of(&module))
 }
 
 /// Trigger-runner executor: the transaction is *system* (its commit fires
@@ -294,7 +345,7 @@ pub(crate) fn module_exports_func(db: &Arc<DbInner>, name: &str, func: &str) -> 
 /// atomically with whatever the module writes. Re-seeding per attempt is
 /// sound: the module reconciles against each attempt's fresh snapshot, and
 /// a queue entry re-written after that snapshot conflicts the commit.
-/// `entry` selects the export to run (`run` for keys-mode triggers,
+/// `entry` selects the export to run (`on_touch` for keys-mode triggers,
 /// `on_apply` for changes-mode).
 pub(crate) fn execute_system(
     db: &Arc<DbInner>,
@@ -328,6 +379,12 @@ fn execute_impl(
             txn.sys_delete(key.clone())?;
         }
         let module = load_module_at(db, name, txn.snapshot_seqno())?;
+        // role check per attempt (bytes resolve at each attempt's snapshot)
+        if !exports_func(&module, entry) {
+            return Err(Error::InvalidArgument(format!(
+                "module {name:?} has no `{entry}` entry point"
+            )));
+        }
         let ctx = HostCtx::new(db.clone(), Access::Txn(Some(txn)), input.to_vec());
         let (code, mut ctx) = run_instance(db, &module, ctx, entry)?;
         let txn = match ctx.access {
@@ -350,7 +407,8 @@ fn execute_impl(
 }
 
 /// Run a compiled module's optional `describe` export — same `() -> i32`
-/// ABI as `run`, read-only access at `seq`, empty input — and return its
+/// ABI as the role entries, read-only access at `seq`, empty input —
+/// and return its
 /// output bytes. `Ok(None)` when the module exports no `describe` function.
 fn describe_compiled(db: &Arc<DbInner>, module: &Module, seq: SeqNo) -> Result<Option<Vec<u8>>> {
     let has_describe = module
