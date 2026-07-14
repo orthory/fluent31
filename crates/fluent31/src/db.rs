@@ -1323,6 +1323,19 @@ impl Db {
         }
     }
 
+    /// Pin a read snapshot at an explicit committed seqno — the MVCC state
+    /// as of that commit. Refused when `seq` has not been committed yet or
+    /// when the GC watermark has already passed it (same retention rule as
+    /// `fork_at`). Live subscriptions use this to read at the exact commit
+    /// boundary an event belongs to (`StreamEntry::commit_seqno`).
+    pub fn snapshot_at(&self, seq: SeqNo) -> Result<Snapshot> {
+        self.inner.try_register_snapshot_at(seq)?;
+        Ok(Snapshot {
+            db: self.inner.clone(),
+            seq,
+        })
+    }
+
     /// The current visible sequence number — the address of the latest
     /// committed state. Capture it to cut deterministic forks of one
     /// version (`fork_at(name, seqno)` for the same seqno yields the same
@@ -2445,6 +2458,7 @@ fn group_byte_cap(first_bytes: usize) -> usize {
 struct RawEntry {
     key: Vec<u8>,
     seqno: SeqNo,
+    commit_seqno: SeqNo,
     kind: ValueKind,
     repr: Vec<u8>,
 }
@@ -2473,6 +2487,10 @@ impl SubShared {
 
     /// Called under `write_mu`, right after the batch became visible.
     fn offer(&self, base: SeqNo, entries: &[EncEntry]) {
+        // the batch is one atomic commit: its last seqno is the visible
+        // seqno this commit published — the only seqno at which readers
+        // ever observe the commit (MVCC never exposes mid-batch states)
+        let commit_seqno = base + entries.len().saturating_sub(1) as u64;
         let mut pushed = false;
         let mut q = self.queue.lock();
         for (i, e) in entries.iter().enumerate() {
@@ -2483,6 +2501,7 @@ impl SubShared {
             q.entries.push_back(RawEntry {
                 key: e.key.clone(),
                 seqno: base + i as u64,
+                commit_seqno,
                 kind: e.kind,
                 repr: e.repr.clone(),
             });
@@ -2525,6 +2544,12 @@ impl DbInner {
 pub struct StreamEntry {
     pub key: Vec<u8>,
     pub seqno: SeqNo,
+    /// The last seqno of the atomic commit this op belonged to — the
+    /// visible seqno that commit published. Seqnos are contiguous across
+    /// commits, so commit boundaries cannot be recovered from `seqno`
+    /// alone; a snapshot at `commit_seqno` is the exact (and only
+    /// transactionally-consistent) state in which this op became visible.
+    pub commit_seqno: SeqNo,
     pub kind: ValueKind,
     pub value: Option<Vec<u8>>,
 }
@@ -2602,6 +2627,7 @@ impl Subscription {
             out.push(StreamEntry {
                 key: r.key,
                 seqno: r.seqno,
+                commit_seqno: r.commit_seqno,
                 kind: r.kind,
                 value,
             });

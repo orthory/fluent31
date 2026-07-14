@@ -11,7 +11,7 @@ use bytes::BytesMut;
 use fluent31::{SliceManifest, SliceRun, SliceTable, StreamEntry, ValueKind};
 pub use fluent_wire::proto::{put_blob, request, response, Rd, FRAME_OVERHEAD, HEADER_LEN};
 
-pub const REPL_VERSION: u32 = 1;
+pub const REPL_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------- opcodes
 
@@ -134,14 +134,16 @@ pub fn decode_slice(payload: &[u8]) -> Result<SliceManifest, String> {
     })
 }
 
-/// Stream batch: `[u32 count]` then per entry `[u8 kind][u64 seqno][blob
-/// key]` plus `[blob value]` for puts (deletes carry no value).
+/// Stream batch: `[u32 count]` then per entry `[u8 kind][u64 seqno]
+/// [u64 commit_seqno][blob key]` plus `[blob value]` for puts (deletes
+/// carry no value).
 pub fn encode_stream_batch(entries: &[StreamEntry]) -> Vec<u8> {
     let mut out = BytesMut::new();
     out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for e in entries {
         out.extend_from_slice(&[e.kind as u8]);
         out.extend_from_slice(&e.seqno.to_le_bytes());
+        out.extend_from_slice(&e.commit_seqno.to_le_bytes());
         put_blob(&mut out, &e.key);
         if e.kind == ValueKind::Put {
             put_blob(&mut out, e.value.as_deref().unwrap_or_default());
@@ -161,6 +163,7 @@ pub fn decode_stream_batch(payload: &[u8]) -> Result<Vec<StreamEntry>, String> {
             k => return Err(format!("bad stream entry kind {k}")),
         };
         let seqno = rd.u64()?;
+        let commit_seqno = rd.u64()?;
         let key = rd.blob()?.to_vec();
         let value = match kind {
             ValueKind::Put => Some(rd.blob()?.to_vec()),
@@ -169,6 +172,7 @@ pub fn decode_stream_batch(payload: &[u8]) -> Result<Vec<StreamEntry>, String> {
         out.push(StreamEntry {
             key,
             seqno,
+            commit_seqno,
             kind,
             value,
         });

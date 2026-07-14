@@ -16,7 +16,7 @@ path = "src/main.rs"
 fluent31 = { path = "../fluent31" }
 async-graphql = "7"
 async-graphql-axum = "7"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tower-http = { version = "0.6", features = ["limit"] }
 base64 = "0.22"

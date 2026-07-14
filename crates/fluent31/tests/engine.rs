@@ -1407,6 +1407,63 @@ fn subscription_streams_in_range_writes() {
         .is_none());
 }
 
+/// Every streamed op carries the seqno its atomic commit published
+/// (`commit_seqno` = the batch tail), and `snapshot_at` pins exactly that
+/// boundary — the only transactionally-consistent state the commit ever
+/// exposed (never a torn mid-batch view).
+#[test]
+fn subscription_commit_boundaries_and_snapshot_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    let mut sub = db.subscribe(b"k", None).unwrap();
+    // consumer discipline (what fluent-graphql's forwarder does with its
+    // rolling hold): keep a pin at-or-below upcoming boundaries while
+    // consuming, or the subscription's own advancing pin lets the
+    // watermark pass them and snapshot_at refuses
+    let hold = db.snapshot();
+
+    let mut batch = fluent31::WriteBatch::new();
+    batch.put(b"k1".to_vec(), b"a".to_vec());
+    batch.put(b"k2".to_vec(), b"b".to_vec());
+    db.write(batch).unwrap();
+    db.put(b"k3".to_vec(), b"c".to_vec()).unwrap();
+
+    let mut got = Vec::new();
+    while got.len() < 3 {
+        got.extend(recv_batch(&mut sub));
+    }
+    // one commit → one shared boundary, at the commit's last seqno
+    assert_eq!(got[0].commit_seqno, got[1].commit_seqno);
+    assert_eq!(got[1].seqno, got[1].commit_seqno);
+    assert!(got[0].seqno < got[1].seqno);
+    // single-op commit → its own boundary
+    assert_eq!(got[2].seqno, got[2].commit_seqno);
+    assert!(got[2].commit_seqno > got[1].commit_seqno);
+
+    // snapshot_at the batch boundary: the WHOLE batch is visible (even for
+    // the batch's first op), the later commit is not
+    let snap = db.snapshot_at(got[0].commit_seqno).unwrap();
+    assert_eq!(db.get_at(b"k1", &snap).unwrap().as_deref(), Some(b"a".as_ref()));
+    assert_eq!(db.get_at(b"k2", &snap).unwrap().as_deref(), Some(b"b".as_ref()));
+    assert!(db.get_at(b"k3", &snap).unwrap().is_none());
+
+    // uncommitted seqnos are refused
+    assert!(matches!(
+        db.snapshot_at(u64::MAX / 2),
+        Err(Error::InvalidArgument(_))
+    ));
+
+    // without the hold, a consumed-past boundary is refused (the GC
+    // watermark passed it) — the failure mode the consumer discipline
+    // above exists to prevent
+    drop(hold);
+    drop(snap);
+    assert!(matches!(
+        db.snapshot_at(got[0].commit_seqno),
+        Err(Error::InvalidArgument(_))
+    ));
+}
+
 /// Streamed vlog pointers stay resolvable across GC: the subscription's
 /// advancing pin blocks victim deletion until entries are consumed.
 #[test]

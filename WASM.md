@@ -299,17 +299,18 @@ WAT text is also accepted by `installModule` (`wasm: {text: "(module ...)"}`)
 
 ## 5. Typed GraphQL surface — "fluentabi describe"
 
-A module that exports `describe` becomes **its own typed root field**:
-`kind: "query"` modules appear on `Query`, `kind: "execute"` on `Mutation`.
+A module that exports `describe` becomes **its own typed root field(s)**:
+`kind: "query"` modules appear on `Query`, `kind: "execute"` on `Mutation`,
+and a `feed` declaration (section 9) on `Subscription`.
 The GraphQL schema is rebuilt and hot-swapped on `installModule` /
 `uninstallModule`, at server startup for already-installed modules, and on
 demand via `mutation { reloadSchema }` (the resync path after installing
 through the CLI or engine API directly).
 
 `describe` runs read-only with EMPTY input and must write the descriptor
-JSON to its output and exit 0. The declared `kind` must be backed by the
+JSON to its output and exit 0. Every declaration must be backed by the
 matching role entry (`"query"` → a `query` export, `"execute"` →
-`execute`): a mismatch rejects the install. It should be static — just emit a constant
+`execute`, `feed` → `on_apply`): a mismatch rejects the install. It should be static — just emit a constant
 string (`fluent_describe!` does exactly this). Descriptor max size:
 **64 KiB**.
 
@@ -317,7 +318,7 @@ string (`fluent_describe!` does exactly this). Descriptor max size:
 
 ```json
 {
-  "kind": "query" | "execute",                     // REQUIRED
+  "kind": "query" | "execute",                     // optional*
   "description": "docs for the root field",        // optional
   "args": [                                        // optional (see below)
     {"name": "customer", "type": "String!", "description": "..."}
@@ -328,9 +329,15 @@ string (`fluent_describe!` does exactly this). Descriptor max size:
       {"name": "note", "type": "String", "description": "..."}
     ]}
   ],
-  "output": "PlacedOrder!"                         // REQUIRED
+  "output": "PlacedOrder!",                        // REQUIRED with kind
+  "feed": {"prefix": "feed/", "event": "PlacedOrder!"}  // optional* (section 9)
 }
 ```
+
+\* At least one of `kind` and `feed` must be present. `output` is required
+with `kind` and rejected without it; `args` likewise require `kind`
+(subscription fields take no arguments). A module may declare both — e.g.
+a dynamic index exposing a typed `query` field AND a live feed.
 
 **Type grammar.** Scalars: `String`, `Int` (32-bit, range-enforced),
 `Float`, `Boolean`, `U64` (64-bit unsigned; travels as a decimal string,
@@ -344,18 +351,21 @@ reference scalars only. `output` may reference a declared type.
 - module name must be a valid GraphQL name `[_A-Za-z][_0-9A-Za-z]*`, not
   starting with `__` (only relevant for described modules; undescribed
   ones keep the engine's looser `[A-Za-z0-9._-]` rule);
-- module name must not shadow a built-in root field (`get`, `scan`,
-  `wasm`, `modules`, `stats`, `forks`, `triggers`, `snapshotSeqno`,
+- module name must not shadow a built-in root field (`changes`, `get`,
+  `scan`, `wasm`, `modules`, `stats`, `forks`, `triggers`, `snapshotSeqno`,
   `put`, `delete`, `writeBatch`, `wasmExecute`, `installModule`,
   `uninstallModule`, `fork`, `deleteFork`, `createTrigger`,
   `deleteTrigger`, `flush`, `compactAll`, `gcVlog`, `reloadSchema`,
   `syncWal`);
 - declared type names must not be reserved (`Query`, `Mutation`,
   `Subscription`, `Bytes`, `BytesInput`, `U64`, `Json`, `Pair`,
-  `ScanPage`, `Module`, `Fork`, `Trigger`, `GcResult`, `LevelStats`, `Stats`,
+  `ScanPage`, `ChangeEvent`, `ChangeKind`, `Module`, `Fork`, `Trigger`,
+  `GcResult`, `LevelStats`, `Stats`,
   `WriteOp`, `PutOp`, `String`, `Int`, `Float`, `Boolean`, `ID`) and must
   not collide with a type another installed module already declares —
-  prefix yours (`PlacedOrder`, not `Order`... think `MyModX`);
+  prefix yours (`PlacedOrder`, not `Order`... think `MyModX`). A `feed`
+  module additionally claims the generated payload type `<Module>Event`
+  (module name, first letter uppercased) under the same rules;
 - limits: ≤ 32 types, ≤ 64 fields per type, ≤ 16 args.
 
 A module whose descriptor fails these rules *after* it is already on disk
@@ -416,7 +426,7 @@ declaration.
 | `guests/agg` | query (untyped) | raw-bytes input/output, chunked scan aggregation |
 | `guests/transfer` | execute (untyped) | OCC transfer with conflict retries |
 | `guests/customer_index` | touch consumer (keys-mode trigger) | trigger-maintained secondary index: typed `on_touch` keys input, reconcile-against-current-state, the back-pointer pattern for updates/deletes |
-| `guests/order_feed` | change consumer (changes-mode trigger) | ordered changefeed materialization: `#[fluent_guest::on_apply]`, per-op kinds/values/seqnos, in-code filtering, elided-value handling |
+| `guests/order_feed` | change consumer (changes-mode trigger) + feed | ordered changefeed materialization: `#[fluent_guest::on_apply]`, per-op kinds/values/seqnos, in-code filtering, elided-value handling — plus a `feed` descriptor making the changefeed live-subscribable (section 9) |
 | `guests/dynamic_index` | change consumer (changes-mode trigger) | DYNAMIC index generation: index specs stored as keys, scan-backfill on spec write, fold-style live maintenance, teardown on spec delete |
 | `guests/live_stats` | change consumer (changes-mode trigger) | always-fresh `GROUP BY` aggregates: exactly-once delta folding (updates move groups, deletes subtract) that provably never drifts |
 | `guests/cascade_delete` | change consumer (changes-mode trigger) | `ON DELETE CASCADE`: op-kind filtering, subtree sweep, the no-stacking rule doing the loop prevention |
@@ -573,3 +583,71 @@ per change:
 Registered triggers, their queues, and their backlogs are engine state
 (reserved keyspace): versioned, recovered, and checkpoint-archived like
 everything else.
+
+## 9. Live subscriptions over GraphQL
+
+The GraphQL server exposes the engine's post-commit change stream
+(`Db::subscribe`) as `Subscription` fields, over graphql-ws WebSocket on
+the same endpoints (`/graphql`, `/graphql/<instanceId>`; a plain GET stays
+GraphiQL). Two planes, one delivery pipeline:
+
+```graphql
+# raw: every committed op in a range — listen to everything, filter later
+subscription {
+  changes(lo: {text: "orders/"}, hi: {text: "orders0"}) {
+    kind seqno commitSeqno key { text } value { text }
+    query { ... }                    # see "exact boundaries" below
+  }
+}
+
+# typed: a module feed (a `feed` descriptor over an on_apply producer)
+subscription {
+  orderFeed {
+    kind seqno commitSeqno key { text }
+    event { seqno op id record }     # typed per the descriptor
+    query { get(key: {text: "orders/count"}) { text } }
+  }
+}
+```
+
+**The eventing idiom.** The keyspace is the bus: an `on_apply` module
+materializes its events durably under its feed prefix (section 8), and a
+subscription is just the live tail of that range. History/replay =
+`scan` the range; latest = `get`; live = subscribe. Nothing is delivered
+that didn't commit, and a crash loses no events — the feed is data.
+
+**Semantics (both planes):**
+
+- **Post-commit, seqno order.** One item per committed op in range,
+  `PUT`/`DELETE`, gap-free past the attach point. Feed planes deliver
+  puts only — deleting old feed entries (GC) is invisible to subscribers.
+- **`ATTACHED` first.** The stream opens with a boundary marker (no
+  key/value/event). Everything at-or-below its `seqno` is scannable
+  through the marker's `query`; everything above arrives on the stream —
+  gap-free attach with zero overlap, no client-side dedup needed.
+- **Exact boundaries.** Every item carries `query: Query!` — the full
+  Query root (get/scan/wasm/typed module queries) re-entered at a
+  snapshot pinned to the item's `commitSeqno`: the last seqno of the
+  atomic commit the op belonged to, i.e. the exact read highwater mark
+  that commit published. Ops of one commit (a writeBatch, one executor
+  transaction, one on_apply drain) share it, and each op's `query`
+  already sees the whole commit — never a torn mid-commit view, never
+  newer state. `snapshotSeqno` inside equals `commitSeqno`. Admin fields
+  (`stats`, `modules`, ...) stay current-state as everywhere.
+- **Typed events.** A feed item's `event` is the written value parsed as
+  JSON and validated against the descriptor's `event` type (exactly like
+  root-field output mapping); a value violating the declaration surfaces
+  as a field error. `event` is null on `ATTACHED`.
+- **Lag ends the stream, never stalls writers.** A consumer that falls
+  behind the engine-side buffer (`sub_queue_bytes`) is cut off: the
+  stream terminates with a "lagged" error. Re-subscribe and re-scan from
+  the new `ATTACHED` boundary. Holding items also holds their snapshots
+  (a GC pin) — consume promptly.
+- **Ephemeral by design.** A subscription is a tail, not a record: a
+  disconnected client missed nothing durable *if* the module materializes
+  its feed (the idiom above). Fork instances subscribe at their own
+  `/graphql/<instanceId>` endpoint.
+
+The raw `changes` plane needs no module at all. The typed plane needs
+only a `feed` descriptor — no new WASM entry point, no SDK change: the
+`on_apply` role from section 8 is already the producer.

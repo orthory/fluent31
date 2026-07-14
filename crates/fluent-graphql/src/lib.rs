@@ -30,12 +30,13 @@ mod modules;
 mod registry;
 mod router;
 mod schema;
+mod subscriptions;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use async_graphql::dynamic::Schema;
-use async_graphql::Request;
+use async_graphql::{futures_util, Request};
 use fluent31::{Db, Snapshot};
 use tokio::sync::Semaphore;
 
@@ -192,6 +193,45 @@ impl SchemaManager {
     pub async fn execute(&self, req: impl Into<Request>) -> async_graphql::Response {
         let req = req.into().data(SnapCell::default());
         self.schema().execute(req).await
+    }
+
+    /// Execute a subscription (or any operation) as a response stream, with
+    /// the same per-request data as [`SchemaManager::execute`]. Entry point
+    /// for the WebSocket path and stream-consuming tests.
+    pub fn execute_stream(
+        &self,
+        req: impl Into<Request>,
+    ) -> impl futures_util::Stream<Item = async_graphql::Response> + 'static {
+        self.schema()
+            .execute_stream(req.into().data(SnapCell::default()))
+    }
+}
+
+/// [`async_graphql::Executor`] over a manager: what the WebSocket transport
+/// executes against. Snapshots the hot-swappable schema per operation and
+/// injects the per-request data `SchemaManager::execute` would.
+#[derive(Clone)]
+pub(crate) struct ManagerExecutor(pub(crate) Arc<SchemaManager>);
+
+impl async_graphql::Executor for ManagerExecutor {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = async_graphql::Response> + Send {
+        let mgr = self.0.clone();
+        async move { mgr.execute(request).await }
+    }
+
+    fn execute_stream(
+        &self,
+        request: Request,
+        session_data: Option<Arc<async_graphql::Data>>,
+    ) -> futures_util::stream::BoxStream<'static, async_graphql::Response> {
+        async_graphql::Executor::execute_stream(
+            &self.0.schema(),
+            request.data(SnapCell::default()),
+            session_data,
+        )
     }
 }
 

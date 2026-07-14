@@ -1532,3 +1532,236 @@ async fn trigger_admin_errors_carry_engine_codes() {
     .await;
     assert_eq!(ext_code(&errs).as_deref(), Some("INVALID_ARGUMENT"));
 }
+
+// ---------------------------------------------------------------------------
+// subscriptions: the live plane
+// ---------------------------------------------------------------------------
+
+use async_graphql::futures_util::{Stream, StreamExt};
+
+/// A feed-producing trigger module: `on_apply` writes `feed_value` at
+/// `feed_key` (and exits 0), `describe` declares the feed.
+fn wat_feed(describe_json: &str, feed_key: &str, feed_value: &str) -> String {
+    let d_len = describe_json.len();
+    let k_off = d_len.next_multiple_of(4096);
+    let k_len = feed_key.len();
+    let v_off = k_off + k_len.next_multiple_of(4096);
+    let v_len = feed_value.len();
+    let d_esc = describe_json.replace('\\', "\\\\").replace('"', "\\\"");
+    let v_esc = feed_value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"
+(module
+  (import "fluent" "output_write" (func $ow (param i32 i32) (result i32)))
+  (import "fluent" "put" (func $put (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 4)
+  (data (i32.const 0) "{d_esc}")
+  (data (i32.const {k_off}) "{feed_key}")
+  (data (i32.const {v_off}) "{v_esc}")
+  (func (export "describe") (result i32)
+    (drop (call $ow (i32.const 0) (i32.const {d_len})))
+    (i32.const 0))
+  (func (export "on_apply") (result i32)
+    (drop (call $put (i32.const {k_off}) (i32.const {k_len}) (i32.const {v_off}) (i32.const {v_len})))
+    (i32.const 0)))
+"#
+    )
+}
+
+/// Next subscription item, unwrapped and error-checked.
+async fn next_data(stream: &mut (impl Stream<Item = async_graphql::Response> + Unpin)) -> Value {
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(15), stream.next())
+        .await
+        .expect("timed out waiting for a subscription item")
+        .expect("subscription stream ended unexpectedly");
+    assert!(
+        resp.errors.is_empty(),
+        "unexpected subscription errors: {:?}",
+        resp.errors
+    );
+    resp.data.into_json().unwrap()
+}
+
+/// The raw changes plane: ATTACHED boundary first, then every committed
+/// op in range — and each item's embedded `query` reads at the item's
+/// EXACT commit boundary (its commit's read highwater mark), even when the
+/// head has long moved on, with whole-commit (never torn) visibility.
+#[tokio::test]
+async fn changes_subscription_pins_queries_at_commit_boundaries() {
+    let (schema, _dir) = open_schema();
+    let sub = r#"subscription {
+        changes(lo: {text: "k/"}) {
+            kind seqno commitSeqno
+            key { text } value { text }
+            query {
+                snapshotSeqno
+                one: get(key: {text: "k/1"}) { text }
+                three: get(key: {text: "k/3"}) { text }
+            }
+        }
+    }"#;
+    let mut stream = Box::pin(schema.execute_stream(Request::new(sub)));
+
+    // first frame: the attach boundary — nothing written yet
+    let attach = next_data(&mut stream).await;
+    let a = &attach["changes"];
+    assert_eq!(a["kind"], "ATTACHED");
+    assert_eq!(a["key"], Value::Null);
+    assert_eq!(a["query"]["one"], Value::Null);
+    assert_eq!(u64_field(&a["seqno"]), u64_field(&a["query"]["snapshotSeqno"]));
+
+    // three commits BEFORE consuming anything: two single-op puts of the
+    // same key, then an atomic two-op batch
+    run(
+        &schema,
+        r#"mutation { put(key: {text: "k/1"}, value: {text: "a"}) }"#,
+        json!({}),
+    )
+    .await;
+    run(
+        &schema,
+        r#"mutation { put(key: {text: "k/1"}, value: {text: "b"}) }"#,
+        json!({}),
+    )
+    .await;
+    run(
+        &schema,
+        r#"mutation { writeBatch(ops: [
+            {put: {key: {text: "k/2"}, value: {text: "x"}}},
+            {put: {key: {text: "k/3"}, value: {text: "y"}}}
+        ]) }"#,
+        json!({}),
+    )
+    .await;
+
+    // item 1 resolves while "b" is already current — yet reads "a"
+    let first = next_data(&mut stream).await;
+    let f = &first["changes"];
+    assert_eq!(f["kind"], "PUT");
+    assert_eq!(f["key"]["text"], "k/1");
+    assert_eq!(f["value"]["text"], "a");
+    assert_eq!(f["query"]["one"]["text"], "a");
+    assert_eq!(f["seqno"], f["commitSeqno"], "single-op commit");
+    assert_eq!(
+        u64_field(&f["commitSeqno"]),
+        u64_field(&f["query"]["snapshotSeqno"]),
+        "embedded query pinned at the item's commit boundary"
+    );
+
+    let second = next_data(&mut stream).await;
+    let s = &second["changes"];
+    assert_eq!(s["value"]["text"], "b");
+    assert_eq!(s["query"]["one"]["text"], "b");
+
+    // the batch's two ops share one boundary; the FIRST op's query already
+    // sees the whole commit (k/3 included) — atomic, never torn
+    let third = next_data(&mut stream).await;
+    let fourth = next_data(&mut stream).await;
+    let (t, o) = (&third["changes"], &fourth["changes"]);
+    assert_eq!(t["key"]["text"], "k/2");
+    assert_eq!(o["key"]["text"], "k/3");
+    assert_eq!(t["commitSeqno"], o["commitSeqno"]);
+    assert!(u64_field(&t["seqno"]) < u64_field(&o["seqno"]));
+    assert_eq!(t["query"]["three"]["text"], "y");
+
+    // deletes stream too, value-less
+    run(
+        &schema,
+        r#"mutation { delete(key: {text: "k/1"}) }"#,
+        json!({}),
+    )
+    .await;
+    let fifth = next_data(&mut stream).await;
+    let d = &fifth["changes"];
+    assert_eq!(d["kind"], "DELETE");
+    assert_eq!(d["value"], Value::Null);
+    assert_eq!(d["query"]["one"], Value::Null);
+}
+
+/// A feed-declaring module becomes its own typed Subscription field:
+/// trigger fires → on_apply writes the feed → subscribers get the typed
+/// event. Feed-range deletes (GC) are not events.
+#[tokio::test]
+async fn module_feed_subscription_delivers_typed_events() {
+    let (schema, _dir) = open_schema();
+    let describe = r#"{"feed": {"prefix": "feed/", "event": "NfeedHit!"}, "types": [{"name": "NfeedHit", "fields": [{"name": "n", "type": "Int!"}]}]}"#;
+    let wat = wat_feed(describe, "feed/evt", r#"{"n": 7}"#);
+    let d = run(
+        &schema,
+        r#"mutation Install($w: BytesInput!) {
+            installModule(name: "nfeed", wasm: $w) { typed schemaError }
+        }"#,
+        json!({"w": {"text": wat}}),
+    )
+    .await;
+    assert_eq!(d["installModule"]["typed"], true, "{d:?}");
+
+    run(
+        &schema,
+        r#"mutation { createTrigger(name: "t", module: "nfeed", lo: {text: "watch/"}, hi: {text: "watch0"}) }"#,
+        json!({}),
+    )
+    .await;
+
+    let sub = r#"subscription {
+        nfeed { kind key { text } event { n } query { snapshotSeqno } }
+    }"#;
+    let mut stream = Box::pin(schema.execute_stream(Request::new(sub)));
+    let attach = next_data(&mut stream).await;
+    assert_eq!(attach["nfeed"]["kind"], "ATTACHED");
+    assert_eq!(attach["nfeed"]["event"], Value::Null);
+
+    // touch the watched range → trigger drains → on_apply writes the feed
+    run(
+        &schema,
+        r#"mutation { put(key: {text: "watch/x"}, value: {text: "1"}) }"#,
+        json!({}),
+    )
+    .await;
+    let item = next_data(&mut stream).await;
+    assert_eq!(item["nfeed"]["kind"], "PUT");
+    assert_eq!(item["nfeed"]["key"]["text"], "feed/evt");
+    assert_eq!(item["nfeed"]["event"]["n"], 7);
+
+    // feed GC is invisible to subscribers: delete the feed key, produce a
+    // new event — the next item is the new PUT, not the delete
+    run(
+        &schema,
+        r#"mutation { delete(key: {text: "feed/evt"}) }"#,
+        json!({}),
+    )
+    .await;
+    run(
+        &schema,
+        r#"mutation { put(key: {text: "watch/y"}, value: {text: "2"}) }"#,
+        json!({}),
+    )
+    .await;
+    let item = next_data(&mut stream).await;
+    assert_eq!(item["nfeed"]["kind"], "PUT");
+    assert_eq!(item["nfeed"]["event"]["n"], 7);
+}
+
+/// The feed declaration must be backed by an `on_apply` export, exactly
+/// like kind → entry backing.
+#[tokio::test]
+async fn feed_requires_on_apply_export() {
+    let (schema, _dir) = open_schema();
+    let wat = wat_typed(
+        r#"{"kind": "query", "output": "Json", "feed": {"prefix": "f/", "event": "Json"}}"#,
+        "{}",
+    );
+    let errs = run_err(
+        &schema,
+        r#"mutation Install($w: BytesInput!) {
+            installModule(name: "m", wasm: $w) { typed }
+        }"#,
+        json!({"w": {"text": wat}}),
+    )
+    .await;
+    assert!(
+        errs[0].message.contains("on_apply"),
+        "unexpected: {}",
+        errs[0].message
+    );
+}

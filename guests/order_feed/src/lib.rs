@@ -71,3 +71,21 @@ fn order_feed(changes: Vec<Change>) -> Result<(), Fail> {
     }
     Ok(())
 }
+
+// The feed declaration makes the module subscribable: installed as
+// `orderFeed`, `subscription { orderFeed { event { ... } } }` streams each
+// feed entry live as it commits (see WASM.md §9). The same range stays
+// scannable for history/replay — the subscription is just the tail.
+fluent_guest::fluent_describe!(
+    r#"{
+  "description": "Live ordered changefeed of the orders/ range: one typed event per committed change, in commit order.",
+  "feed": {"prefix": "feed/", "event": "OrderFeedEntry!"},
+  "types": [{"name": "OrderFeedEntry", "fields": [
+    {"name": "seqno", "type": "U64!", "description": "The watched op's commit seqno (also the feed key suffix)."},
+    {"name": "op", "type": "String!", "description": "\"put\" or \"delete\"."},
+    {"name": "id", "type": "String!", "description": "The order id (8 digits)."},
+    {"name": "record", "type": "Json", "description": "The order record; null when deleted or elided."},
+    {"name": "elided", "type": "Boolean", "description": "True when the value exceeded trigger_inline_value."}
+  ]}]
+}"#
+);

@@ -24,7 +24,8 @@
 use std::sync::Arc;
 
 use async_graphql::dynamic::{
-    Field, FieldFuture, FieldValue, InputValue, Object, ResolverContext, TypeRef,
+    Field, FieldFuture, FieldValue, InputValue, Object, ResolverContext, SubscriptionField,
+    TypeRef,
 };
 use async_graphql::{Error, Value};
 use serde_json::{Map as JsonMap, Value as Json};
@@ -34,7 +35,7 @@ use crate::descriptor::{FieldSpec, ModuleKind, ModuleSchema, ObjectSpec, TypeRef
 use crate::schema::{manager, pinned_snap, value_field};
 
 /// `TypeRefSpec` → dynamic `TypeRef`.
-fn type_ref(spec: &TypeRefSpec) -> TypeRef {
+pub(crate) fn type_ref(spec: &TypeRefSpec) -> TypeRef {
     let base = map_scalar(&spec.base);
     match (spec.list, spec.elem_nn, spec.nn) {
         (false, _, false) => TypeRef::named(base),
@@ -48,7 +49,7 @@ fn type_ref(spec: &TypeRefSpec) -> TypeRef {
 
 /// Like [`type_ref`] but with the outer non-null dropped (root fields stay
 /// nullable so failures are representable — see module docs).
-fn type_ref_nullable_outer(spec: &TypeRefSpec) -> TypeRef {
+pub(crate) fn type_ref_nullable_outer(spec: &TypeRefSpec) -> TypeRef {
     let relaxed = TypeRefSpec {
         nn: false,
         ..spec.clone()
@@ -153,17 +154,53 @@ fn object_type(spec: &ObjectSpec) -> Object {
     obj
 }
 
-/// Build the typed root field for a module plus its declared object types.
-pub(crate) fn typed_field(name: &str, schema: Arc<ModuleSchema>) -> (Field, Vec<Object>) {
-    let types = schema.types.iter().map(object_type).collect();
+/// A module-declared field, tagged with the root it belongs on.
+pub(crate) enum PlacedField {
+    Query(Field),
+    Mutation(Field),
+    Subscription(SubscriptionField),
+}
 
+/// Build every field a typed module declares — the root field when it has
+/// a `kind`, the subscription field when it has a `feed` — plus its object
+/// types (declared ones and the generated feed payload).
+pub(crate) fn module_fields(
+    name: &str,
+    schema: Arc<ModuleSchema>,
+) -> (Vec<PlacedField>, Vec<Object>) {
+    let mut types: Vec<Object> = schema.types.iter().map(object_type).collect();
+    let mut fields = Vec::new();
+    if let (Some(kind), Some(output)) = (schema.kind, schema.output.clone()) {
+        let field = root_field(name, schema.clone(), kind, output);
+        fields.push(match kind {
+            ModuleKind::Query => PlacedField::Query(field),
+            ModuleKind::Execute => PlacedField::Mutation(field),
+        });
+    }
+    if let Some(feed) = schema.feed.clone() {
+        let (field, payload) = crate::subscriptions::feed_field(name, schema.clone(), feed);
+        fields.push(PlacedField::Subscription(field));
+        types.push(payload);
+    }
+    (fields, types)
+}
+
+/// The typed root field for a module with a declared `kind`.
+fn root_field(
+    name: &str,
+    schema: Arc<ModuleSchema>,
+    kind: ModuleKind,
+    output: TypeRefSpec,
+) -> Field {
     let resolver_schema = schema.clone();
+    let resolver_output = output.clone();
     let module = name.to_string();
     let mut field = Field::new(
         name.to_string(),
-        type_ref_nullable_outer(&schema.output),
+        type_ref_nullable_outer(&output),
         move |ctx: ResolverContext<'_>| {
             let schema = resolver_schema.clone();
+            let output = resolver_output.clone();
             let module = module.clone();
             FieldFuture::new(async move {
                 // assemble the guest's input
@@ -184,7 +221,7 @@ pub(crate) fn typed_field(name: &str, schema: Arc<ModuleSchema>) -> (Field, Vec<
 
                 let mgr = manager(&ctx)?;
                 let db = mgr.db.clone();
-                let raw = match schema.kind {
+                let raw = match kind {
                     ModuleKind::Query => {
                         let snap = pinned_snap(&ctx, &mgr.db)?;
                         mgr.blocking_read(move || db.query_at(&module, &input, &snap))
@@ -195,12 +232,12 @@ pub(crate) fn typed_field(name: &str, schema: Arc<ModuleSchema>) -> (Field, Vec<
                     }
                 };
 
-                let value = crate::descriptor::normalize_output(&schema, &raw).map_err(|e| {
+                let value = crate::descriptor::normalize_output(&schema, &output, &raw).map_err(|e| {
                     use async_graphql::ErrorExtensions;
                     // for executors the transaction has ALREADY committed:
                     // say so loudly, or a client will retry a write that
                     // durably landed
-                    let committed = matches!(schema.kind, ModuleKind::Execute);
+                    let committed = matches!(kind, ModuleKind::Execute);
                     let msg = if committed {
                         format!(
                             "module {} COMMITTED its transaction but returned output \
@@ -240,5 +277,5 @@ pub(crate) fn typed_field(name: &str, schema: Arc<ModuleSchema>) -> (Field, Vec<
             field = field.argument(InputValue::new("input", TypeRef::named("BytesInput")));
         }
     }
-    (field, types)
+    field
 }

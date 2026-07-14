@@ -7,7 +7,7 @@ use std::sync::{Arc, Weak};
 
 use async_graphql::dynamic::{
     Field, FieldFuture, FieldValue, InputObject, InputValue, Object, ResolverContext, Scalar,
-    Schema, TypeRef,
+    Schema, Subscription, TypeRef,
 };
 use async_graphql::{Error, Value};
 use fluent31::Db;
@@ -39,10 +39,18 @@ pub(crate) fn manager(ctx: &ResolverContext<'_>) -> Result<Arc<SchemaManager>, E
         .ok_or_else(|| Error::new("schema manager shut down"))
 }
 
+/// Parent value of the `Query` object when it is re-entered from a
+/// subscription payload's `query` field: overrides the operation's lazy
+/// snapshot with the event's exact commit-boundary snapshot.
+pub(crate) struct SnapAt(pub Arc<fluent31::Snapshot>);
+
 pub(crate) fn pinned_snap(
     ctx: &ResolverContext<'_>,
     db: &Db,
 ) -> Result<Arc<fluent31::Snapshot>, Error> {
+    if let Some(at) = ctx.parent_value.downcast_ref::<SnapAt>() {
+        return Ok(at.0.clone());
+    }
     Ok(ctx.data::<crate::SnapCell>()?.pin(db))
 }
 
@@ -112,24 +120,36 @@ pub(crate) fn value_field(name: &str, ty: TypeRef) -> Field {
 // module status collection (engine side of a rebuild)
 // ---------------------------------------------------------------------------
 
-/// A described module must back its declared kind with the matching role
-/// entry point (`kind: "query"` → `query`, `kind: "execute"` → `execute`);
-/// returns the schema error when it doesn't.
-pub(crate) fn kind_entry_mismatch(
-    kind: descriptor::ModuleKind,
+/// A described module must back each declaration with the matching role
+/// entry point: `kind: "query"` → `query`, `kind: "execute"` → `execute`,
+/// and `feed` → `on_apply` (the feed's producer). Returns the schema error
+/// when one doesn't.
+pub(crate) fn entry_mismatch(
+    schema: &descriptor::ModuleSchema,
     entries: &[String],
 ) -> Option<String> {
-    let required = match kind {
-        descriptor::ModuleKind::Query => "query",
-        descriptor::ModuleKind::Execute => "execute",
-    };
-    (!entries.iter().any(|e| e == required)).then(|| {
-        format!(
-            "descriptor kind \"{required}\" requires a `{required}` entry point \
-             (module exports: [{}])",
+    let missing = |required: &str| !entries.iter().any(|e| e == required);
+    if let Some(kind) = schema.kind {
+        let required = match kind {
+            descriptor::ModuleKind::Query => "query",
+            descriptor::ModuleKind::Execute => "execute",
+        };
+        if missing(required) {
+            return Some(format!(
+                "descriptor kind \"{required}\" requires a `{required}` entry point \
+                 (module exports: [{}])",
+                entries.join(", ")
+            ));
+        }
+    }
+    if schema.feed.is_some() && missing("on_apply") {
+        return Some(format!(
+            "descriptor \"feed\" requires an `on_apply` entry point — the feed's \
+             producer (module exports: [{}])",
             entries.join(", ")
-        )
-    })
+        ));
+    }
+    None
 }
 
 /// Describe every installed module, reusing `prev` outcomes for modules
@@ -155,7 +175,7 @@ pub(crate) fn collect_outcomes(
                 // the declared kind must be invocable (out-of-band installs
                 // bypass installModule's pre-check, so re-check here)
                 Ok(schema) => match db.module_entries(&info.name) {
-                    Ok(entries) => match kind_entry_mismatch(schema.kind, &entries) {
+                    Ok(entries) => match entry_mismatch(&schema, &entries) {
                         None => DescribeOutcome::Described(Arc::new(schema)),
                         Some(e) => DescribeOutcome::DescribeError(e),
                     },
@@ -502,20 +522,26 @@ pub(crate) fn build(
     let mut query = Object::new("Query");
     let mut mutation = Object::new("Mutation");
     (query, mutation) = crate::builtins::register(query, mutation);
+    let mut subscription = crate::subscriptions::register(Subscription::new("Subscription"));
 
     let mut module_types: Vec<Object> = Vec::new();
     for (name, status) in statuses {
         if let ModuleStatus::Typed(schema) = status {
-            let (field, types) = crate::modules::typed_field(name, schema.clone());
+            let (fields, types) = crate::modules::module_fields(name, schema.clone());
             module_types.extend(types);
-            match schema.kind {
-                descriptor::ModuleKind::Query => query = query.field(field),
-                descriptor::ModuleKind::Execute => mutation = mutation.field(field),
+            for placed in fields {
+                match placed {
+                    crate::modules::PlacedField::Query(f) => query = query.field(f),
+                    crate::modules::PlacedField::Mutation(f) => mutation = mutation.field(f),
+                    crate::modules::PlacedField::Subscription(f) => {
+                        subscription = subscription.field(f)
+                    }
+                }
             }
         }
     }
 
-    let mut builder = Schema::build("Query", Some("Mutation"), None)
+    let mut builder = Schema::build("Query", Some("Mutation"), Some("Subscription"))
         .register(scalar_u64())
         .register(scalar_json())
         .register(bytes_object())
@@ -531,8 +557,11 @@ pub(crate) fn build(
         .register(stats_object())
         .register(put_op_input())
         .register(write_op_input())
+        .register(crate::subscriptions::change_kind_enum())
+        .register(crate::subscriptions::change_event_object())
         .register(query)
         .register(mutation)
+        .register(subscription)
         // permit semaphores are the primary defense against alias
         // amplification; these just reject absurd documents while leaving
         // room for GraphiQL's introspection query
