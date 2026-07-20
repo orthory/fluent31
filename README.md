@@ -8,6 +8,9 @@ An embedded key-value database engine in Rust:
   memory-friendly while big values live in an append-only value log.
 - **MVCC everywhere** — consistent snapshots, optimistic transactions with
   first-committer-wins conflicts and `get_for_update` write-skew defense.
+  MVCC is the engine's consistency machinery, not an application-facing
+  version store — the contract is spelled out in
+  [What MVCC is (and isn't) for](#what-mvcc-is-and-isnt-for).
 - **io_uring** on Linux (batched reads for scans/value resolution), portable
   positioned IO elsewhere. Develops and tests fine on macOS.
 - **No SQL — WASM.** Install WebAssembly modules *into* the database and run
@@ -40,9 +43,10 @@ An embedded key-value database engine in Rust:
   stays the fast source of truth and the journal trails it.
 - **Server mode** — `fluent-server` serves one store over every network
   plane in one process: GraphQL (typed/admin plane, where installed WASM
-  modules surface as their own query/mutation fields), the binary wire
-  pipe (data plane), and a replication join point where full replicas and
-  key-range edge caches attach.
+  modules surface as their own query/mutation fields — plus **live
+  subscriptions**: raw key-range change streams and typed module feeds
+  over graphql-ws), the binary wire pipe (data plane), and a replication
+  join point where full replicas and key-range edge caches attach.
 
 See [DESIGN.md](DESIGN.md) for the full architecture.
 
@@ -55,10 +59,12 @@ let db = Db::open("./data", Options::default())?;
 db.put("user/1", "ada")?;
 assert_eq!(db.get(b"user/1")?.as_deref(), Some(&b"ada"[..]));
 
-// snapshots
+// snapshots — one frozen, consistent view for the reads of one operation,
+// however many writes land meanwhile
 let snap = db.snapshot();
 db.put("user/1", "grace")?;
 assert_eq!(db.get_at(b"user/1", &snap)?.as_deref(), Some(&b"ada"[..]));
+drop(snap); // take, read, drop — a held snapshot pins GC for the whole store
 
 // transactions (optimistic, snapshot isolation)
 let mut txn = db.begin();
@@ -76,7 +82,7 @@ let fork = db.fork("before-migration")?;
 let clone = Db::open(&fork.path, Options::default())?;
 
 // or address the cut explicitly: pin now, fork that exact point later
-let pin = db.pin("pre-import")?; // durable; holds GC until unpin
+let pin = db.pin("pre-import")?; // durable; holds GC store-wide until unpin
 // ... more writes ...
 let fork = db.fork_at("rollback-point", pin.seqno)?;
 
@@ -86,6 +92,54 @@ let s = db.seqno();
 let a = db.fork_at("replica-a", s)?;
 let b = db.fork_at("replica-b", s)?; // same cut as replica-a
 ```
+
+## What MVCC is (and isn't) for
+
+MVCC is how the engine gives you consistency — it is **not** an
+application version store, and applications must not lean on it as one.
+The contract, explicitly:
+
+- **Snapshots are operation-scoped.** A `Snapshot` freezes one consistent
+  view for the reads of one operation: take it, read, drop it. It is a
+  read timestamp, not a saved version — and its cost is global, because
+  the GC watermark is the *oldest registered snapshot*: one long-held
+  snapshot stalls compaction GC and value-log reclamation for the whole
+  store, not just for the keys it reads.
+- **Seqnos are transient addresses, not version ids.** `db.seqno()`
+  addresses a state only while GC hasn't passed it — `snapshot_at` and
+  `fork_at` refuse a below-watermark seqno *by design*. A seqno stored in
+  application data eventually stops resolving, and it doesn't travel: a
+  journal rebuild replays into a fresh store and renumbers seqnos
+  wholesale, and forks/restores re-mint the store identity
+  (DESIGN.md §14).
+- **Pins and forks are coarse, named cuts.** They exist for a handful of
+  deliberate points — before a migration, a staging clone, a rollback
+  anchor. A pin is a durable **store-wide** GC hold until `unpin`; a fork
+  is a complete database directory. Neither is priced for
+  one-per-document, let alone one-per-write.
+- **Retention is a side effect, not a policy.** Old versions survive
+  exactly until the watermark passes them. There is no "keep the last N
+  versions of this key" and no per-key granularity — holding any version
+  holds every version of every key.
+
+**If your application needs history, materialize it as data you own.**
+The changes-mode trigger is the sanctioned primitive: bind an `on_apply`
+module to the range and every committed change (op kind, key, value,
+commit seqno) is delivered durably, in commit order, exactly once — fold
+it into ordinary keys under your own layout:
+
+```
+doc/42                     current value       (what the app writes)
+history/doc/42/<seqno>     one entry per write (what the trigger writes)
+```
+
+History is then just data: scannable, replicable, retained on *your*
+policy (prune old entries like any other keys, with the GC watermark out
+of the picture) — and live-tailable, since a `feed` descriptor turns the
+same range into a typed GraphQL subscription
+([Live subscriptions](#live-subscriptions)). `guests/order_feed` is the
+reference implementation of exactly this shape (a durable, ordered
+changefeed with values); [WASM.md](WASM.md) §8 is the authoring contract.
 
 ## WASM instead of SQL
 
@@ -123,8 +177,8 @@ let out = db.execute("transfer", &input)?;        // transactional, auto-retried
 ```
 
 The same modules surface over the server: a module that describes its
-interface becomes its own typed GraphQL query or mutation field the
-moment it's installed (see [Server mode](#server-mode)).
+interface becomes its own typed GraphQL query, mutation, or subscription
+feed the moment it's installed (see [Server mode](#server-mode)).
 
 Executors run inside a transaction: guest exit `0` commits, anything else
 aborts; commit conflicts re-run the module against a fresh snapshot
@@ -274,7 +328,8 @@ cargo run -p fluent-graphql -- --print-schema    # dump the SDL
 
 One schema covers the direct operations **and every installed WASM
 module**: a module that declares its interface becomes its own typed root
-field on `Query` or `Mutation` the moment it's installed (next section) —
+field on `Query` or `Mutation` the moment it's installed — and, with a
+`feed` declaration, its own typed `Subscription` field (next sections) —
 the schema is dynamic, not fixed. Every field of a single GraphQL query
 operation executes at one pinned MVCC snapshot, so multi-field reads are
 mutually consistent.
@@ -314,6 +369,13 @@ mutation {
   pin(name: "p1") { seqno }            # durably mark this point fork-able
   fork(name: "rollback", at: "42") { instanceId }  # branch at a pinned seqno
 }
+
+subscription {
+  changes(lo: {text: "user/"}, hi: {text: "user0"}) {  # live post-commit tail of a range
+    kind seqno commitSeqno key { text } value { base64 }
+    query { snapshotSeqno }   # full Query root, pinned at this item's commit
+  }
+}
 ```
 
 Keys and values are raw bytes: inputs take exactly one of `text` / `base64` /
@@ -323,15 +385,46 @@ GraphQL's 32-bit `Int` or JS double precision. Engine failures map to
 `extensions.code` (`CONFLICT`, `INVALID_ARGUMENT`, `GUEST_FAILED` with the
 guest's exit code and output, ...).
 
-### Every module can be its own query or mutation
+### Live subscriptions
+
+The engine's post-commit change stream serves as `Subscription` fields
+over graphql-ws, on the same endpoints (`/graphql`,
+`/graphql/<instanceId>`). Two planes: **raw** — `changes(lo, hi)`
+streams every committed op in a key range, no module required (example
+above) — and **typed** — a module with a `feed` descriptor over its
+`on_apply` output becomes its own subscription field:
+
+```graphql
+subscription {
+  orderFeed {
+    commitSeqno
+    event { seqno op id record }   # typed per the module's descriptor
+  }
+}
+```
+
+Delivery is post-commit and gap-free: the stream opens with an
+`ATTACHED` boundary marker, and every item carries a `query` field — the
+full Query root pinned at that item's commit seqno, so a consumer can
+re-read exact commit-boundary state, never a torn view. The eventing
+idiom: an `on_apply` module materializes its feed durably as keys, and a
+subscription is just the live tail of that range — history/replay =
+`scan`, latest = `get`, live = subscribe; a disconnected client misses
+nothing durable. Full semantics (attach boundaries, typed event
+validation, lag policy) in [WASM.md](WASM.md) §9.
+
+### Every module can be its own query, mutation — or subscription
 
 Installing a WASM module doesn't just make it callable through the generic
 `wasm`/`wasmExecute` byte pipes — a module that exports `describe`
 (emitting a JSON schema descriptor — see
 `crates/fluent-graphql/src/descriptor.rs`) becomes its **own typed root
 field**, dynamically: `kind: "query"` modules land on `Query`, `kind:
-"execute"` on `Mutation`, named after the module, with declared arguments
-and a declared output type. The GraphQL schema is rebuilt and hot-swapped
+"execute"` on `Mutation`, and a `feed` declaration (`"feed": {"prefix":
+"feed/", "event": "OrderFeedEntry!"}` — see `guests/order_feed`) lands
+the module's live changefeed on `Subscription` — named after the module,
+with declared arguments and a declared output/event type. The GraphQL
+schema is rebuilt and hot-swapped
 on every `installModule`/`uninstallModule`, and at server startup for
 already-installed modules — install `placeOrder`, and `mutation {
 placeOrder(...) }` exists; uninstall it, and it's gone. Described modules
@@ -455,5 +548,8 @@ crates/fluent-graphql     GraphQL server (axum + async-graphql)
 crates/fluent-wire        binary wire-protocol server + reference client
 crates/fluent-replication edge replication channel: master server + replica driver
 guests/               example WASM guests (separate workspace): agg, transfer,
-                      place_order + top_customers (typed GraphQL demo pair)
+                      place_order + top_customers (typed GraphQL demo pair),
+                      customer_index + order_feed (trigger-maintained index +
+                      subscribable changefeed), dynamic_index, live_stats,
+                      cascade_delete, claim (see WASM.md §6 for what each shows)
 ```
