@@ -189,6 +189,15 @@ rotation-vs-GC data-loss window found in design review.
   delete conflicts); GC can't remove the evidence because the txn's own
   registered snapshot bounds the watermark. First committer wins;
   `Error::Conflict` aborts cleanly.
+- **The external contract** (why the API is shaped this way): snapshots
+  are operation-scoped consistency, seqnos are transient addresses valid
+  only above the watermark, pins/forks are coarse named cuts (§10). None
+  of it is an application version store — the watermark is global,
+  retention of old versions is its side effect, and seqnos survive
+  neither journal rebuild (replayed as fresh writes — seqnos renumber,
+  pre-base history collapses) nor identity re-mint (§14). Applications that need per-entity history
+  materialize it as user keys via a changes-mode trigger (§9); README
+  "What MVCC is (and isn't) for" is the user-facing statement.
 
 ## 7. IO backends
 
