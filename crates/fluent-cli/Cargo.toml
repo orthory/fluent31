@@ -11,3 +11,6 @@ path = "src/main.rs"
 [dependencies]
 fluent31 = { path = "../fluent31" }
 rustyline = "18.0.1"
+
+[dev-dependencies]
+tempfile = "3"

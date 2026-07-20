@@ -2,6 +2,10 @@
 //! reports its wall-clock latency.
 //!
 //! Usage: fluent-cli <db-dir> [--std|--uring] [--nosync] [--sync-every <ms>]
+//!        fluent-cli journal-rebuild <journal-dir> <dest-dir>
+//!
+//! `journal-rebuild` is a one-shot mode (no shell): reconstruct a fresh
+//! store at <dest-dir> from a mutation journal (fluent31::journal).
 //!
 //! Byte arguments accept plain UTF-8 or `hex:DEADBEEF`.
 
@@ -9,6 +13,10 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use fluent31::{Db, Error, IoBackend, Options, Snapshot, SyncMode, Txn};
+
+const USAGE: &str = "\
+usage: fluent-cli <db-dir> [--std|--uring] [--nosync] [--sync-every <ms>]
+       fluent-cli journal-rebuild <journal-dir> <dest-dir>";
 
 fn parse_bytes(tok: &str) -> Result<Vec<u8>, String> {
     if let Some(hex) = tok.strip_prefix("hex:") {
@@ -453,10 +461,43 @@ impl Shell {
     }
 }
 
+/// One-shot `journal-rebuild <journal-dir> <dest-dir>`: reconstruct a
+/// fresh store from a mutation journal and print what it held.
+fn journal_rebuild(jrn: &str, dest: &str) -> ! {
+    // bulk replay — rebuild() ends on its own explicit sync_wal barrier,
+    // so per-op fsyncs during the replay would buy nothing but time
+    let opts = Options {
+        sync: SyncMode::Never,
+        ..Options::default()
+    };
+    let t = Instant::now();
+    match fluent31::journal::rebuild(jrn, dest, opts) {
+        Ok(r) => {
+            println!("rebuilt {dest} from {jrn}  {}", fmt_latency(t.elapsed()));
+            println!("source instance  {}", r.source_instance);
+            println!("base keys        {}", r.base_keys);
+            println!("deltas applied   {}", r.deltas_applied);
+            println!("last seqno       {}", r.last_seqno);
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("journal-rebuild failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "journal-rebuild") {
+        let [jrn, dest] = &args[1..] else {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        };
+        journal_rebuild(jrn, dest);
+    }
     let Some(dir) = args.first().filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: fluent-cli <db-dir> [--std|--uring] [--nosync] [--sync-every <ms>]");
+        eprintln!("{USAGE}");
         std::process::exit(2);
     };
     let mut opts = Options::default();
