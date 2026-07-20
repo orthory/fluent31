@@ -5,10 +5,10 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use fluent31::{Db, Options, SyncMode};
+use fluent31::{Db, Journal, Options, SyncMode};
 use fluent_graphql::{InstanceRegistry, RegistryConfig, SchemaManager};
 
-const USAGE: &str = "usage: fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync always|never|periodic:<ms>] [--max-body-bytes N]\n       fluent-graphql --print-schema";
+const USAGE: &str = "usage: fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync always|never|periodic:<ms>] [--max-body-bytes N] [--journal DIR]\n       fluent-graphql --print-schema";
 const DEFAULT_MAX_BODY: usize = 32 << 20;
 
 fn usage() -> ExitCode {
@@ -21,6 +21,7 @@ fn main() -> ExitCode {
     let mut listen = "127.0.0.1:8317".to_string();
     let mut sync = SyncMode::Always;
     let mut max_body = DEFAULT_MAX_BODY;
+    let mut journal: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -44,6 +45,10 @@ fn main() -> ExitCode {
             },
             "--max-body-bytes" => match args.next().and_then(|v| v.parse().ok()) {
                 Some(v) => max_body = v,
+                None => return usage(),
+            },
+            "--journal" => match args.next() {
+                Some(v) => journal = Some(v),
                 None => return usage(),
             },
             "--print-schema" => {
@@ -70,6 +75,23 @@ fn main() -> ExitCode {
             eprintln!("fluent-graphql: cannot open {dir}: {e}");
             return ExitCode::FAILURE;
         }
+    };
+    // Opt-in mutation journal (fluent31::journal): a base snapshot at attach,
+    // then streamed deltas on a background thread for the life of the
+    // process. Held to the end of main — its Drop (drainer join + final
+    // flush) runs after serve returns, before the last Db handle goes down.
+    let _journal = match &journal {
+        Some(jdir) => match Journal::attach(db.clone(), jdir) {
+            Ok(j) => {
+                println!("fluent-graphql: journaling to {jdir}");
+                Some(j)
+            }
+            Err(e) => {
+                eprintln!("fluent-graphql: cannot attach journal at {jdir}: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
     };
     // runs every installed module's `describe` and builds the schema
     let mgr = match SchemaManager::new(db) {
