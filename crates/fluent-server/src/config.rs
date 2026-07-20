@@ -4,9 +4,11 @@
 //! the tuning sections are file-only and cover everything the composed
 //! crates expose as configuration: `[engine]` is the full
 //! [`fluent31::Options`] tunable surface, `[graphql]` / `[wire]` /
-//! `[replication]` are the per-plane limits. An explicit flag overrides
-//! its file value, the file overrides the built-in default. Unknown keys
-//! are an error — a typo must not silently fall back.
+//! `[replication]` are the per-plane limits, and `[journal]` attaches the
+//! opt-in mutation journal ([`fluent31::journal`]) at its `dir`. An
+//! explicit flag overrides its file value, the file overrides the
+//! built-in default. Unknown keys are an error — a typo must not
+//! silently fall back.
 //!
 //! ```toml
 //! dir = "./data"
@@ -29,6 +31,12 @@
 //! [replication]
 //! max-frame-bytes = 1048576
 //! ping-every-ms = 2000
+//!
+//! [journal]                     # present = journal attached; absent = off
+//! dir = "./journal"
+//! rotate-bytes = 134217728
+//! compact-when-deltas-exceed = 1.0
+//! compact-min-bytes = 67108864
 //!
 //! [engine]
 //! create-if-missing = true
@@ -68,7 +76,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use fluent31::{Compression, IoBackend, Options, SyncMode};
+use fluent31::{Compression, IoBackend, JournalConfig, Options, SyncMode};
 use serde::Deserialize;
 
 /// One optional slot per setting the binary accepts. Doubles as the
@@ -87,6 +95,7 @@ pub struct FileConfig {
     pub graphql: Option<GraphqlSection>,
     pub wire: Option<WireSection>,
     pub replication: Option<ReplicationSection>,
+    pub journal: Option<JournalSection>,
     pub engine: Option<EngineSection>,
 }
 
@@ -117,6 +126,42 @@ pub struct WireSection {
 pub struct ReplicationSection {
     pub max_frame_bytes: Option<usize>,
     pub ping_every_ms: Option<u64>,
+}
+
+/// The opt-in mutation journal ([`fluent31::journal`]): the section being
+/// present attaches one. Tuning fields mirror [`JournalConfig`]; an
+/// absent field keeps its default.
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct JournalSection {
+    /// Journal directory. Required once the section exists — a `[journal]`
+    /// that names no destination is refused at startup rather than
+    /// silently journaling nothing.
+    pub dir: Option<String>,
+    pub rotate_bytes: Option<u64>,
+    /// Auto-compaction ratio (deltas since the last base / that base's
+    /// size). fluent31 reads `None` as "auto-compaction off", which a TOML
+    /// file cannot say by omission — omitted here means the engine default.
+    pub compact_when_deltas_exceed: Option<f64>,
+    pub compact_min_bytes: Option<u64>,
+}
+
+impl JournalSection {
+    /// The journal tuning: file values applied over
+    /// [`JournalConfig::default`].
+    pub fn config(&self) -> JournalConfig {
+        let mut c = JournalConfig::default();
+        if let Some(v) = self.rotate_bytes {
+            c.rotate_bytes = v;
+        }
+        if let Some(v) = self.compact_when_deltas_exceed {
+            c.compact_when_deltas_exceed = Some(v);
+        }
+        if let Some(v) = self.compact_min_bytes {
+            c.compact_min_bytes = v;
+        }
+        c
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -254,6 +299,7 @@ impl FileConfig {
             }),
             wire: self.wire.or(file.wire),
             replication: self.replication.or(file.replication),
+            journal: self.journal.or(file.journal),
             engine: self.engine.or(file.engine),
         }
     }
@@ -371,6 +417,10 @@ mod tests {
             max-frame-bytes = 2048
             ping-every-ms = 500
 
+            [journal]
+            dir = "./jrn"
+            rotate-bytes = 1024
+
             [engine]
             io-backend = "std"
             compression = "lz4"
@@ -384,6 +434,7 @@ mod tests {
         assert_eq!(cfg.graphql.as_ref().unwrap().fork_max_open, Some(2));
         assert_eq!(cfg.wire.as_ref().unwrap().max_frame_bytes, Some(4096));
         assert_eq!(cfg.replication.as_ref().unwrap().ping_every_ms, Some(500));
+        assert_eq!(cfg.journal.as_ref().unwrap().dir.as_deref(), Some("./jrn"));
         let e = cfg.engine.as_ref().unwrap();
         assert_eq!(e.io_backend, Some(IoBackendKey::Std));
         assert_eq!(e.compression, Some(CompressionKey::Lz4));
@@ -397,6 +448,27 @@ mod tests {
         assert!(toml::from_str::<FileConfig>("[listen]\ngraphqk = \"x\"").is_err());
         assert!(toml::from_str::<FileConfig>("[engine]\nmemtable-sise = 1").is_err());
         assert!(toml::from_str::<FileConfig>("[engine]\nio-backend = \"turbo\"").is_err());
+        assert!(toml::from_str::<FileConfig>("[journal]\nrotate-byte = 1").is_err());
+    }
+
+    #[test]
+    fn journal_section_tuning_applies_over_defaults() {
+        let cfg: FileConfig = toml::from_str(
+            r#"
+            [journal]
+            dir = "./jrn"
+            rotate-bytes = 1024
+            compact-min-bytes = 512
+            "#,
+        )
+        .unwrap();
+        let j = cfg.journal.as_ref().unwrap();
+        assert_eq!(j.dir.as_deref(), Some("./jrn"));
+        let c = j.config();
+        assert_eq!(c.rotate_bytes, 1024);
+        assert_eq!(c.compact_min_bytes, 512);
+        let d = JournalConfig::default();
+        assert_eq!(c.compact_when_deltas_exceed, d.compact_when_deltas_exceed);
     }
 
     #[test]
