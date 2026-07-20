@@ -70,6 +70,9 @@ pub fn status_for(e: &fluent31::Error) -> u8 {
         // client's point of view
         E::ProvenanceMismatch(_) => ST_CORRUPTION,
         E::Gone(_) => ST_IO,
+        // journal rebuild is an offline path — unreachable over the wire,
+        // but the mapping must stay total
+        E::JournalGap(_) => ST_CORRUPTION,
     }
 }
 

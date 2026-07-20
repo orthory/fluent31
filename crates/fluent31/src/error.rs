@@ -26,6 +26,11 @@ pub enum Error {
     /// A referenced file left the current version (compacted/GC'd away);
     /// the replica's view is stale — re-pull the slice and retry.
     Gone(String),
+    /// The journal's segment chain has a hole: a middle `journal-*.log`
+    /// file is missing, so replaying past it would silently lose the
+    /// mutations it held. Distinct from `Corruption` — the surviving
+    /// files are intact; restore the missing segment(s) and rebuild again.
+    JournalGap(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -43,6 +48,7 @@ impl fmt::Display for Error {
             Error::GuestFailed { code, .. } => write!(f, "guest module failed with code {code}"),
             Error::ProvenanceMismatch(m) => write!(f, "provenance mismatch: {m}"),
             Error::Gone(m) => write!(f, "gone: {m}"),
+            Error::JournalGap(m) => write!(f, "journal gap: {m}"),
         }
     }
 }
