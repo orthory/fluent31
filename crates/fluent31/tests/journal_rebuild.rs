@@ -537,6 +537,169 @@ fn rebuild_from_empty_journal_errors() {
 }
 
 // ---------------------------------------------------------------------------
+// A base snapshot larger than rotate_bytes must not be split by rotation
+// (issue #29: mid-base rotation corrupted the rebuild base span)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn base_snapshot_larger_than_rotate_bytes_still_rebuilds() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+    let cfg = JournalConfig {
+        rotate_bytes: 4 << 10,
+        compact_when_deltas_exceed: None,
+        ..JournalConfig::default()
+    };
+
+    let expected = {
+        let db = Arc::new(Db::open(db_dir.path(), opts()).unwrap());
+        // pre-attach keyspace several times rotate_bytes: the attach-time base
+        // snapshot alone overflows the rotation threshold
+        for i in 0..300u32 {
+            db.put(k(i), v(i, "pre")).unwrap();
+        }
+        db.flush().unwrap();
+
+        let journal = Journal::attach_with_config(db.clone(), jrn_dir.path(), cfg).unwrap();
+        // a few post-attach writes so deltas follow the oversized base
+        for i in 300..320u32 {
+            db.put(k(i), v(i, "post")).unwrap();
+        }
+        let expected = dump(&db);
+        let target = db.stats().visible_seqno;
+        wait_until("drain", 10, || journal.stats().last_seqno >= target);
+        drop(journal);
+        expected
+    };
+
+    // the whole base span stayed in file 1, which therefore outgrew the
+    // rotation threshold instead of splitting
+    let f1 = std::fs::metadata(jrn_dir.path().join("journal-000001.log")).unwrap().len();
+    assert!(f1 > 4 << 10, "base span should keep file 1 oversized, got {f1} bytes");
+
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    let report = journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(report.base_keys, 300, "attach-time base must carry the pre-attach keys");
+    let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(dump(&rebuilt), expected, "rebuilt state diverged from original");
+}
+
+#[test]
+fn compaction_base_larger_than_rotate_bytes_still_rebuilds() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+    let cfg = JournalConfig {
+        rotate_bytes: 4 << 10,
+        compact_when_deltas_exceed: None, // compact only on request
+        ..JournalConfig::default()
+    };
+
+    let expected = {
+        let db = Arc::new(Db::open(db_dir.path(), opts()).unwrap());
+        let journal = Journal::attach_with_config(db.clone(), jrn_dir.path(), cfg).unwrap();
+        // grow the live set well past rotate_bytes via the delta stream, then
+        // compact: the fresh base into the anchor file overflows the threshold
+        for i in 0..300u32 {
+            db.put(k(i), v(i, "a")).unwrap();
+        }
+        let target = db.stats().visible_seqno;
+        wait_until("drain", 10, || journal.stats().last_seqno >= target);
+        journal.request_checkpoint();
+        wait_until("compact", 10, || journal.stats().compactions >= 1);
+        let expected = dump(&db);
+        drop(journal);
+        expected
+    };
+
+    let (min_id, _, _) = journal_disk(jrn_dir.path());
+    assert!(min_id > 1, "compaction should have pruned the pre-checkpoint files");
+
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    let report = journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(report.base_keys, 300, "anchor base must carry the whole live set");
+    let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(dump(&rebuilt), expected, "rebuilt state diverged after oversized compaction");
+}
+
+/// Frame one journal record the way the writer does: [len u32][crc u32][body].
+fn frame(payload: &[u8]) -> Vec<u8> {
+    let mut rec = (payload.len() as u32).to_le_bytes().to_vec();
+    rec.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
+    rec.extend_from_slice(payload);
+    rec
+}
+
+#[test]
+fn split_base_span_from_prior_writer_still_rebuilds() {
+    // Journals written before the mid-base rotation fix can hold a base span
+    // that straddles a file boundary, with the next file's provenance header
+    // interleaved into it. The safety net must still rebuild those.
+    let jrn_dir = tempfile::tempdir().unwrap();
+
+    let header = {
+        let mut p = vec![0u8, 1u8]; // TAG_HEADER, format 1
+        p.extend_from_slice(&0xf115_e731_10c7_0001u64.to_le_bytes());
+        p.extend_from_slice(&[0u8; 16]); // source instance id
+        p
+    };
+    let checkpoint = |seq: u64| {
+        let mut p = vec![1u8]; // TAG_CHECKPOINT
+        p.extend_from_slice(&seq.to_le_bytes());
+        p
+    };
+    let base = |key: &[u8], val: &[u8]| {
+        let mut p = vec![2u8]; // TAG_BASE
+        p.push(key.len() as u8); // uvarint (short) key len
+        p.extend_from_slice(key);
+        p.push(val.len() as u8);
+        p.extend_from_slice(val);
+        p
+    };
+    let base_end = |seq: u64| {
+        let mut p = vec![3u8]; // TAG_BASE_END
+        p.extend_from_slice(&seq.to_le_bytes());
+        p
+    };
+    let delta_put = |seq: u64, key: &[u8], val: &[u8]| {
+        let mut p = vec![4u8]; // TAG_DELTA
+        p.extend_from_slice(&seq.to_le_bytes());
+        p.push(1); // kind: Put
+        p.push(key.len() as u8);
+        p.extend_from_slice(key);
+        p.push(val.len() as u8);
+        p.extend_from_slice(val);
+        p
+    };
+
+    // file 1: header, checkpoint, first half of the base — rotation hit here
+    let mut f1 = frame(&header);
+    f1.extend(frame(&checkpoint(5)));
+    f1.extend(frame(&base(b"a", b"1")));
+    f1.extend(frame(&base(b"b", b"2")));
+    std::fs::write(jrn_dir.path().join("journal-000001.log"), f1).unwrap();
+
+    // file 2: header (from the rotation), rest of the base, then a delta
+    let mut f2 = frame(&header);
+    f2.extend(frame(&base(b"c", b"3")));
+    f2.extend(frame(&base_end(5)));
+    f2.extend(frame(&delta_put(6, b"d", b"4")));
+    std::fs::write(jrn_dir.path().join("journal-000002.log"), f2).unwrap();
+
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    let report = journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(report.base_keys, 3, "all base records across the split must apply");
+    assert_eq!(report.deltas_applied, 1);
+    assert_eq!(report.last_seqno, 6);
+
+    let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
+    let want: BTreeMap<Vec<u8>, Vec<u8>> = [(b"a", b"1"), (b"b", b"2"), (b"c", b"3"), (b"d", b"4")]
+        .into_iter()
+        .map(|(key, val)| (key.to_vec(), val.to_vec()))
+        .collect();
+    assert_eq!(dump(&rebuilt), want);
+}
+
+// ---------------------------------------------------------------------------
 // Continuity: a damaged chain is a loud, classified error — never silent loss
 // ---------------------------------------------------------------------------
 

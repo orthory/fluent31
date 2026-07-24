@@ -333,6 +333,13 @@ impl LogWriter {
 
     fn append(&mut self, payload: &[u8]) -> Result<()> {
         self.append_raw(payload)?;
+        self.maybe_rotate()
+    }
+
+    /// Rotate if the file has outgrown its threshold. Callers that append a
+    /// multi-record span rotation-free (the base snapshot) invoke this once at
+    /// the span's end instead of per record.
+    fn maybe_rotate(&mut self) -> Result<()> {
         if self.bytes_in_file >= self.rotate_at {
             self.rotate()?;
         }
@@ -340,7 +347,8 @@ impl LogWriter {
     }
 
     /// Frame and write one record, with no rotation check — rotation itself
-    /// appends the header record and must not recurse.
+    /// appends the header record and must not recurse, and a base span must
+    /// stay contiguous in one file (no header interleaved mid-span).
     fn append_raw(&mut self, payload: &[u8]) -> Result<()> {
         let mut rec = Vec::with_capacity(8 + payload.len());
         rec.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -443,18 +451,25 @@ fn encode_delta(seq: SeqNo, kind: ValueKind, key: &[u8], value: Option<&[u8]>) -
 /// Write a checkpoint + a full base snapshot of the current user keyspace,
 /// terminated by a base-end record carrying the snapshot's seqno. Returns
 /// (base record count, snapshot seqno).
+///
+/// The whole checkpoint→base→base-end span is appended rotation-free: a
+/// rotation mid-span would interleave the next file's header into the base,
+/// which the rebuild base walk rejects (#29). A base larger than rotate_bytes
+/// therefore yields one oversized file — the size check runs once, after the
+/// span.
 fn write_base_snapshot(db: &Db, writer: &mut LogWriter) -> Result<(u64, SeqNo)> {
     let snap = db.snapshot();
     let seq = snap.seqno();
-    writer.append(&encode_checkpoint(seq))?;
+    writer.append_raw(&encode_checkpoint(seq))?;
     let mut base_records = 0u64;
     for kv in db.iter_at(None, None, false, &snap)? {
         let (k, v) = kv?;
-        writer.append(&encode_base(&k, &v))?;
+        writer.append_raw(&encode_base(&k, &v))?;
         base_records += 1;
     }
-    writer.append(&encode_base_end(seq))?;
+    writer.append_raw(&encode_base_end(seq))?;
     writer.sync()?;
+    writer.maybe_rotate()?;
     Ok((base_records, seq))
 }
 
@@ -641,7 +656,15 @@ pub fn rebuild(journal_dir: impl AsRef<Path>, dest: impl AsRef<Path>, opts: Opti
     // apply the base
     for rec in &records[anchor.base_start..anchor.base_end] {
         let mut r = Reader::new(rec);
-        if r.u8()? != TAG_BASE {
+        let tag = r.u8()?;
+        // journals written before the mid-base rotation fix (#29) can carry a
+        // base span that straddles a file boundary, with the next file's
+        // header interleaved; its provenance was already verified per file in
+        // read_all_records, so skip it rather than strand the journal
+        if tag == TAG_HEADER {
+            continue;
+        }
+        if tag != TAG_BASE {
             return Err(corrupt("expected base record in base span"));
         }
         let key = r.len_prefixed()?.to_vec();
