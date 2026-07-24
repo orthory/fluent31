@@ -29,12 +29,13 @@ An embedded key-value database engine in Rust:
   restore-to-arbitrary-time; a fork is a named cut, from recent or from a
   specific point): `fork("name")` pins an MVCC snapshot at the current
   head and hard-links the immutable files into `archive/name/`, so
-  creation copies almost nothing and leaves live readers/writers
-  undisturbed. `pin("name")` durably marks the current seqno as fork-able
-  later; `fork_at("name", seqno)` then cuts at exactly that point (the
-  tables are rewritten to the cut, the value log stays hard-linked). Each
-  fork is itself a complete database directory — open it read-write and
-  it's a live, copy-on-write clone of the parent.
+  creation cost is independent of database size and live readers/writers
+  stay undisturbed. `pin("name")` durably marks the current seqno as
+  fork-able later; `fork_at("name", seqno)` then cuts at exactly that
+  point (only the small table side is rewritten to the cut, the value log
+  stays hard-linked). Each fork is itself a complete database directory —
+  open it read-write and it's a live, copy-on-write clone of the parent.
+  Mechanics and cost model: [Database forks](#database-forks).
 - **Opt-in rebuild journal** — an off-by-default catastrophe-recovery net
   (`journal::Journal::attach`): a separate, async append-only record of every
   user-key mutation, independent of the store's own files, from which a fresh
@@ -115,8 +116,8 @@ The contract, explicitly:
 - **Pins and forks are coarse, named cuts.** They exist for a handful of
   deliberate points — before a migration, a staging clone, a rollback
   anchor. A pin is a durable **store-wide** GC hold until `unpin`; a fork
-  is a complete database directory. Neither is priced for
-  one-per-document, let alone one-per-write.
+  is a complete database directory ([Database forks](#database-forks)).
+  Neither is priced for one-per-document, let alone one-per-write.
 - **Retention is a side effect, not a policy.** Old versions survive
   exactly until the watermark passes them. There is no "keep the last N
   versions of this key" and no per-key granularity — holding any version
@@ -140,6 +141,67 @@ same range into a typed GraphQL subscription
 ([Live subscriptions](#live-subscriptions)). `guests/order_feed` is the
 reference implementation of exactly this shape (a durable, ordered
 changefeed with values); [WASM.md](WASM.md) §8 is the authoring contract.
+
+## Database forks
+
+A fork is a named, consistent branch of the whole database, published as
+a complete database directory under `archive/<name>/`. The word "fork"
+suggests a copy; it isn't one. Because tables and sealed value-log files
+are **immutable** in this engine, a fork can share them with its parent
+byte-for-byte as **hard links** — creation cost is proportional to the
+number of files (metadata operations), not to the bytes stored.
+
+**How a head fork is cut.** `db.fork("name")` flushes the memtable, pins
+an MVCC cut during a brief manifest-lock hold (no stop-the-world — this
+freezes structural installs, not traffic), then builds the archive in
+`archive/.tmp-<name>/`: hard links for every table and sealed value-log
+file, a bounded copy of the one still-growing value-log head up to its
+synced prefix (the only real byte copy in the operation, capped by the
+`vlog_file_size` rotation bound), and a fresh manifest + `fork.meta`.
+Everything is fsynced, then a single rename publishes the directory — a
+fork exists completely or not at all; a crashed build's `.tmp` dir is
+swept at the next open.
+
+**What it costs the live store.** Readers and writers keep running
+throughout; the cut registers as a snapshot for the duration of the
+build, so the one global effect is value-log GC deletions deferred until
+creation finishes. On disk, shared bytes exist **once** — a fresh fork
+adds almost nothing (`du` on the archive re-counts shared inodes;
+apparent size ≠ added size), and real divergence accrues only as parent
+and child compact/GC away from the shared base, each unlinking only its
+own references. `fork_under_concurrent_load`
+(`crates/fluent31/tests/fork_stress.rs`) is the proof in the suite:
+forks cut while writers, flush, compaction, and value-log GC all run,
+each then opened and verified complete.
+
+**Point cuts.** `db.fork_at("name", seqno)` cuts at an explicit earlier
+point. The shared table files also hold versions *above* that cut, so
+they can't be linked verbatim — the tables are rewritten to the cut (one
+merge keeping, per key, the newest version at-or-below it). Key-value
+separation is what keeps this cheap: only the small index side is
+rewritten; the value log — where the big bytes live — stays hard-linked.
+A point must still be materializable, i.e. at-or-above the GC watermark:
+either recent enough (`db.seqno()` captured moments ago) or held by
+`db.pin("name")`, a durable **store-wide** GC hold that keeps the point
+fork-able until `unpin`.
+
+**Open = activate.** A fork directory is a complete database:
+`Db::open` on its path gives a live, writable, copy-on-write clone —
+new writes land in its own files, and its compactions unlink only its
+own hard links. `restore_to` re-links an archive into a fresh directory
+first when the archived cut should stay pristine; `delete_fork` refuses
+while a fork is open as a database. Under `fluent-server`, every fork is
+addressable as its own instance at `/graphql/<instanceId>`
+([The GraphQL plane](#the-graphql-plane)).
+
+**Expectations.** Forks are coarse, deliberate cuts — a pre-migration
+anchor, a staging clone, a rollback point — priced for a handful of
+named branches, not for one-per-document versioning (that contract is
+[What MVCC is (and isn't) for](#what-mvcc-is-and-isnt-for)). Pins hold
+GC for the **whole store** until released. And a fork branches, it does
+not follow: it contains exactly the history up to its cut, and nothing
+the parent commits afterwards. Full mechanics: [DESIGN.md](DESIGN.md)
+§10.
 
 ## WASM instead of SQL
 
