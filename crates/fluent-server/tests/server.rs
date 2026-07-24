@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fluent31::{Db, Options, SyncMode};
+use fluent31::{journal, Db, Options, SyncMode};
 use fluent_replication::{EdgeReplica, EdgeReplicaConfig};
 use fluent_server::{Server, ServerConfig};
 use fluent_wire::WireClient;
@@ -243,6 +243,137 @@ memtable-size = 4194304
 
     child.kill().unwrap();
     child.wait().unwrap();
+}
+
+/// Rebuild the journal into a fresh directory and look `key` up there.
+/// `None` covers both "rebuild failed" (journal mid-write) and "key not
+/// journaled yet", so callers just poll until the value appears.
+fn rebuilt_value(jrn: &std::path::Path, key: &[u8]) -> Option<Vec<u8>> {
+    let dest = tempfile::tempdir().unwrap();
+    let opts = Options {
+        sync: SyncMode::Never,
+        ..Options::default()
+    };
+    journal::rebuild(jrn, dest.path(), opts.clone()).ok()?;
+    let db = Db::open(dest.path(), opts).unwrap();
+    db.get(key).unwrap()
+}
+
+/// `[journal]` in the config file attaches the opt-in mutation journal:
+/// the attach-time base captures state that predates the server, a live
+/// GraphQL write streams in as a delta, and a SIGTERM shutdown drains
+/// cleanly — each proven by rebuilding a fresh store from the journal
+/// directory alone.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_attaches_journal_from_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let jrn_dir = dir.path().join("journal");
+
+    // state that predates the journal: only the attach-time base carries it
+    {
+        let opts = Options {
+            sync: SyncMode::Never,
+            ..Options::default()
+        };
+        let db = Db::open(&db_dir, opts).unwrap();
+        db.put(b"pre".to_vec(), b"base".to_vec()).unwrap();
+    }
+
+    let cfg_path = dir.path().join("server.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            r#"
+dir = "{}"
+sync = "never"
+
+[listen]
+graphql = "127.0.0.1:0"
+wire = "127.0.0.1:0"
+replication = "127.0.0.1:0"
+
+[journal]
+dir = "{}"
+"#,
+            db_dir.display(),
+            jrn_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-server"))
+        .arg("--config")
+        .arg(&cfg_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // the binary announces the journal and each plane's bound address
+    let mut graphql: Option<SocketAddr> = None;
+    let mut journal_line = String::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while graphql.is_none() || journal_line.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = rx.recv_timeout(left) else {
+            child.kill().ok();
+            panic!("binary did not announce journal + graphql in time");
+        };
+        if let Some(rest) = line.strip_prefix("fluent-server: graphql") {
+            let addr = rest.trim_start().strip_prefix("http://").unwrap();
+            graphql = Some(addr[..addr.find("/graphql").unwrap()].parse().unwrap());
+        } else if line.starts_with("fluent-server: journal") {
+            journal_line = line;
+        }
+    }
+    assert!(
+        journal_line.contains(&jrn_dir.display().to_string()),
+        "journal dir not sourced from the config file: {journal_line}"
+    );
+
+    // the attach-time base snapshot covers the pre-existing key
+    wait_for("base snapshot to cover pre-attach state", || {
+        rebuilt_value(&jrn_dir, b"pre") == Some(b"base".to_vec())
+    })
+    .await;
+
+    // a live write flows through the delta stream (fsynced per batch)
+    let resp = graphql_post(
+        graphql.unwrap(),
+        r#"{"query":"mutation { put(key: {text: \"live\"}, value: {text: \"delta\"}) }"}"#,
+    )
+    .await;
+    assert!(resp.contains(r#""put":true"#), "{resp}");
+    wait_for("delta to reach the journal", || {
+        rebuilt_value(&jrn_dir, b"live") == Some(b"delta".to_vec())
+    })
+    .await;
+
+    // graceful shutdown: the journal drains and flushes before the Db drops
+    let killed = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status()
+        .unwrap()
+        .success();
+    assert!(killed, "kill -TERM failed");
+    let status = child.wait().unwrap();
+    assert!(status.success(), "clean shutdown must exit 0, got {status}");
+    assert_eq!(rebuilt_value(&jrn_dir, b"pre"), Some(b"base".to_vec()));
+    assert_eq!(rebuilt_value(&jrn_dir, b"live"), Some(b"delta".to_vec()));
 }
 
 /// Echo module (query + execute) for the wasm-disabled test.

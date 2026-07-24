@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fluent31::journal::{self, Journal, JournalConfig};
-use fluent31::{Db, Options, SyncMode};
+use fluent31::{Db, Error, Options, SyncMode};
 
 fn opts() -> Options {
     Options {
@@ -534,4 +534,107 @@ fn rebuild_from_empty_journal_errors() {
     let empty = tempfile::tempdir().unwrap();
     let dest = tempfile::tempdir().unwrap();
     assert!(journal::rebuild(empty.path(), dest.path(), opts()).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Continuity: a damaged chain is a loud, classified error — never silent loss
+// ---------------------------------------------------------------------------
+
+/// Journal spread over several small files (auto-compaction off so nothing
+/// is pruned); returns the id of its lowest file. `min_id + 1` is always a
+/// removable middle.
+fn build_multi_file_journal(db_dir: &std::path::Path, jrn_dir: &std::path::Path) -> u64 {
+    let cfg = JournalConfig {
+        rotate_bytes: 4 << 10,
+        compact_when_deltas_exceed: None,
+        ..JournalConfig::default()
+    };
+    let db = Arc::new(Db::open(db_dir, opts()).unwrap());
+    let journal = Journal::attach_with_config(db.clone(), jrn_dir, cfg).unwrap();
+    for i in 0..400u32 {
+        db.put(k(i), v(i, "a")).unwrap();
+    }
+    let target = db.stats().visible_seqno;
+    wait_until("drain", 10, || journal.stats().last_seqno >= target);
+    drop(journal);
+    let (min_id, files, _) = journal_disk(jrn_dir);
+    assert!(files >= 3, "need a removable middle file, got {files}");
+    min_id
+}
+
+#[test]
+fn missing_middle_file_is_a_loud_gap_error() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+    let min_id = build_multi_file_journal(db_dir.path(), jrn_dir.path());
+
+    // a middle segment vanishes (bad disk, incomplete copy of shipped files)
+    std::fs::remove_file(jrn_dir.path().join(format!("journal-{:06}.log", min_id + 1))).unwrap();
+
+    // rebuild must refuse — replaying across the hole would silently drop
+    // every mutation the missing file held — and must say "gap", so a
+    // caller can go fetch the missing segment rather than triage corruption
+    let dest = tempfile::tempdir().unwrap();
+    let err = journal::rebuild(jrn_dir.path(), dest.path(), opts()).unwrap_err();
+    assert!(matches!(err, Error::JournalGap(_)), "want JournalGap, got {err:?}");
+}
+
+#[test]
+fn torn_middle_file_is_corruption_not_a_gap() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+    let min_id = build_multi_file_journal(db_dir.path(), jrn_dir.path());
+
+    // a middle file is present but damaged: sealed files never end torn
+    let path = jrn_dir.path().join(format!("journal-{:06}.log", min_id + 1));
+    let len = std::fs::metadata(&path).unwrap().len();
+    let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    f.set_len(len - 3).unwrap();
+
+    let dest = tempfile::tempdir().unwrap();
+    let err = journal::rebuild(jrn_dir.path(), dest.path(), opts()).unwrap_err();
+    assert!(matches!(err, Error::Corruption(_)), "want Corruption, got {err:?}");
+}
+
+#[test]
+fn delta_seqno_regression_is_corruption() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+
+    {
+        let db = Arc::new(Db::open(db_dir.path(), opts()).unwrap());
+        let journal = Journal::attach(db.clone(), jrn_dir.path()).unwrap();
+        for i in 0..50u32 {
+            db.put(k(i), v(i, "a")).unwrap();
+        }
+        let target = db.stats().visible_seqno;
+        wait_until("drain", 10, || journal.stats().last_seqno >= target);
+        drop(journal);
+    }
+
+    // hand-append a well-framed delta whose seqno runs backwards — the
+    // stream is strictly ascending, so this models a reordered/rewritten log
+    let mut payload = vec![4u8]; // TAG_DELTA
+    payload.extend_from_slice(&1u64.to_le_bytes()); // seqno 1: far in the past
+    payload.push(1); // kind: Put
+    payload.extend_from_slice(&[1, b'k']); // uvarint key len + key
+    payload.extend_from_slice(&[1, b'v']); // uvarint value len + value
+    let mut rec = (payload.len() as u32).to_le_bytes().to_vec();
+    rec.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+    rec.extend_from_slice(&payload);
+    let newest = std::fs::read_dir(jrn_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .max()
+        .unwrap();
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&newest).unwrap();
+        f.write_all(&rec).unwrap();
+    }
+
+    let dest = tempfile::tempdir().unwrap();
+    let err = journal::rebuild(jrn_dir.path(), dest.path(), opts()).unwrap_err();
+    assert!(matches!(err, Error::Corruption(_)), "want Corruption, got {err:?}");
 }

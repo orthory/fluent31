@@ -36,7 +36,7 @@ use tokio::task::JoinHandle;
 
 pub use config::{
     parse_sync, CompressionKey, ConfigError, EngineSection, FileConfig, GraphqlSection,
-    IoBackendKey, ListenSection, ReplicationSection, WireSection,
+    IoBackendKey, JournalSection, ListenSection, ReplicationSection, WireSection,
 };
 
 /// Listen addresses plus each composed plane's tunables. Every plane is

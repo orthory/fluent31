@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use fluent31::{Db, Options, SyncMode};
+use fluent31::{Db, Journal, Options, SyncMode};
 use fluent_server::{parse_sync, FileConfig, GraphqlSection, ListenSection, Server, ServerConfig};
 
 const USAGE: &str = "\
@@ -21,9 +21,11 @@ serves every plane of one store in one process:
 
 --config FILE reads TOML settings, kebab-case: top-level dir / store-name /
   sync, [listen] graphql/wire/replication, and the file-only tuning
-  sections [graphql] [wire] [replication] [engine] — [engine] covers every
-  fluent31::Options tunable. Explicit flags override the file. Annotated
-  example: crates/fluent-server/src/config.rs";
+  sections [graphql] [wire] [replication] [journal] [engine] — [engine]
+  covers every fluent31::Options tunable, [journal] dir attaches the
+  opt-in mutation journal (rebuild: fluent-cli journal-rebuild). Explicit
+  flags override the file. Annotated example:
+  crates/fluent-server/src/config.rs";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -114,12 +116,40 @@ fn main() -> ExitCode {
         .unwrap_or(SyncMode::Always);
     let cfg = eff.server_config();
     let opts = eff.engine_options(sync);
+    // [journal] is opt-in; once present it must name a destination — a
+    // section that journals nowhere would be a silent no-op
+    let journal = match &eff.journal {
+        Some(j) => match &j.dir {
+            Some(d) => Some((d.clone(), j.config())),
+            None => {
+                eprintln!("fluent-server: [journal] section needs dir");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
     let db = match Db::open(&dir, opts.clone()) {
         Ok(d) => Arc::new(d),
         Err(e) => {
             eprintln!("fluent-server: cannot open {dir}: {e}");
             return ExitCode::FAILURE;
         }
+    };
+    // Attached before serving, so the base snapshot precedes every streamed
+    // request. Held to the end of main — its Drop (drainer join + final
+    // flush) runs after serve returns, before the last Db handle goes down.
+    let _journal = match journal {
+        Some((jdir, jcfg)) => match Journal::attach_with_config(db.clone(), &jdir, jcfg) {
+            Ok(j) => {
+                println!("fluent-server: journal      {jdir} (mutation journal — rebuild: fluent-cli journal-rebuild)");
+                Some(j)
+            }
+            Err(e) => {
+                eprintln!("fluent-server: cannot attach journal at {jdir}: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
     };
     serve(db, dir, opts, cfg)
 }

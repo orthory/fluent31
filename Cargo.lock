@@ -741,6 +741,7 @@ version = "0.1.0"
 dependencies = [
  "fluent31",
  "rustyline",
+ "tempfile",
 ]
 
 [[package]]

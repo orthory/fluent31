@@ -374,15 +374,10 @@ fn header_payload(source: &InstanceId) -> Vec<u8> {
     hdr
 }
 
-/// Read and validate the header record of a journal file, returning the
-/// recorded source instance id.
-fn read_header(path: &Path) -> Result<InstanceId> {
-    let bytes = std::fs::read(path)?;
-    let (records, _) = read_records(&bytes);
-    let first = records
-        .first()
-        .ok_or_else(|| corrupt("journal file has no header"))?;
-    let mut r = Reader::new(first);
+/// Decode and validate one header record, returning the recorded source
+/// instance id.
+fn parse_header(rec: &[u8]) -> Result<InstanceId> {
+    let mut r = Reader::new(rec);
     if r.u8()? != TAG_HEADER {
         return Err(corrupt("journal does not start with a header"));
     }
@@ -394,6 +389,17 @@ fn read_header(path: &Path) -> Result<InstanceId> {
     }
     let id: InstanceId = r.bytes(INSTANCE_ID_LEN)?.try_into().unwrap();
     Ok(id)
+}
+
+/// Read and validate the header record of a journal file, returning the
+/// recorded source instance id.
+fn read_header(path: &Path) -> Result<InstanceId> {
+    let bytes = std::fs::read(path)?;
+    let (records, _) = read_records(&bytes);
+    let first = records
+        .first()
+        .ok_or_else(|| corrupt("journal file has no header"))?;
+    parse_header(first)
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +608,14 @@ fn prune_files_below(dir: &Path, keep_from: u64) -> Result<u64> {
 /// last complete base snapshot and replays every delta after it, reconstructing
 /// the source's user keyspace as of the journal's last durable record.
 ///
+/// The directory is verified before anything is replayed (see
+/// [`read_all_records`]): segment ids must be contiguous — a missing middle
+/// file is [`Error::JournalGap`], because replaying around it would silently
+/// lose the mutations it held — every file must record the same source
+/// store, and replayed delta seqnos must ascend. A journal reassembled from
+/// shipped or archived segments is therefore refused loudly when incomplete,
+/// never rebuilt with a hole.
+///
 /// `dest` must not already be an open/live database; a fresh directory is
 /// expected. Returns what was reconstructed.
 pub fn rebuild(journal_dir: impl AsRef<Path>, dest: impl AsRef<Path>, opts: Options) -> Result<RebuildReport> {
@@ -612,15 +626,7 @@ pub fn rebuild(journal_dir: impl AsRef<Path>, dest: impl AsRef<Path>, opts: Opti
     }
 
     // header + provenance
-    let mut r0 = Reader::new(&records[0]);
-    if r0.u8()? != TAG_HEADER {
-        return Err(corrupt("journal does not start with a header"));
-    }
-    r0.u8()?; // format
-    if r0.u64()? != MAGIC {
-        return Err(corrupt("bad journal magic"));
-    }
-    let source: InstanceId = r0.bytes(INSTANCE_ID_LEN)?.try_into().unwrap();
+    let source = parse_header(&records[0])?;
 
     // Find the last CHECKPOINT that is followed by a BASE_END: its base is
     // complete. Records between it and its base-end are the base; everything
@@ -646,11 +652,21 @@ pub fn rebuild(journal_dir: impl AsRef<Path>, dest: impl AsRef<Path>, opts: Opti
     last_seqno = last_seqno.max(anchor.base_seqno);
 
     // replay deltas after the base-end, in file (== seqno) order
+    let mut prev_delta = 0u64;
     for rec in &records[anchor.base_end + 1..] {
         let mut r = Reader::new(rec);
         match r.u8()? {
             TAG_DELTA => {
                 let seq = r.u64()?;
+                // every delta past the anchor came from one subscription,
+                // whose delivery is strictly seqno-ascending — a regression
+                // means the stream was reordered or rewritten
+                if seq <= prev_delta {
+                    return Err(corrupt(format!(
+                        "journal delta seqno {seq} after {prev_delta} — deltas out of order"
+                    )));
+                }
+                prev_delta = seq;
                 let kind = ValueKind::from_u8(r.u8()?)?;
                 let key = r.len_prefixed()?.to_vec();
                 match kind {
@@ -744,25 +760,59 @@ fn read_records(bytes: &[u8]) -> (Vec<Vec<u8>>, usize) {
     (records, pos)
 }
 
-/// Read every journal file in id order, concatenating their records. A file
-/// that ends torn must be the last one written; later files after a torn file
-/// signal corruption.
+/// Read every journal file in id order, concatenating their records, after
+/// verifying the directory is a chain the writer could have produced:
+///
+/// - **Ids contiguous.** The writer rotates by +1 and compaction prunes only
+///   a prefix, so a healthy journal is a gapless id range. A missing middle
+///   file is that segment's mutations silently gone — [`Error::JournalGap`],
+///   never silent concatenation.
+/// - **One lineage.** Every file the writer creates opens with the
+///   provenance header; a file recording a different source store must not
+///   splice into the replay stream. (A zero-record file is a benign crash
+///   tail — rotation creates the file before its header is durable.)
+/// - A file that ends torn must be the last one written; a torn file with
+///   newer files after it was sealed by rotation and can only mean damage.
 fn read_all_records(dir: &Path) -> Result<Vec<Vec<u8>>> {
     let ids = list_log_ids(dir)?;
-    if ids.is_empty() {
+    let Some(&last) = ids.last() else {
         return Err(corrupt("no journal files found"));
-    }
+    };
     let mut out = Vec::new();
-    let last = *ids.last().unwrap();
+    let mut source: Option<InstanceId> = None;
+    let mut expected = ids[0];
     for id in ids {
+        if id != expected {
+            return Err(Error::JournalGap(format!(
+                "journal file {expected} is missing ({} then {id} on disk)",
+                expected - 1
+            )));
+        }
+        expected = id + 1;
         let bytes = std::fs::read(log_path(dir, id))?;
         let (recs, clean_len) = read_records(&bytes);
-        out.extend(recs);
         if clean_len < bytes.len() && id != last {
             return Err(corrupt(format!(
                 "journal file {id} ends torn but is not the newest"
             )));
         }
+        if let Some(head) = recs.first() {
+            if head.first() != Some(&TAG_HEADER) {
+                return Err(corrupt(format!(
+                    "journal file {id} does not open with a header"
+                )));
+            }
+            let recorded = parse_header(head)?;
+            let known = *source.get_or_insert(recorded);
+            if recorded != known {
+                return Err(Error::ProvenanceMismatch(format!(
+                    "journal file {id} belongs to store {} but the journal opened as {}",
+                    hex(&recorded),
+                    hex(&known)
+                )));
+            }
+        }
+        out.extend(recs);
     }
     Ok(out)
 }
