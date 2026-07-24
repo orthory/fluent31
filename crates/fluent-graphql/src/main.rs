@@ -5,10 +5,10 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use fluent31::{Db, Journal, Options, SyncMode};
+use fluent31::{Db, Journal, JournalConfig, Options, SyncMode};
 use fluent_graphql::{InstanceRegistry, RegistryConfig, SchemaManager};
 
-const USAGE: &str = "usage: fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync always|never|periodic:<ms>] [--max-body-bytes N] [--journal DIR]\n       fluent-graphql --print-schema";
+const USAGE: &str = "usage: fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync always|never|periodic:<ms>] [--max-body-bytes N]\n                      [--journal DIR] [--journal-rotate-bytes N] [--journal-compact-when-deltas-exceed R|off] [--journal-compact-min-bytes N]\n       fluent-graphql --print-schema";
 const DEFAULT_MAX_BODY: usize = 32 << 20;
 
 fn usage() -> ExitCode {
@@ -22,6 +22,10 @@ fn main() -> ExitCode {
     let mut sync = SyncMode::Always;
     let mut max_body = DEFAULT_MAX_BODY;
     let mut journal: Option<String> = None;
+    let mut journal_rotate_bytes: Option<u64> = None;
+    // Some(None) is `off`: auto-compaction disabled (lag healing still compacts)
+    let mut journal_compact_ratio: Option<Option<f64>> = None;
+    let mut journal_compact_min_bytes: Option<u64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -51,6 +55,22 @@ fn main() -> ExitCode {
                 Some(v) => journal = Some(v),
                 None => return usage(),
             },
+            "--journal-rotate-bytes" => match args.next().and_then(|v| v.parse().ok()) {
+                Some(v) => journal_rotate_bytes = Some(v),
+                None => return usage(),
+            },
+            "--journal-compact-when-deltas-exceed" => match args.next().as_deref() {
+                Some("off") => journal_compact_ratio = Some(None),
+                Some(v) => match v.parse::<f64>() {
+                    Ok(r) => journal_compact_ratio = Some(Some(r)),
+                    Err(_) => return usage(),
+                },
+                None => return usage(),
+            },
+            "--journal-compact-min-bytes" => match args.next().and_then(|v| v.parse().ok()) {
+                Some(v) => journal_compact_min_bytes = Some(v),
+                None => return usage(),
+            },
             "--print-schema" => {
                 print!("{}", fluent_graphql::base_sdl());
                 return ExitCode::SUCCESS;
@@ -64,6 +84,16 @@ fn main() -> ExitCode {
         }
     }
     let Some(dir) = dir else { return usage() };
+
+    // tuning without a journal would be a silent no-op; refuse it, the way
+    // fluent-server refuses a [journal] section that names no dir
+    let journal_tuning_given = journal_rotate_bytes.is_some()
+        || journal_compact_ratio.is_some()
+        || journal_compact_min_bytes.is_some();
+    if journal_tuning_given && journal.is_none() {
+        eprintln!("fluent-graphql: --journal-* tuning flags need --journal DIR");
+        return ExitCode::FAILURE;
+    }
 
     let opts = Options {
         sync,
@@ -80,8 +110,21 @@ fn main() -> ExitCode {
     // then streamed deltas on a background thread for the life of the
     // process. Held to the end of main — its Drop (drainer join + final
     // flush) runs after serve returns, before the last Db handle goes down.
+    // Flag overrides apply over JournalConfig::default, mirroring
+    // fluent-server's [journal] section; value validation (rotate > 0,
+    // ratio finite and > 0) lives in attach_with_config.
+    let mut journal_cfg = JournalConfig::default();
+    if let Some(v) = journal_rotate_bytes {
+        journal_cfg.rotate_bytes = v;
+    }
+    if let Some(v) = journal_compact_ratio {
+        journal_cfg.compact_when_deltas_exceed = v;
+    }
+    if let Some(v) = journal_compact_min_bytes {
+        journal_cfg.compact_min_bytes = v;
+    }
     let _journal = match &journal {
-        Some(jdir) => match Journal::attach(db.clone(), jdir) {
+        Some(jdir) => match Journal::attach_with_config(db.clone(), jdir, journal_cfg) {
             Ok(j) => {
                 println!("fluent-graphql: journaling to {jdir}");
                 Some(j)

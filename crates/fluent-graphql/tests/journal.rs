@@ -2,7 +2,10 @@
 //! opt-in mutation journal (fluent31::journal) — the attach-time base
 //! snapshot captures state that predates the flag, live GraphQL writes
 //! stream in as deltas, and a SIGTERM shutdown drains cleanly — proven by
-//! rebuilding fresh stores from the journal directory alone.
+//! rebuilding fresh stores from the journal directory alone. The
+//! `--journal-*` tuning flags plumb a JournalConfig through to the writer —
+//! proven by forcing a rotation with a tiny `--journal-rotate-bytes` — and
+//! are refused without `--journal DIR`.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -25,6 +28,19 @@ fn rebuilt_value(jrn: &Path, key: &[u8]) -> Option<Vec<u8>> {
     journal::rebuild(jrn, dest.path(), opts()).ok()?;
     let db = Db::open(dest.path(), opts()).unwrap();
     db.get(key).unwrap()
+}
+
+/// `journal-*.log` files currently in the journal directory.
+fn log_file_count(jrn: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(jrn) else { return 0 };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("journal-") && name.ends_with(".log")
+        })
+        .count()
 }
 
 fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
@@ -114,4 +130,66 @@ fn journal_flag_attaches_streams_and_survives_shutdown() {
     assert!(status.success(), "clean shutdown must exit 0, got {status}");
     assert_eq!(rebuilt_value(jrn.path(), b"pre"), Some(b"base".to_vec()));
     assert_eq!(rebuilt_value(jrn.path(), b"live"), Some(b"delta".to_vec()));
+}
+
+#[cfg(unix)]
+#[test]
+fn journal_rotate_bytes_flag_reaches_the_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let jrn = tempfile::tempdir().unwrap();
+
+    let addr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().to_string()
+    };
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-graphql"))
+        .arg(dir.path())
+        .arg("--listen")
+        .arg(&addr)
+        .arg("--sync")
+        .arg("never")
+        .arg("--journal")
+        .arg(jrn.path())
+        .arg("--journal-rotate-bytes")
+        .arg("512")
+        .spawn()
+        .unwrap();
+
+    wait_for("graphql plane to accept", || {
+        std::net::TcpStream::connect(&addr).is_ok()
+    });
+    // one delta bigger than rotate-bytes: appending it pushes the active
+    // file past 512 and rotates — a second journal file can only appear if
+    // the flag reached the LogWriter (the default is 128 MiB)
+    let val = "x".repeat(4 << 10);
+    let resp = graphql_post(
+        &addr,
+        &format!(r#"{{"query":"mutation {{ put(key: {{text: \"big\"}}, value: {{text: \"{val}\"}}) }}"}}"#),
+    );
+    assert!(resp.contains(r#""put":true"#), "{resp}");
+    wait_for("rotation to a second journal file", || {
+        log_file_count(jrn.path()) >= 2
+    });
+
+    // a rebuild spanning the rotation boundary still reconstructs the value
+    wait_for("delta to reach the journal", || {
+        rebuilt_value(jrn.path(), b"big") == Some(val.as_bytes().to_vec())
+    });
+    kill_term(child.id());
+    let status = child.wait().unwrap();
+    assert!(status.success(), "clean shutdown must exit 0, got {status}");
+}
+
+#[test]
+fn journal_tuning_flags_without_journal_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-graphql"))
+        .arg(dir.path())
+        .arg("--journal-rotate-bytes")
+        .arg("512")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "tuning without --journal must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--journal-* tuning flags need --journal DIR"), "{stderr}");
 }
