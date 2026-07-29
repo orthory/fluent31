@@ -151,6 +151,40 @@ fn journal_captures_state_that_predates_attach() {
     assert_eq!(dump(&rebuilt), expected);
 }
 
+#[test]
+fn rebuild_installs_the_base_directly_at_the_bottom_level() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+
+    let expected = {
+        let db = Arc::new(Db::open(db_dir.path(), opts()).unwrap());
+        for i in 0..500u32 {
+            db.put(k(i), v(i, "base")).unwrap();
+        }
+        db.flush().unwrap();
+        let expected = dump(&db);
+        let journal = Journal::attach(db, jrn_dir.path()).unwrap();
+        drop(journal);
+        expected
+    };
+
+    let rebuilt_root = tempfile::tempdir().unwrap();
+    let rebuilt_path = rebuilt_root.path().join("store");
+    let report = journal::rebuild(jrn_dir.path(), &rebuilt_path, opts()).unwrap();
+    assert_eq!(report.base_keys, expected.len() as u64);
+    assert_eq!(report.deltas_applied, 0);
+
+    let rebuilt = Db::open(&rebuilt_path, opts()).unwrap();
+    assert_eq!(dump(&rebuilt), expected);
+    let stats = rebuilt.stats();
+    assert_eq!(stats.memtable_bytes, 0);
+    assert_eq!(stats.immutable_memtables, 0);
+    assert!(stats.levels[..stats.levels.len() - 1]
+        .iter()
+        .all(|(runs, fragments, _)| *runs == 0 && *fragments == 0));
+    assert_eq!(stats.levels.last().unwrap().0, 1);
+}
+
 // ---------------------------------------------------------------------------
 // The journal keeps up under sustained write pressure (heals lag if it can't)
 // ---------------------------------------------------------------------------
