@@ -11,20 +11,55 @@ use crate::coding::Reader;
 use crate::error::{corrupt, Result};
 use crate::io::DbFile;
 use crate::iter::InternalIterator;
-use crate::types::{
-    cmp_ikey, ikey_kind, ikey_seqno, ikey_ukey, make_seek_ikey, SeqNo, ValueKind,
-};
+use crate::types::{cmp_ikey, ikey_kind, ikey_seqno, ikey_ukey, make_seek_ikey, SeqNo, ValueKind};
 
-struct IndexEntry {
-    last_ikey: Vec<u8>,
-    block: BlockRef,
+/// The pinned block index, flat: one keys arena + one offsets vector instead of a
+/// heap `Vec<u8>` per entry. The index lives for the table's whole life and there is
+/// one entry per data block, so per-entry allocator overhead (Vec header + malloc
+/// header + size-class rounding, ~60-80 bytes against ~40-byte keys) roughly doubled
+/// its residency. Same lookups, half the heap, no per-entry allocations to churn.
+struct TableIndex {
+    /// Concatenated last-ikeys, in index order.
+    keys: Vec<u8>,
+    /// `ends[i]` = exclusive end of entry i's key in `keys` (entry i starts at `ends[i-1]`).
+    ends: Vec<u32>,
+    blocks: Vec<BlockRef>,
+}
+
+impl TableIndex {
+    fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    fn key(&self, i: usize) -> &[u8] {
+        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        &self.keys[start..self.ends[i] as usize]
+    }
+
+    fn block(&self, i: usize) -> BlockRef {
+        self.blocks[i]
+    }
+
+    /// First entry whose key is `>= target` (the partition point of `< target`).
+    fn lower_bound(&self, target: &[u8]) -> usize {
+        let (mut lo, mut hi) = (0, self.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if cmp_ikey(self.key(mid), target) == std::cmp::Ordering::Less {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
 }
 
 pub(crate) struct Table {
     pub id: u64,
     file: Arc<dyn DbFile>,
     cache: Arc<BlockCache>,
-    index: Vec<IndexEntry>,
+    index: TableIndex,
     filter: Vec<u8>,
     pub stats: TableStats,
 }
@@ -43,26 +78,32 @@ impl Table {
         let stats = TableStats::decode(&read_block_verified(file.as_ref(), footer.stats)?)?;
 
         let index_payload = read_block_verified(file.as_ref(), footer.index)?;
-        let mut index = Vec::new();
+        let mut index = TableIndex {
+            keys: Vec::new(),
+            ends: Vec::new(),
+            blocks: Vec::new(),
+        };
         let mut r = Reader::new(&index_payload);
         while !r.is_empty() {
-            let last_ikey = r.len_prefixed()?.to_vec();
+            let last_ikey = r.len_prefixed()?;
             if last_ikey.len() < crate::types::TRAILER_LEN {
                 return Err(corrupt("index key shorter than trailer"));
             }
             let off = r.uvarint()?;
             let len = r.uvarint()?;
-            index.push(IndexEntry {
-                last_ikey,
-                block: BlockRef {
-                    off,
-                    len: len as u32,
-                },
+            index.keys.extend_from_slice(last_ikey);
+            let end = u32::try_from(index.keys.len())
+                .map_err(|_| corrupt("index keys exceed u32 arena"))?;
+            index.ends.push(end);
+            index.blocks.push(BlockRef {
+                off,
+                len: len as u32,
             });
         }
-        if index.is_empty() {
+        if index.blocks.is_empty() {
             return Err(corrupt("table has no data blocks"));
         }
+        index.keys.shrink_to_fit();
         Ok(Table {
             id,
             file,
@@ -83,7 +124,9 @@ impl Table {
     pub fn read_chunk(&self, off: u64, len: usize) -> Result<Vec<u8>> {
         let flen = self.file.len()?;
         if off >= flen {
-            return Err(corrupt(format!("chunk offset {off} beyond table end {flen}")));
+            return Err(corrupt(format!(
+                "chunk offset {off} beyond table end {flen}"
+            )));
         }
         let n = (len as u64).min(flen - off) as usize;
         let mut buf = vec![0u8; n];
@@ -92,7 +135,7 @@ impl Table {
     }
 
     fn load_block(&self, idx: usize) -> Result<Arc<Block>> {
-        let r = self.index[idx].block;
+        let r = self.index.block(idx);
         let payload = match self.cache.get(self.id, r.off) {
             Some(p) => p,
             None => {
@@ -107,8 +150,7 @@ impl Table {
     /// First block whose last key is `>= target` — the only block that can
     /// contain the lower bound for `target`.
     fn index_lower_bound(&self, target: &[u8]) -> usize {
-        self.index
-            .partition_point(|e| cmp_ikey(&e.last_ikey, target) == std::cmp::Ordering::Less)
+        self.index.lower_bound(target)
     }
 
     pub fn may_contain_ukey(&self, ukey: &[u8]) -> bool {
@@ -401,14 +443,14 @@ mod tests {
         // seek beyond the end / before the start
         it.seek(&make_seek_ikey(b"zzz", MAX_SEQNO)).unwrap();
         assert!(!it.valid());
-        it.seek_for_prev(&make_seek_ikey(b"aaa", MAX_SEQNO)).unwrap();
+        it.seek_for_prev(&make_seek_ikey(b"aaa", MAX_SEQNO))
+            .unwrap();
         assert!(!it.valid());
     }
 
     #[test]
     fn bloom_filters_absent_keys() {
-        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> =
-            vec![(b"only", 1, ValueKind::Put, b"v")];
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = vec![(b"only", 1, ValueKind::Put, b"v")];
         let (_dir, t) = build_table(&refs, 4096);
         assert!(t.may_contain_ukey(b"only"));
         assert!(!t.may_contain_ukey(b"absent")); // outside key range
@@ -456,8 +498,7 @@ mod tests {
     /// stays format 1 — readable by binaries that predate compression.
     #[test]
     fn incompressible_lz4_table_stays_format_1() {
-        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> =
-            vec![(b"only", 1, ValueKind::Put, b"v")];
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = vec![(b"only", 1, ValueKind::Put, b"v")];
         let (_dir, t, _) = build_table_sized(&refs, 4096, Compression::Lz4);
         assert_eq!(footer_format(&t), FORMAT);
         let got = t.get(b"only", MAX_SEQNO).unwrap().unwrap();
