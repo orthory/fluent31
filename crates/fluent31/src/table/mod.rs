@@ -25,12 +25,22 @@ pub(crate) const FORMAT: u32 = 1;
 /// table actually contains a compressed block, so stores that never enable
 /// compression stay readable by format-1 binaries.
 pub(crate) const FORMAT_COMPRESSED: u32 = 2;
+/// At least one block is zstd-compressed (codec byte 2). Pre-zstd binaries
+/// reject the table at open ("unsupported table format") instead of failing
+/// on the first zstd block mid-read.
+pub(crate) const FORMAT_ZSTD: u32 = 3;
 pub(crate) const FOOTER_LEN: usize = 48;
 pub(crate) const BLOCK_TRAILER_LEN: usize = 5;
 
 /// Block codec bytes (the trailer's `compression u8`).
 pub(crate) const CODEC_NONE: u8 = 0;
 pub(crate) const CODEC_LZ4: u8 = 1;
+pub(crate) const CODEC_ZSTD: u8 = 2;
+/// Zstd compression level for `Compression::Zstd`. Fixed rather than
+/// configurable: measured on real store data, level 8 buys ~0.5% over
+/// level 3 for several times the compress CPU. Not part of the wire
+/// format (only the codec byte is), so it can change without a rebuild.
+pub(crate) const ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BlockRef {
@@ -81,7 +91,7 @@ impl Footer {
         if magic != MAGIC {
             return Err(corrupt("bad table magic"));
         }
-        if !(FORMAT..=FORMAT_COMPRESSED).contains(&format) {
+        if !(FORMAT..=FORMAT_ZSTD).contains(&format) {
             return Err(corrupt(format!("unsupported table format {format}")));
         }
         Ok(Footer {
@@ -113,6 +123,19 @@ pub(crate) fn read_block_verified(file: &dyn DbFile, r: BlockRef) -> Result<Vec<
         }
         CODEC_LZ4 => lz4_flex::block::decompress_size_prepended(&buf[..payload_end - 1])
             .map_err(|e| corrupt(format!("lz4 block decode: {e}"))),
+        CODEC_ZSTD => {
+            let body = &buf[..payload_end - 1];
+            if body.len() < 4 {
+                return Err(corrupt("zstd block shorter than its size prefix"));
+            }
+            let raw_len = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
+            let raw = zstd::bulk::decompress(&body[4..], raw_len)
+                .map_err(|e| corrupt(format!("zstd block decode: {e}")))?;
+            if raw.len() != raw_len {
+                return Err(corrupt("zstd block size prefix mismatch"));
+            }
+            Ok(raw)
+        }
         codec => Err(corrupt(format!("unsupported compression {codec}"))),
     }
 }

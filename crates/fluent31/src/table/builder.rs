@@ -2,12 +2,15 @@
 
 use std::sync::Arc;
 
-use super::{BlockRef, Footer, TableStats, CODEC_LZ4, CODEC_NONE, FORMAT, FORMAT_COMPRESSED};
+use super::{
+    BlockRef, Footer, TableStats, CODEC_LZ4, CODEC_NONE, CODEC_ZSTD, FORMAT, FORMAT_COMPRESSED,
+    FORMAT_ZSTD, ZSTD_LEVEL,
+};
 use crate::block::BlockBuilder;
 use crate::bloom;
 use crate::coding::{crc32, put_len_prefixed, put_uvarint};
 use crate::config::Compression;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::io::DbFile;
 use crate::types::{ikey_kind, ikey_seqno, ikey_ukey, ValueKind};
 
@@ -24,6 +27,7 @@ pub(crate) struct TableBuilder {
     /// Whether any block was actually stored compressed — gates the footer
     /// format bump (old readers keep opening tables that stayed all-raw).
     wrote_compressed: bool,
+    wrote_zstd: bool,
 
     key_hashes: Vec<u64>,
     last_hashed_ukey: Vec<u8>,
@@ -48,6 +52,7 @@ impl TableBuilder {
             index: Vec::new(),
             offset: 0,
             wrote_compressed: false,
+            wrote_zstd: false,
             key_hashes: Vec::new(),
             last_hashed_ukey: Vec::new(),
             stats: TableStats {
@@ -119,9 +124,23 @@ impl TableBuilder {
                     (CODEC_NONE, payload)
                 }
             }
+            Compression::Zstd => {
+                let mut framed = Vec::with_capacity(payload.len() / 2 + 8);
+                framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                match zstd::bulk::compress(&payload, ZSTD_LEVEL) {
+                    Ok(compressed) => framed.extend_from_slice(&compressed),
+                    Err(e) => return Err(Error::Io(e)),
+                }
+                if framed.len() < payload.len() {
+                    (CODEC_ZSTD, framed)
+                } else {
+                    (CODEC_NONE, payload)
+                }
+            }
             Compression::None => (CODEC_NONE, payload),
         };
         self.wrote_compressed |= codec != CODEC_NONE;
+        self.wrote_zstd |= codec == CODEC_ZSTD;
         buf.push(codec);
         let crc = crc32(&buf);
         buf.extend_from_slice(&crc.to_le_bytes());
@@ -172,7 +191,9 @@ impl TableBuilder {
             filter: filter_ref,
             index: index_ref,
             stats: stats_ref,
-            format: if self.wrote_compressed {
+            format: if self.wrote_zstd {
+                FORMAT_ZSTD
+            } else if self.wrote_compressed {
                 FORMAT_COMPRESSED
             } else {
                 FORMAT
