@@ -27,6 +27,12 @@ pub enum Compression {
     /// shrink are stored raw, and a table's format version is bumped only
     /// when it actually contains a compressed block.
     Lz4,
+    /// Zstd (level 3) block compression. Denser than LZ4 (~20-25% smaller on
+    /// real stores) at a decompress speed that is still far above read-path
+    /// needs; the right pick for data that is written once and rarely read,
+    /// i.e. the bottom level. Tables carrying zstd blocks bump to format 3,
+    /// so pre-zstd readers reject them at open instead of failing mid-read.
+    Zstd,
 }
 
 /// IO backend selection.
@@ -77,6 +83,12 @@ pub struct Options {
     pub block_size: usize,
     /// Per-block SST compression codec (applies to newly written tables).
     pub compression: Compression,
+    /// Codec for compaction outputs landing in the BOTTOM level, where ~90%
+    /// of a store's bytes live and rewrites are rarest. `None` (the default)
+    /// means "same as `compression`". The classic pairing is fast-codec upper
+    /// levels + `Zstd` bottom: hot rewrites stay cheap, the cold bulk gets
+    /// the dense codec.
+    pub bottom_compression: Option<Compression>,
     /// Bloom filter budget per key, in bits.
     pub bloom_bits_per_key: usize,
     /// Shared block cache capacity in bytes.
@@ -156,6 +168,7 @@ impl Default for Options {
             max_immutable_memtables: 2,
             block_size: 8 << 10,
             compression: Compression::None,
+            bottom_compression: None,
             bloom_bits_per_key: 10,
             block_cache_size: 64 << 20,
             l0_compaction_trigger: 4,

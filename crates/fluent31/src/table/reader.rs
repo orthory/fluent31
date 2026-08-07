@@ -549,6 +549,44 @@ mod tests {
         assert_eq!(n, 500);
     }
 
+    /// Zstd tables round-trip every read path, land at or below the lz4 size,
+    /// and carry format 3 so pre-zstd readers reject them at open.
+    #[test]
+    fn zstd_round_trip_shrinks_and_bumps_format() {
+        let data = many();
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = data
+            .iter()
+            .map(|(k, s, kind, v)| (k.as_slice(), *s, *kind, v.as_slice()))
+            .collect();
+        let (_d1, lz4, lz4_size) = build_table_sized(&refs, 256, Compression::Lz4);
+        let (_d2, z, z_size) = build_table_sized(&refs, 256, Compression::Zstd);
+        assert!(
+            z_size <= lz4_size,
+            "zstd table ({z_size}) larger than lz4 ({lz4_size})"
+        );
+        assert_eq!(footer_format(&lz4), FORMAT_COMPRESSED);
+        assert_eq!(footer_format(&z), super::super::FORMAT_ZSTD);
+
+        for (k, s, kind, v) in &data {
+            let got = z.get(k, MAX_SEQNO).unwrap().unwrap();
+            assert_eq!(got.0, *kind);
+            assert_eq!(got.1, *s);
+            if *kind == ValueKind::Put {
+                assert_eq!(got.2, encode_inline(v));
+            }
+        }
+        assert!(z.get(b"key99999x", MAX_SEQNO).unwrap().is_none());
+
+        let mut it = z.iter();
+        it.seek_to_last().unwrap();
+        let mut n = 0;
+        while it.valid() {
+            n += 1;
+            it.prev().unwrap();
+        }
+        assert_eq!(n, 500);
+    }
+
     /// A table written with compression enabled but where no block shrinks
     /// stays format 1 — readable by binaries that predate compression.
     #[test]

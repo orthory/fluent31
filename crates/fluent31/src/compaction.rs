@@ -39,6 +39,9 @@ pub(crate) struct Job {
     /// may only be dropped if none of these can contain its key.
     older: Vec<Run>,
     kind: JobKind,
+    /// Output lands in (or creates) the deepest level, where
+    /// `Options::bottom_compression` applies.
+    bottom: bool,
 }
 
 enum JobKind {
@@ -141,6 +144,7 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
                 inputs: v.levels[i].clone(),
                 older,
                 kind: JobKind::Tier,
+                bottom: i + 1 == v.levels.len() - 1,
             });
         }
     }
@@ -160,6 +164,7 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
             inputs: v.levels[last].clone(),
             older: Vec::new(),
             kind: JobKind::Tier,
+            bottom: true,
         });
     }
     if v.levels[last].len() >= 2 {
@@ -219,6 +224,7 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
                 keep_right,
                 new_run_id: db.alloc_file_id(),
             },
+            bottom: true,
         });
     }
     None
@@ -306,7 +312,11 @@ fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
                         file,
                         db.opts.block_size,
                         db.opts.bloom_bits_per_key,
-                        db.opts.compression,
+                        if job.bottom {
+                            db.opts.bottom_compression.unwrap_or(db.opts.compression)
+                        } else {
+                            db.opts.compression
+                        },
                     ),
                 ));
             }

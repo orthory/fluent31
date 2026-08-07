@@ -3265,3 +3265,70 @@ mod group_commit_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod bottom_compression_tests {
+    use super::*;
+    use crate::config::Compression;
+
+    /// Footer layout: filter(12) + index(12) + stats(12) + format(4) + magic(8).
+    fn table_formats(dir: &std::path::Path) -> Vec<u32> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("sst-") && name.ends_with(".tbl") {
+                let b = std::fs::read(e.path()).unwrap();
+                out.push(u32::from_le_bytes(
+                    b[b.len() - 12..b.len() - 8].try_into().unwrap(),
+                ));
+            }
+        }
+        out
+    }
+
+    fn formats_after_compaction(bottom: Option<Compression>) -> Vec<u32> {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(
+            dir.path(),
+            Options {
+                sync: SyncMode::Never,
+                wasm_enabled: false,
+                memtable_size: 4 << 10,
+                block_size: 256,
+                max_levels: 2,
+                compression: Compression::Lz4,
+                bottom_compression: bottom,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        for i in 0..2000u32 {
+            db.put(
+                format!("key{i:06}").into_bytes(),
+                format!("value-{i}-{}", "x".repeat(64)).into_bytes(),
+            )
+            .unwrap();
+        }
+        db.flush().unwrap();
+        db.compact_all().unwrap();
+        table_formats(dir.path())
+    }
+
+    /// Wiring, not unit: with a 2-level tree every compaction output IS the
+    /// bottom, so `bottom_compression: Zstd` must yield format-3 tables from
+    /// the production compaction path — and the same workload without it
+    /// must not, proving the flag (not something else) selects the codec.
+    #[test]
+    fn bottom_compression_reaches_the_bottom_level() {
+        let with = formats_after_compaction(Some(Compression::Zstd));
+        assert!(
+            with.iter().any(|f| *f == 3),
+            "no zstd table written: {with:?}"
+        );
+        let without = formats_after_compaction(None);
+        assert!(
+            without.iter().all(|f| *f <= 2),
+            "unexpected format-3 table: {without:?}"
+        );
+    }
+}
