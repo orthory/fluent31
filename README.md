@@ -94,6 +94,26 @@ let a = db.fork_at("replica-a", s)?;
 let b = db.fork_at("replica-b", s)?; // same cut as replica-a
 ```
 
+## Bulk bootstrap
+
+When the complete initial keyspace is already available in strictly sorted,
+unique-key order, `Db::create_from_sorted` streams it directly into a fresh
+store's bottom-level run:
+
+```rust
+let entries = vec![(b"acct/1", b"100"), (b"acct/2", b"250")];
+let db = Db::create_from_sorted("./import", Options::default(), entries)?;
+```
+
+The builder preserves the configured compression, Bloom filters, value
+separation, vlog rotation, and SST fragment sizing. It makes the whole base
+visible with one manifest update and does not write it through the WAL,
+memtable, L0, or compaction. This is a creation primitive, not a live-ingest
+path: the destination must be absent or empty, keys must be valid user keys,
+and duplicates or out-of-order input are rejected. Fallible source iterators
+can use `Db::create_from_sorted_fallible`; an input error never publishes a
+partial base.
+
 ## What MVCC is (and isn't) for
 
 MVCC is how the engine gives you consistency — it is **not** an

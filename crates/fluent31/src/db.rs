@@ -415,18 +415,7 @@ impl DbInner {
                 BatchOp::Put { key, value } => (key, value.len()),
                 BatchOp::Delete { key } => (key, 0),
             };
-            validate_user_key(key)?;
-            if key.len() > self.opts.max_key_size {
-                return Err(Error::InvalidArgument(format!(
-                    "key of {} bytes exceeds max_key_size",
-                    key.len()
-                )));
-            }
-            if vlen > self.opts.max_value_size {
-                return Err(Error::InvalidArgument(format!(
-                    "value of {vlen} bytes exceeds max_value_size"
-                )));
-            }
+            validate_user_entry(&self.opts, key, vlen)?;
         }
         Ok(())
     }
@@ -1161,6 +1150,139 @@ impl DbInner {
         ))
     }
 
+    /// Build and atomically install the initial state of a fresh database.
+    /// No background thread or public handle exists while this runs.
+    fn load_sorted<I, K, V>(&self, entries: I) -> Result<()>
+    where
+        I: IntoIterator<Item = Result<(K, V)>>,
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let _ws = self.write_mu.lock();
+        {
+            let state = self.state.read();
+            let occupied = self.visible_seqno.load(Ordering::Acquire) != 0
+                || !state.mem.is_empty()
+                || !state.imms.is_empty()
+                || state.version.levels.iter().any(|level| !level.is_empty());
+            if occupied {
+                return Err(Error::InvalidArgument(
+                    "sorted bulk loading requires a fresh database".into(),
+                ));
+            }
+        }
+
+        let mut tables = Vec::new();
+        let mut builder: Option<(u64, TableBuilder)> = None;
+        let mut previous_key = Vec::new();
+        let mut count = 0u64;
+
+        for entry in entries {
+            let (key, value) = entry?;
+            let key = key.as_ref();
+            let value = value.as_ref();
+            validate_user_entry(&self.opts, key, value.len())?;
+            if !previous_key.is_empty() && key <= previous_key.as_slice() {
+                return Err(Error::InvalidArgument(
+                    "bulk-load keys must be strictly increasing".into(),
+                ));
+            }
+            let seq = count
+                .checked_add(1)
+                .filter(|seq| *seq < MAX_SEQNO)
+                .ok_or_else(|| Error::InvalidArgument("seqno space exhausted".into()))?;
+
+            if builder
+                .as_ref()
+                .is_some_and(|(_, b)| b.estimated_size() >= self.opts.target_file_size)
+            {
+                let (id, completed) = builder.take().unwrap();
+                tables.push(self.finish_table(id, completed)?);
+            }
+            if builder.is_none() {
+                let id = self.alloc_file_id();
+                let file = self.io.create_new(&self.paths.table(id))?;
+                builder = Some((
+                    id,
+                    TableBuilder::new(
+                        file,
+                        self.opts.block_size,
+                        self.opts.bloom_bits_per_key,
+                        self.opts.compression,
+                    ),
+                ));
+            }
+
+            let repr = if value.len() >= self.opts.value_threshold {
+                let ptr = self.vlog.append(key, value)?;
+                let (_, written, _) = self.vlog.head_state();
+                if written >= self.opts.vlog_file_size {
+                    self.rotate_vlog_locked()?;
+                }
+                encode_ptr(ptr)
+            } else {
+                encode_inline(value)
+            };
+            let ikey = make_ikey(key, seq, ValueKind::Put);
+            builder.as_mut().unwrap().1.add(&ikey, &repr)?;
+            previous_key.clear();
+            previous_key.extend_from_slice(key);
+            count = seq;
+        }
+
+        if let Some((id, completed)) = builder.take() {
+            tables.push(self.finish_table(id, completed)?);
+        }
+        if tables.is_empty() {
+            return Ok(());
+        }
+
+        // Every pointer payload and table must be durable before the
+        // manifest can make the base visible. TableBuilder::finish syncs
+        // each table; sync the current vlog head and their directory entries.
+        self.vlog.sync_head()?;
+        io::sync_dir(&self.paths.dir)?;
+
+        let run = Run {
+            id: self.alloc_file_id(),
+            tables,
+        };
+        let run_meta = RunMeta {
+            id: run.id,
+            table_ids: run.tables.iter().map(|table| table.id).collect(),
+        };
+        let level_count = crate::compaction::level_count_for_bottom_bytes(
+            &self.opts,
+            self.state.read().version.levels.len(),
+            run.size(),
+        );
+        let bottom = level_count - 1;
+
+        let mut manifest = self.manifest.lock();
+        let mut data = manifest.data.clone();
+        data.levels.resize(level_count, Vec::new());
+        data.levels[bottom].push(run_meta);
+        data.last_flushed_seqno = count;
+        {
+            let state = self.state.read();
+            data.vlog_live = state.version.vlogs.keys().copied().collect();
+            data.vlog_head = state.version.vlog_head_id;
+        }
+        data.next_file_id = self.next_file_id.load(Ordering::SeqCst);
+        let gen = manifest.gen + 1;
+        manifest::save(&self.paths, gen, &data)?;
+        manifest.gen = gen;
+        manifest.data = data;
+
+        let mut state = self.state.write();
+        let mut version = state.version.clone_shape();
+        version.levels.resize(level_count, Vec::new());
+        version.levels[bottom].push(run);
+        state.version = Arc::new(version);
+        self.visible_seqno.store(count, Ordering::Release);
+        Ok(())
+    }
+
     pub(crate) fn finish_table(&self, id: u64, b: TableBuilder) -> Result<Arc<TableHandle>> {
         let (_stats, size) = b.finish()?;
         let path = self.paths.table(id);
@@ -1168,6 +1290,22 @@ impl DbInner {
         let table = Table::open(file, id, self.cache.clone())?;
         Ok(Arc::new(TableHandle::new(id, path, size, table)))
     }
+}
+
+pub(crate) fn validate_user_entry(opts: &Options, key: &[u8], value_len: usize) -> Result<()> {
+    validate_user_key(key)?;
+    if key.len() > opts.max_key_size {
+        return Err(Error::InvalidArgument(format!(
+            "key of {} bytes exceeds max_key_size",
+            key.len()
+        )));
+    }
+    if value_len > opts.max_value_size {
+        return Err(Error::InvalidArgument(format!(
+            "value of {value_len} bytes exceeds max_value_size"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_file_id(name: &str, prefix: &str, suffix: &str) -> Option<u64> {
@@ -1233,6 +1371,43 @@ pub struct DbStats {
 impl Db {
     pub fn open(dir: impl AsRef<Path>, opts: Options) -> Result<Db> {
         Self::spawn_from_inner(open_inner(dir.as_ref(), opts)?)
+    }
+
+    /// Create a fresh database from strictly increasing, unique user keys.
+    ///
+    /// The input is streamed directly into final-level table files while
+    /// preserving the configured compression, Bloom filters, value
+    /// separation, and file-size targets. The completed base becomes visible
+    /// through one manifest update; it never enters the WAL, memtable, or L0.
+    /// The destination must be absent or an empty directory.
+    pub fn create_from_sorted<I, K, V>(
+        dir: impl AsRef<Path>,
+        opts: Options,
+        entries: I,
+    ) -> Result<Db>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        Self::create_from_sorted_fallible(dir, opts, entries.into_iter().map(Ok))
+    }
+
+    /// Fallible-input form of [`Db::create_from_sorted`]. An input error is
+    /// returned without publishing any partial base.
+    pub fn create_from_sorted_fallible<I, K, V>(
+        dir: impl AsRef<Path>,
+        opts: Options,
+        entries: I,
+    ) -> Result<Db>
+    where
+        I: IntoIterator<Item = Result<(K, V)>>,
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let inner = open_fresh_inner(dir.as_ref(), opts)?;
+        inner.load_sorted(entries)?;
+        Self::spawn_from_inner(inner)
     }
 
     /// Open with a caller-supplied IO backend, bypassing `opts.io_backend`.
@@ -1924,7 +2099,11 @@ fn compact_thread(db: Arc<DbInner>) {
 // ---------------------------------------------------------------------------
 
 fn open_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
-    open_inner_with(dir, opts, None)
+    open_inner_with_mode(dir, opts, None, false)
+}
+
+fn open_fresh_inner(dir: &Path, opts: Options) -> Result<Arc<DbInner>> {
+    open_inner_with_mode(dir, opts, None, true)
 }
 
 /// `open_inner` with an optional pre-built IO backend. `None` resolves the
@@ -1934,6 +2113,15 @@ fn open_inner_with(
     dir: &Path,
     opts: Options,
     io_override: Option<(Arc<dyn io::Io>, &'static str)>,
+) -> Result<Arc<DbInner>> {
+    open_inner_with_mode(dir, opts, io_override, false)
+}
+
+fn open_inner_with_mode(
+    dir: &Path,
+    opts: Options,
+    io_override: Option<(Arc<dyn io::Io>, &'static str)>,
+    require_fresh: bool,
 ) -> Result<Arc<DbInner>> {
     let paths = DbPaths::new(dir);
     if !dir.exists() {
@@ -1961,6 +2149,21 @@ fn open_inner_with(
             "{} is locked by another process",
             dir.display()
         )));
+    }
+
+    if require_fresh {
+        let mut entries = std::fs::read_dir(dir)?;
+        let has_existing_data = entries.any(|entry| {
+            entry
+                .map(|entry| entry.file_name() != std::ffi::OsStr::new("LOCK"))
+                .unwrap_or(true)
+        });
+        if has_existing_data {
+            return Err(Error::InvalidArgument(format!(
+                "{} is not an empty destination",
+                dir.display()
+            )));
+        }
     }
 
     let (io_backend, backend_name) = match io_override {
@@ -3059,6 +3262,73 @@ mod group_commit_tests {
         assert_eq!(
             inner.visible_seqno.load(Ordering::Acquire),
             MAX_SEQNO - 2
+        );
+    }
+}
+
+#[cfg(test)]
+mod bottom_compression_tests {
+    use super::*;
+    use crate::config::Compression;
+
+    /// Footer layout: filter(12) + index(12) + stats(12) + format(4) + magic(8).
+    fn table_formats(dir: &std::path::Path) -> Vec<u32> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("sst-") && name.ends_with(".tbl") {
+                let b = std::fs::read(e.path()).unwrap();
+                out.push(u32::from_le_bytes(
+                    b[b.len() - 12..b.len() - 8].try_into().unwrap(),
+                ));
+            }
+        }
+        out
+    }
+
+    fn formats_after_compaction(bottom: Option<Compression>) -> Vec<u32> {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(
+            dir.path(),
+            Options {
+                sync: SyncMode::Never,
+                wasm_enabled: false,
+                memtable_size: 4 << 10,
+                block_size: 256,
+                max_levels: 2,
+                compression: Compression::Lz4,
+                bottom_compression: bottom,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        for i in 0..2000u32 {
+            db.put(
+                format!("key{i:06}").into_bytes(),
+                format!("value-{i}-{}", "x".repeat(64)).into_bytes(),
+            )
+            .unwrap();
+        }
+        db.flush().unwrap();
+        db.compact_all().unwrap();
+        table_formats(dir.path())
+    }
+
+    /// Wiring, not unit: with a 2-level tree every compaction output IS the
+    /// bottom, so `bottom_compression: Zstd` must yield format-3 tables from
+    /// the production compaction path — and the same workload without it
+    /// must not, proving the flag (not something else) selects the codec.
+    #[test]
+    fn bottom_compression_reaches_the_bottom_level() {
+        let with = formats_after_compaction(Some(Compression::Zstd));
+        assert!(
+            with.iter().any(|f| *f == 3),
+            "no zstd table written: {with:?}"
+        );
+        let without = formats_after_compaction(None);
+        assert!(
+            without.iter().all(|f| *f <= 2),
+            "unexpected format-3 table: {without:?}"
         );
     }
 }

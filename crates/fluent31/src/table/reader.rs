@@ -11,21 +11,62 @@ use crate::coding::Reader;
 use crate::error::{corrupt, Result};
 use crate::io::DbFile;
 use crate::iter::InternalIterator;
-use crate::types::{
-    cmp_ikey, ikey_kind, ikey_seqno, ikey_ukey, make_seek_ikey, SeqNo, ValueKind,
-};
+use crate::types::{cmp_ikey, ikey_kind, ikey_seqno, ikey_ukey, make_seek_ikey, SeqNo, ValueKind};
 
-struct IndexEntry {
-    last_ikey: Vec<u8>,
-    block: BlockRef,
+/// The pinned block index, flat: one keys arena + one offsets vector instead of a
+/// heap `Vec<u8>` per entry. The index lives for the table's whole life and there is
+/// one entry per data block, so per-entry allocator overhead (Vec header + malloc
+/// header + size-class rounding, ~60-80 bytes against ~40-byte keys) roughly doubled
+/// its residency. Same lookups, half the heap, no per-entry allocations to churn.
+struct TableIndex {
+    /// Concatenated last-ikeys, in index order.
+    keys: Vec<u8>,
+    /// `ends[i]` = exclusive end of entry i's key in `keys` (entry i starts at `ends[i-1]`).
+    ends: Vec<u32>,
+    blocks: Vec<BlockRef>,
+}
+
+impl TableIndex {
+    fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    fn key(&self, i: usize) -> &[u8] {
+        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        &self.keys[start..self.ends[i] as usize]
+    }
+
+    fn block(&self, i: usize) -> BlockRef {
+        self.blocks[i]
+    }
+
+    /// First entry whose key is `>= target` (the partition point of `< target`).
+    fn lower_bound(&self, target: &[u8]) -> usize {
+        let (mut lo, mut hi) = (0, self.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if cmp_ikey(self.key(mid), target) == std::cmp::Ordering::Less {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
 }
 
 pub(crate) struct Table {
     pub id: u64,
     file: Arc<dyn DbFile>,
     cache: Arc<BlockCache>,
-    index: Vec<IndexEntry>,
-    filter: Vec<u8>,
+    index: TableIndex,
+    /// Where the bloom filter lives in the file. The filter itself rides the shared
+    /// block cache under `(id, filter.off)` like any data block: at ~10 bits/key it
+    /// is the single largest pinned population on a big store (measured 2.76 GB
+    /// across one production deployment's tables), it grows with data rather than
+    /// load, and a cold table's filter is pure dead weight. Hot filters stay
+    /// resident by being used; cold ones fall out with the LRU.
+    filter: BlockRef,
     pub stats: TableStats,
 }
 
@@ -39,36 +80,45 @@ impl Table {
         file.read_exact_at(flen - FOOTER_LEN as u64, &mut fbuf)?;
         let footer = Footer::decode(&fbuf)?;
 
-        let filter = read_block_verified(file.as_ref(), footer.filter)?;
+        // Verify the filter block is readable now (corruption should surface at open,
+        // as it always has), but do not keep the bytes — queries reload it through the
+        // block cache on demand.
+        read_block_verified(file.as_ref(), footer.filter)?;
         let stats = TableStats::decode(&read_block_verified(file.as_ref(), footer.stats)?)?;
 
         let index_payload = read_block_verified(file.as_ref(), footer.index)?;
-        let mut index = Vec::new();
+        let mut index = TableIndex {
+            keys: Vec::new(),
+            ends: Vec::new(),
+            blocks: Vec::new(),
+        };
         let mut r = Reader::new(&index_payload);
         while !r.is_empty() {
-            let last_ikey = r.len_prefixed()?.to_vec();
+            let last_ikey = r.len_prefixed()?;
             if last_ikey.len() < crate::types::TRAILER_LEN {
                 return Err(corrupt("index key shorter than trailer"));
             }
             let off = r.uvarint()?;
             let len = r.uvarint()?;
-            index.push(IndexEntry {
-                last_ikey,
-                block: BlockRef {
-                    off,
-                    len: len as u32,
-                },
+            index.keys.extend_from_slice(last_ikey);
+            let end = u32::try_from(index.keys.len())
+                .map_err(|_| corrupt("index keys exceed u32 arena"))?;
+            index.ends.push(end);
+            index.blocks.push(BlockRef {
+                off,
+                len: len as u32,
             });
         }
-        if index.is_empty() {
+        if index.blocks.is_empty() {
             return Err(corrupt("table has no data blocks"));
         }
+        index.keys.shrink_to_fit();
         Ok(Table {
             id,
             file,
             cache,
             index,
-            filter,
+            filter: footer.filter,
             stats,
         })
     }
@@ -83,7 +133,9 @@ impl Table {
     pub fn read_chunk(&self, off: u64, len: usize) -> Result<Vec<u8>> {
         let flen = self.file.len()?;
         if off >= flen {
-            return Err(corrupt(format!("chunk offset {off} beyond table end {flen}")));
+            return Err(corrupt(format!(
+                "chunk offset {off} beyond table end {flen}"
+            )));
         }
         let n = (len as u64).min(flen - off) as usize;
         let mut buf = vec![0u8; n];
@@ -92,7 +144,7 @@ impl Table {
     }
 
     fn load_block(&self, idx: usize) -> Result<Arc<Block>> {
-        let r = self.index[idx].block;
+        let r = self.index.block(idx);
         let payload = match self.cache.get(self.id, r.off) {
             Some(p) => p,
             None => {
@@ -107,20 +159,35 @@ impl Table {
     /// First block whose last key is `>= target` — the only block that can
     /// contain the lower bound for `target`.
     fn index_lower_bound(&self, target: &[u8]) -> usize {
-        self.index
-            .partition_point(|e| cmp_ikey(&e.last_ikey, target) == std::cmp::Ordering::Less)
+        self.index.lower_bound(target)
     }
 
-    pub fn may_contain_ukey(&self, ukey: &[u8]) -> bool {
-        if ukey < self.stats.min_ukey() || ukey > self.stats.max_ukey() {
-            return false;
+    fn load_filter(&self) -> Result<Arc<Vec<u8>>> {
+        match self.cache.get(self.id, self.filter.off) {
+            Some(p) => Ok(p),
+            None => {
+                let p = Arc::new(read_block_verified(self.file.as_ref(), self.filter)?);
+                self.cache.insert(self.id, self.filter.off, p.clone());
+                Ok(p)
+            }
         }
-        bloom::may_contain(&self.filter, bloom::hash64(ukey))
+    }
+
+    /// Fallible since the filter rides the block cache: a miss re-reads it from
+    /// the file, and that read can fail. The key-range check stays free.
+    pub fn may_contain_ukey(&self, ukey: &[u8]) -> Result<bool> {
+        if ukey < self.stats.min_ukey() || ukey > self.stats.max_ukey() {
+            return Ok(false);
+        }
+        Ok(bloom::may_contain(
+            &self.load_filter()?,
+            bloom::hash64(ukey),
+        ))
     }
 
     /// Newest version of `ukey` with `seqno <= seq` in this table.
     pub fn get(&self, ukey: &[u8], seq: SeqNo) -> Result<Option<(ValueKind, SeqNo, Vec<u8>)>> {
-        if !self.may_contain_ukey(ukey) {
+        if !self.may_contain_ukey(ukey)? {
             return Ok(None);
         }
         let target = make_seek_ikey(ukey, seq);
@@ -401,17 +468,47 @@ mod tests {
         // seek beyond the end / before the start
         it.seek(&make_seek_ikey(b"zzz", MAX_SEQNO)).unwrap();
         assert!(!it.valid());
-        it.seek_for_prev(&make_seek_ikey(b"aaa", MAX_SEQNO)).unwrap();
+        it.seek_for_prev(&make_seek_ikey(b"aaa", MAX_SEQNO))
+            .unwrap();
         assert!(!it.valid());
     }
 
     #[test]
     fn bloom_filters_absent_keys() {
-        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> =
-            vec![(b"only", 1, ValueKind::Put, b"v")];
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = vec![(b"only", 1, ValueKind::Put, b"v")];
         let (_dir, t) = build_table(&refs, 4096);
-        assert!(t.may_contain_ukey(b"only"));
-        assert!(!t.may_contain_ukey(b"absent")); // outside key range
+        assert!(t.may_contain_ukey(b"only").unwrap());
+        assert!(!t.may_contain_ukey(b"absent").unwrap()); // outside key range
+    }
+
+    /// The filter rides the block cache: it must land there after use, and a query
+    /// must still answer correctly after the cache forgets it (reload path).
+    #[test]
+    fn bloom_filter_rides_the_block_cache() {
+        let data = many();
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = data
+            .iter()
+            .map(|(k, s, kind, v)| (k.as_slice(), *s, *kind, v.as_slice()))
+            .collect();
+        let (_dir, t) = build_table(&refs, 256);
+        assert!(t.cache.get(t.id, t.filter.off).is_none(), "not pre-warmed");
+        assert!(t.may_contain_ukey(b"key00042").unwrap());
+        assert!(
+            t.cache.get(t.id, t.filter.off).is_some(),
+            "filter must be charged to the cache after use"
+        );
+        // Flood the 1 MiB test cache with far more junk than its capacity — without
+        // touching the filter, so its LRU slot ages out in whichever shard holds it —
+        // then query again: the filter must reload from the file and answer identically.
+        for i in 0..2048u64 {
+            t.cache.insert(u64::MAX, i, Arc::new(vec![0u8; 8 << 10]));
+        }
+        assert!(
+            t.cache.get(t.id, t.filter.off).is_none(),
+            "flood must evict the filter"
+        );
+        assert!(t.may_contain_ukey(b"key00042").unwrap());
+        assert!(!t.may_contain_ukey(b"nope-not-here").unwrap());
     }
 
     /// Lz4 tables round-trip every read path, shrink the file, and carry the
@@ -452,12 +549,49 @@ mod tests {
         assert_eq!(n, 500);
     }
 
+    /// Zstd tables round-trip every read path, land at or below the lz4 size,
+    /// and carry format 3 so pre-zstd readers reject them at open.
+    #[test]
+    fn zstd_round_trip_shrinks_and_bumps_format() {
+        let data = many();
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = data
+            .iter()
+            .map(|(k, s, kind, v)| (k.as_slice(), *s, *kind, v.as_slice()))
+            .collect();
+        let (_d1, lz4, lz4_size) = build_table_sized(&refs, 256, Compression::Lz4);
+        let (_d2, z, z_size) = build_table_sized(&refs, 256, Compression::Zstd);
+        assert!(
+            z_size <= lz4_size,
+            "zstd table ({z_size}) larger than lz4 ({lz4_size})"
+        );
+        assert_eq!(footer_format(&lz4), FORMAT_COMPRESSED);
+        assert_eq!(footer_format(&z), super::super::FORMAT_ZSTD);
+
+        for (k, s, kind, v) in &data {
+            let got = z.get(k, MAX_SEQNO).unwrap().unwrap();
+            assert_eq!(got.0, *kind);
+            assert_eq!(got.1, *s);
+            if *kind == ValueKind::Put {
+                assert_eq!(got.2, encode_inline(v));
+            }
+        }
+        assert!(z.get(b"key99999x", MAX_SEQNO).unwrap().is_none());
+
+        let mut it = z.iter();
+        it.seek_to_last().unwrap();
+        let mut n = 0;
+        while it.valid() {
+            n += 1;
+            it.prev().unwrap();
+        }
+        assert_eq!(n, 500);
+    }
+
     /// A table written with compression enabled but where no block shrinks
     /// stays format 1 — readable by binaries that predate compression.
     #[test]
     fn incompressible_lz4_table_stays_format_1() {
-        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> =
-            vec![(b"only", 1, ValueKind::Put, b"v")];
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = vec![(b"only", 1, ValueKind::Put, b"v")];
         let (_dir, t, _) = build_table_sized(&refs, 4096, Compression::Lz4);
         assert_eq!(footer_format(&t), FORMAT);
         let got = t.get(b"only", MAX_SEQNO).unwrap().unwrap();

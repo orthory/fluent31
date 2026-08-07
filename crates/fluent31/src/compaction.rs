@@ -18,6 +18,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::batch::BatchOp;
+use crate::config::Options;
 use crate::db::{DbInner, RetiredVlog};
 use crate::error::Result;
 use crate::iter::{InternalIterator, MergeIterator};
@@ -38,6 +39,9 @@ pub(crate) struct Job {
     /// may only be dropped if none of these can contain its key.
     older: Vec<Run>,
     kind: JobKind,
+    /// Output lands in (or creates) the deepest level, where
+    /// `Options::bottom_compression` applies.
+    bottom: bool,
 }
 
 enum JobKind {
@@ -65,12 +69,27 @@ const MAX_DYNAMIC_LEVELS: usize = 16;
 
 /// Per-level byte budget for deepening decisions: the volume of one
 /// L0->L1 merge is the unit; each level down multiplies by `tier_width`.
-fn level_target_bytes(db: &DbInner, level: usize) -> u64 {
-    let unit = (db.opts.memtable_size as u64)
-        .saturating_mul(db.opts.l0_compaction_trigger as u64)
+fn level_target_bytes(opts: &Options, level: usize) -> u64 {
+    let unit = (opts.memtable_size as u64)
+        .saturating_mul(opts.l0_compaction_trigger as u64)
         .max(1);
-    let width = db.opts.tier_width.max(2) as u64;
+    let width = opts.tier_width.max(2) as u64;
     (0..level).fold(unit, |acc, _| acc.saturating_mul(width))
+}
+
+/// Return a level count whose bottom budget can hold `bottom_bytes` without
+/// immediately deepening the tree. Fresh-store bulk loading uses this to
+/// install its only run directly at a stable bottom level.
+pub(crate) fn level_count_for_bottom_bytes(
+    opts: &Options,
+    current: usize,
+    bottom_bytes: u64,
+) -> usize {
+    let mut levels = current.max(1);
+    while levels < MAX_DYNAMIC_LEVELS && bottom_bytes > level_target_bytes(opts, levels - 1) {
+        levels += 1;
+    }
+    levels
 }
 
 /// One pass of the maintenance loop; returns whether any work happened.
@@ -125,6 +144,7 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
                 inputs: v.levels[i].clone(),
                 older,
                 kind: JobKind::Tier,
+                bottom: i + 1 == v.levels.len() - 1,
             });
         }
     }
@@ -136,7 +156,7 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
     if !force
         && v.levels.len() < MAX_DYNAMIC_LEVELS
         && !v.levels[last].is_empty()
-        && bottom_bytes > level_target_bytes(db, last)
+        && bottom_bytes > level_target_bytes(&db.opts, last)
     {
         return Some(Job {
             level: last,
@@ -144,6 +164,7 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
             inputs: v.levels[last].clone(),
             older: Vec::new(),
             kind: JobKind::Tier,
+            bottom: true,
         });
     }
     if v.levels[last].len() >= 2 {
@@ -203,6 +224,7 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
                 keep_right,
                 new_run_id: db.alloc_file_id(),
             },
+            bottom: true,
         });
     }
     None
@@ -246,9 +268,16 @@ fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
                 kept_le_w = true;
                 // the newest version at-or-below the watermark: keep, unless
                 // it is a tombstone provably shadowing nothing older
-                if kind == ValueKind::Delete
-                    && !job.older.iter().any(|r| r.may_contain_ukey(&cur_ukey))
-                {
+                let mut shadows_older = false;
+                if kind == ValueKind::Delete {
+                    for r in job.older.iter() {
+                        if r.may_contain_ukey(&cur_ukey)? {
+                            shadows_older = true;
+                            break;
+                        }
+                    }
+                }
+                if kind == ValueKind::Delete && !shadows_older {
                     (false, false)
                 } else {
                     (true, false)
@@ -283,7 +312,11 @@ fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
                         file,
                         db.opts.block_size,
                         db.opts.bloom_bits_per_key,
-                        db.opts.compression,
+                        if job.bottom {
+                            db.opts.bottom_compression.unwrap_or(db.opts.compression)
+                        } else {
+                            db.opts.compression
+                        },
                     ),
                 ));
             }

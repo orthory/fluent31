@@ -72,6 +72,16 @@ directory entry is fsynced before any write to it is acknowledged. Writers
 stall (100ms poll on the progress signal) when frozen memtables pile past
 `max_immutable_memtables` or L0 exceeds `l0_stall_trigger`.
 
+**Fresh-store bulk bootstrap.** `Db::create_from_sorted` is the one path that
+does not use the write pipeline above. Before background threads or a public
+handle exist, it validates a strictly increasing stream of unique user keys,
+applies the same inline/vlog placement, and writes fragmented tables directly
+into one bottom-level run. Vlog payloads and tables are synced before a single
+manifest flip publishes the base and its flush watermark. A failure before
+that flip leaves the previously published empty store, never a partial base.
+The API refuses any destination that already contains a database or unrelated
+files; it cannot bypass MVCC, triggers, or replication on a live store.
+
 ## 3. Tables (sorted-run fragments)
 
 `[data block]* [filter block] [index block] [stats block] [footer 48B]`,

@@ -295,6 +295,23 @@ pub(crate) fn save(paths: &DbPaths, gen: u64, data: &ManifestData) -> Result<()>
     }
     sync_dir(&paths.dir)?;
     atomic_write(&paths.current(), format!("MANIFEST-{gen:06}\n").as_bytes())?;
+    // Older generations are otherwise swept only at open; a long-running process
+    // rotates a manifest every few minutes and never reopens, so they accumulate
+    // without bound. Best-effort: a crash mid-sweep just leaves work for the next
+    // save, and the open-time sweep still covers pre-flip crashed newer gens.
+    if let Ok(rd) = std::fs::read_dir(&paths.dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let stale = name
+                .to_str()
+                .and_then(|n| n.strip_prefix("MANIFEST-"))
+                .and_then(|s| s.parse::<u64>().ok())
+                .is_some_and(|g| g < gen);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -450,5 +467,24 @@ mod tests {
         let (gen, got) = load(&paths).unwrap();
         assert_eq!(gen, 2);
         assert_eq!(got, d2);
+    }
+
+    #[test]
+    fn save_prunes_older_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DbPaths::new(dir.path());
+        let d = sample();
+        for gen in 1..=3 {
+            save(&paths, gen, &d).unwrap();
+        }
+        assert!(!paths.manifest(1).exists());
+        assert!(!paths.manifest(2).exists());
+        assert!(paths.manifest(3).exists());
+        // A newer gen (pre-flip crash artifact) must survive a save of an older one.
+        save(&paths, 5, &d).unwrap();
+        std::fs::rename(paths.manifest(5), paths.manifest(7)).unwrap();
+        save(&paths, 6, &d).unwrap();
+        assert!(paths.manifest(7).exists());
+        assert!(paths.manifest(6).exists());
     }
 }

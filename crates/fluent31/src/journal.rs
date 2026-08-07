@@ -648,30 +648,18 @@ pub fn rebuild(journal_dir: impl AsRef<Path>, dest: impl AsRef<Path>, opts: Opti
     // after the base-end is replayable deltas.
     let anchor = find_last_complete_checkpoint(&records)?;
 
-    let db = Db::open(dest, opts)?;
-    let mut base_keys = 0u64;
+    let base_span = &records[anchor.base_start..anchor.base_end];
+    let base_keys = validate_base_span(base_span, &opts)?;
+    let base_entries = base_span
+        .iter()
+        .filter_map(|rec| match decode_base_record(rec) {
+            Ok(Some(entry)) => Some(Ok(entry)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        });
+    let db = Db::create_from_sorted_fallible(dest, opts, base_entries)?;
     let mut deltas_applied = 0u64;
     let mut last_seqno = 0u64;
-
-    // apply the base
-    for rec in &records[anchor.base_start..anchor.base_end] {
-        let mut r = Reader::new(rec);
-        let tag = r.u8()?;
-        // journals written before the mid-base rotation fix (#29) can carry a
-        // base span that straddles a file boundary, with the next file's
-        // header interleaved; its provenance was already verified per file in
-        // read_all_records, so skip it rather than strand the journal
-        if tag == TAG_HEADER {
-            continue;
-        }
-        if tag != TAG_BASE {
-            return Err(corrupt("expected base record in base span"));
-        }
-        let key = r.len_prefixed()?.to_vec();
-        let value = r.len_prefixed()?.to_vec();
-        db.put(key, value)?;
-        base_keys += 1;
-    }
     last_seqno = last_seqno.max(anchor.base_seqno);
 
     // replay deltas after the base-end, in file (== seqno) order
@@ -717,6 +705,46 @@ pub fn rebuild(journal_dir: impl AsRef<Path>, dest: impl AsRef<Path>, opts: Opti
         deltas_applied,
         last_seqno,
     })
+}
+
+/// Decode one record in a base span. Historical journals can contain a
+/// provenance header at a segment boundary inside the span; provenance was
+/// already verified by `read_all_records`, so it carries no entry here.
+fn decode_base_record(rec: &[u8]) -> Result<Option<(&[u8], &[u8])>> {
+    let mut reader = Reader::new(rec);
+    match reader.u8()? {
+        TAG_HEADER => Ok(None),
+        TAG_BASE => {
+            let key = reader.len_prefixed()?;
+            let value = reader.len_prefixed()?;
+            if !reader.is_empty() {
+                return Err(corrupt("base record has trailing bytes"));
+            }
+            Ok(Some((key, value)))
+        }
+        _ => Err(corrupt("expected base record in base span")),
+    }
+}
+
+/// Validate the complete base before creating the destination. Rebuilds can
+/// be long-running, so malformed or unsorted input must fail before any SST
+/// or value-log output is produced.
+fn validate_base_span(records: &[Vec<u8>], opts: &Options) -> Result<u64> {
+    let mut previous_key = Vec::new();
+    let mut count = 0u64;
+    for rec in records {
+        let Some((key, value)) = decode_base_record(rec)? else {
+            continue;
+        };
+        crate::db::validate_user_entry(opts, key, value.len())?;
+        if !previous_key.is_empty() && key <= previous_key.as_slice() {
+            return Err(corrupt("journal base keys are not strictly increasing"));
+        }
+        previous_key.clear();
+        previous_key.extend_from_slice(key);
+        count += 1;
+    }
+    Ok(count)
 }
 
 struct Anchor {

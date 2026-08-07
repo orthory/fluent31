@@ -80,10 +80,13 @@ impl Run {
     }
 
     /// Can this run possibly contain `ukey`? Bloom-backed; false means
-    /// provably absent (used by the tombstone-drop predicate).
-    pub fn may_contain_ukey(&self, ukey: &[u8]) -> bool {
-        self.fragment_for(ukey)
-            .is_some_and(|t| t.table.may_contain_ukey(ukey))
+    /// provably absent (used by the tombstone-drop predicate). Fallible because
+    /// the filter rides the block cache and a miss re-reads it from the file.
+    pub fn may_contain_ukey(&self, ukey: &[u8]) -> Result<bool> {
+        match self.fragment_for(ukey) {
+            Some(t) => t.table.may_contain_ukey(ukey),
+            None => Ok(false),
+        }
     }
 
     pub fn iter(&self) -> RunIter {
