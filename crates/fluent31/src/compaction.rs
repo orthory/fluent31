@@ -262,9 +262,16 @@ fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
                 kept_le_w = true;
                 // the newest version at-or-below the watermark: keep, unless
                 // it is a tombstone provably shadowing nothing older
-                if kind == ValueKind::Delete
-                    && !job.older.iter().any(|r| r.may_contain_ukey(&cur_ukey))
-                {
+                let mut shadows_older = false;
+                if kind == ValueKind::Delete {
+                    for r in job.older.iter() {
+                        if r.may_contain_ukey(&cur_ukey)? {
+                            shadows_older = true;
+                            break;
+                        }
+                    }
+                }
+                if kind == ValueKind::Delete && !shadows_older {
                     (false, false)
                 } else {
                     (true, false)
