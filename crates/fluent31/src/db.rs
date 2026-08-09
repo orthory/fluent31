@@ -201,9 +201,9 @@ pub(crate) struct DbInner {
     /// writes happened — by seqno count, OR by the head having rotated
     /// (large-value workloads accrue garbage fast while seqnos crawl).
     pub gc_sampled_at: Mutex<std::collections::HashMap<u64, (SeqNo, u64)>>,
-    /// Serializes compaction jobs: the maintenance thread and user-invoked
-    /// `compact_all` must never pick/merge concurrently (both would grab the
-    /// same input runs).
+    /// Serializes the compaction scheduler: background maintenance and
+    /// user-invoked `compact_all` share one priority picker. Rewrite jobs may
+    /// be suspended between bounded slices, but never run concurrently.
     pub compaction_mu: Mutex<()>,
 
     /// Replication stream subscribers (see the replication-surface section
@@ -1581,7 +1581,9 @@ impl Db {
         self.inner.wait_flushed()
     }
 
-    /// Run compaction until no trigger fires (test/CLI helper).
+    /// Run compaction until no trigger fires (test/CLI helper). Manual work
+    /// uses the same bounded priority scheduler as automatic maintenance, so
+    /// newly eligible upper levels are serviced between deep-job slices.
     pub fn compact_all(&self) -> Result<()> {
         crate::compaction::compact_until_quiet(&self.inner)
     }

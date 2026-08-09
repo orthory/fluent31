@@ -106,6 +106,11 @@ pub struct Options {
     /// Compaction output runs split into fragments of roughly this size,
     /// bounding per-file blooms/indexes and transient merge space.
     pub target_file_size: u64,
+    /// Input bytes a compaction may process before the scheduler rechecks
+    /// higher-priority levels. The current user key is always finished, so
+    /// one key with many versions may exceed this soft bound. Defaults to
+    /// 1 MiB.
+    pub compaction_slice_bytes: u64,
 
     /// Values >= this many bytes go to the value log; smaller stay inline in
     /// the LSM tree. 0 separates everything; usize::MAX disables separation.
@@ -176,6 +181,7 @@ impl Default for Options {
             max_levels: 7,
             l0_stall_trigger: 12,
             target_file_size: 64 << 20,
+            compaction_slice_bytes: 1 << 20,
             value_threshold: 4096,
             vlog_file_size: 128 << 20,
             vlog_gc_ratio: 0.5,
