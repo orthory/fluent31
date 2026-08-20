@@ -1501,13 +1501,41 @@ impl Db {
     #[cfg(feature = "wasm")]
     pub fn query(&self, name: &str, input: &[u8]) -> Result<Vec<u8>> {
         self.wasm_gate()?;
-        crate::wasm::query(&self.inner, name, input, None)
+        crate::wasm::query(&self.inner, &crate::wasm::ModuleSource::Installed(name), input, None)
     }
 
     #[cfg(feature = "wasm")]
     pub fn query_at(&self, name: &str, input: &[u8], snap: &Snapshot) -> Result<Vec<u8>> {
         self.wasm_gate()?;
-        crate::wasm::query(&self.inner, name, input, Some(snap.seq))
+        crate::wasm::query(
+            &self.inner,
+            &crate::wasm::ModuleSource::Installed(name),
+            input,
+            Some(snap.seq),
+        )
+    }
+
+    /// One-shot [`Db::query`]: run candidate module bytes' read-only
+    /// `query` entry against the current visible state without installing
+    /// them. The bytes are compiled uncached and leave no trace in the
+    /// store.
+    #[cfg(feature = "wasm")]
+    pub fn query_wasm(&self, wasm: &[u8], input: &[u8]) -> Result<Vec<u8>> {
+        self.wasm_gate()?;
+        crate::wasm::query(&self.inner, &crate::wasm::ModuleSource::Bytes(wasm), input, None)
+    }
+
+    /// One-shot [`Db::query_at`]: like [`Db::query_wasm`], but at a
+    /// registered snapshot.
+    #[cfg(feature = "wasm")]
+    pub fn query_wasm_at(&self, wasm: &[u8], input: &[u8], snap: &Snapshot) -> Result<Vec<u8>> {
+        self.wasm_gate()?;
+        crate::wasm::query(
+            &self.inner,
+            &crate::wasm::ModuleSource::Bytes(wasm),
+            input,
+            Some(snap.seq),
+        )
     }
 
     /// Run a module's `execute` entry inside a transaction; commits on
@@ -1516,7 +1544,20 @@ impl Db {
     #[cfg(feature = "wasm")]
     pub fn execute(&self, name: &str, input: &[u8]) -> Result<Vec<u8>> {
         self.wasm_gate()?;
-        crate::wasm::execute(&self.inner, name, input)
+        crate::wasm::execute(&self.inner, &crate::wasm::ModuleSource::Installed(name), input)
+    }
+
+    /// One-shot [`Db::execute`]: run candidate module bytes' `execute`
+    /// entry inside a transaction without installing them — feed a script
+    /// in, run it, and nothing of the code persists; only its committed
+    /// writes do. Same commit/retry semantics as [`Db::execute`], with the
+    /// bytes pinned across retry attempts. The natural shape for
+    /// migrations: the script lives in the caller's repo, its effects in
+    /// the store.
+    #[cfg(feature = "wasm")]
+    pub fn execute_wasm(&self, wasm: &[u8], input: &[u8]) -> Result<Vec<u8>> {
+        self.wasm_gate()?;
+        crate::wasm::execute(&self.inner, &crate::wasm::ModuleSource::Bytes(wasm), input)
     }
 
     /// The role entry points an installed module exports (any of `query`,

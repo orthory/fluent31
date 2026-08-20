@@ -36,6 +36,20 @@ A module may export any combination — e.g. a *dynamic index* pairs an
 keyspace) with a `query` (the dynamic view serving reads over it) in one
 module.
 
+**One-shot invocation.** The querier and executor roles can also run on
+caller-provided bytes that are never installed: `Db::query_wasm` /
+`Db::query_wasm_at` / `Db::execute_wasm`, GraphQL `wasmOnce(wasm:, input:)`
+/ `wasmExecuteOnce(wasm:, input:)`, CLI `queryonce` / `execonce`. Same
+roles, same sandbox and limits, same commit/retry semantics — but the code
+leaves no trace in the store: only an executor's committed writes persist.
+This is the shape for migrations (the script lives in your repo, its
+effects in the database); it also skips the schema rebuild and, on a
+replicated store, never ships module bytes to replicas. The flip side of
+tracelessness: there is no in-database record of what code ran — an
+installed module's bytes are versioned, and `query_at` can time-travel
+them, so install the big audited migrations and one-shot the rest. Trigger
+consumers always run as installed modules (a trigger binds to a name).
+
 **Transactional retry semantics (critical):** on commit conflict the WHOLE
 attempt is discarded and re-run against a fresh snapshot — fresh Store,
 fresh memory, fresh fuel, fresh output — up to `execute_retries` times
@@ -291,6 +305,10 @@ mutation Install($w: BytesInput!) {
 
 query    { wasm(module: "myModule", input: {text: "..."}) { text base64 hex len } }
 mutation { wasmExecute(module: "myModule", input: {base64: "..."}) { base64 } }
+
+# one-shot: run the bytes without installing them (section 1)
+query    { wasmOnce(wasm: {base64: "..."}, input: {text: "..."}) { text } }
+mutation { wasmExecuteOnce(wasm: {base64: "..."}, input: {base64: "..."}) { base64 } }
 ```
 
 WAT text is also accepted by `installModule` (`wasm: {text: "(module ...)"}`)
@@ -352,11 +370,11 @@ reference scalars only. `output` may reference a declared type.
   starting with `__` (only relevant for described modules; undescribed
   ones keep the engine's looser `[A-Za-z0-9._-]` rule);
 - module name must not shadow a built-in root field (`changes`, `get`,
-  `scan`, `wasm`, `modules`, `stats`, `forks`, `triggers`, `snapshotSeqno`,
-  `put`, `delete`, `writeBatch`, `wasmExecute`, `installModule`,
-  `uninstallModule`, `fork`, `deleteFork`, `createTrigger`,
-  `deleteTrigger`, `flush`, `compactAll`, `gcVlog`, `reloadSchema`,
-  `syncWal`);
+  `scan`, `wasm`, `wasmOnce`, `modules`, `stats`, `forks`, `triggers`,
+  `snapshotSeqno`, `put`, `delete`, `writeBatch`, `wasmExecute`,
+  `wasmExecuteOnce`, `installModule`, `uninstallModule`, `fork`,
+  `deleteFork`, `createTrigger`, `deleteTrigger`, `flush`, `compactAll`,
+  `gcVlog`, `reloadSchema`, `syncWal`);
 - declared type names must not be reserved (`Query`, `Mutation`,
   `Subscription`, `Bytes`, `BytesInput`, `U64`, `Json`, `Pair`,
   `ScanPage`, `ChangeEvent`, `ChangeKind`, `Module`, `Fork`, `Trigger`,

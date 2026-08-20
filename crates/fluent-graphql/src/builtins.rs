@@ -231,6 +231,29 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             ),
         )
         .field(
+            Field::new("wasmOnce", TypeRef::named("Bytes"), |ctx| {
+                FieldFuture::new(async move {
+                    let wasm = arg_bytes(&ctx, "wasm")?;
+                    let input = opt_arg_bytes(&ctx, "input")?.unwrap_or_default();
+                    let mgr = manager(&ctx)?;
+                    let snap = pinned_snap(&ctx, &mgr.db)?;
+                    let db = mgr.db.clone();
+                    let out = mgr
+                        .blocking_read(move || db.query_wasm_at(&wasm, &input, &snap))
+                        .await?;
+                    Ok(Some(FieldValue::owned_any(BytesVal(out))))
+                })
+            })
+            .argument(InputValue::new("wasm", TypeRef::named_nn("BytesInput")))
+            .argument(InputValue::new("input", TypeRef::named("BytesInput")))
+            .description(
+                "One-shot query: run the given WASM module's read-only `query` entry \
+                 at this operation's snapshot without installing it. Accepts a binary \
+                 module (use base64) or WAT text (use text); the bytes leave no trace \
+                 in the store.",
+            ),
+        )
+        .field(
             Field::new("modules", TypeRef::named_nn_list("Module"), |ctx| {
                 FieldFuture::new(async move {
                     let mgr = manager(&ctx)?;
@@ -495,6 +518,29 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
                 "Run any installed WASM executor inside a transaction: raw bytes in/out, \
                  commit on guest exit 0, automatic retry on write conflicts. Typed \
                  executors additionally get their own root field.",
+            ),
+        )
+        .field(
+            Field::new("wasmExecuteOnce", TypeRef::named("Bytes"), |ctx| {
+                FieldFuture::new(async move {
+                    let wasm = arg_bytes(&ctx, "wasm")?;
+                    let input = opt_arg_bytes(&ctx, "input")?.unwrap_or_default();
+                    let mgr = manager(&ctx)?;
+                    let db = mgr.db.clone();
+                    let out = mgr
+                        .blocking_write(move || db.execute_wasm(&wasm, &input))
+                        .await?;
+                    Ok(Some(FieldValue::owned_any(BytesVal(out))))
+                })
+            })
+            .argument(InputValue::new("wasm", TypeRef::named_nn("BytesInput")))
+            .argument(InputValue::new("input", TypeRef::named("BytesInput")))
+            .description(
+                "One-shot execute: run the given WASM module's `execute` entry inside \
+                 a transaction without installing it — commit on guest exit 0, \
+                 automatic retry on write conflicts, and only the committed writes \
+                 persist (the code leaves no trace in the store). Accepts a binary \
+                 module (use base64) or WAT text (use text). Made for migrations.",
             ),
         )
         .field(
