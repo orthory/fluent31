@@ -76,6 +76,7 @@ txn       begin | tget K | tput K V | tdel K | tlock K (get_for_update) | commit
 snapshots snap | snaps | sget ID K | snapdrop ID
 wasm      install NAME FILE.wasm | modules | uninstall NAME
           query NAME [INPUT] | exec NAME [INPUT]
+          queryonce FILE.wasm [INPUT] | execonce FILE.wasm [INPUT] (one-shot, no install)
 forks     fork NAME [AT] | forks | delfork NAME
 pins      pin NAME | pins | unpin NAME (pinned seqnos stay fork-able)
           seqno (current visible seqno — the AT address of \"now\")
@@ -257,17 +258,29 @@ impl Shell {
                     .collect::<Vec<_>>()
                     .join("\n"))
             }
-            "query" | "exec" => {
-                let name = tokens.get(1).ok_or("missing module name")?;
+            "query" | "exec" | "queryonce" | "execonce" => {
+                let target = tokens.get(1).ok_or(if tokens[0].ends_with("once") {
+                    "missing wasm file"
+                } else {
+                    "missing module name"
+                })?;
                 let input = tokens
                     .get(2)
                     .map(|t| parse_bytes(t))
                     .transpose()?
                     .unwrap_or_default();
-                let res = if tokens[0] == "query" {
-                    self.db.query(name, &input)
-                } else {
-                    self.db.execute(name, &input)
+                let res = match tokens[0].as_str() {
+                    "query" => self.db.query(target, &input),
+                    "exec" => self.db.execute(target, &input),
+                    // one-shot: run a wasm file without installing it
+                    once => {
+                        let bytes = std::fs::read(target).map_err(|e| e.to_string())?;
+                        if once == "queryonce" {
+                            self.db.query_wasm(&bytes, &input)
+                        } else {
+                            self.db.execute_wasm(&bytes, &input)
+                        }
+                    }
                 };
                 match res {
                     Ok(out) => Ok(if out.is_empty() {

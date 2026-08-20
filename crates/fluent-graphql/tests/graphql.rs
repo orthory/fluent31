@@ -510,6 +510,68 @@ async fn installing_garbage_module_fails_with_wasm_code() {
     assert_eq!(ext_code(&errs).as_deref(), Some("WASM"));
 }
 
+/// One-shot invocations: caller bytes in, run, nothing installed.
+#[tokio::test]
+async fn wasm_once_runs_without_installing() {
+    let (schema, _dir) = open_schema();
+    let d = run(
+        &schema,
+        r#"query Once($w: BytesInput!) { wasmOnce(wasm: $w, input: {text: "ping"}) { text } }"#,
+        json!({"w": {"text": ECHO_WAT}}),
+    )
+    .await;
+    assert_eq!(d["wasmOnce"]["text"], json!("ping"));
+
+    let d = run(
+        &schema,
+        r#"mutation Once($w: BytesInput!) { wasmExecuteOnce(wasm: $w, input: {text: "migrated"}) { len } }"#,
+        json!({"w": {"text": PUT_INPUT_WAT}}),
+    )
+    .await;
+    assert_eq!(d["wasmExecuteOnce"]["len"], json!(0));
+    let d = run(&schema, r#"{ get(key: {text: "wk"}) { text } }"#, json!({})).await;
+    assert_eq!(d["get"]["text"], json!("migrated"));
+
+    // only the writes persist — no module was installed
+    let d = run(&schema, r#"{ modules { name } }"#, json!({})).await;
+    assert_eq!(d["modules"], json!([]));
+}
+
+#[tokio::test]
+async fn wasm_once_guest_failure_carries_exit_code() {
+    let (schema, _dir) = open_schema();
+    let errs = run_err(
+        &schema,
+        r#"query Once($w: BytesInput!) { wasmOnce(wasm: $w) { len } }"#,
+        json!({"w": {"text": FAIL_WAT}}),
+    )
+    .await;
+    assert_eq!(ext_code(&errs).as_deref(), Some("GUEST_FAILED"));
+    let ext = errs[0].extensions.as_ref().unwrap();
+    assert_eq!(format!("{}", ext.get("guestExitCode").unwrap()), "7");
+}
+
+/// The one-shot execute path enforces the role split like everything else:
+/// bytes without an `execute` export are rejected at the boundary.
+#[tokio::test]
+async fn wasm_once_execute_requires_execute_entry() {
+    let (schema, _dir) = open_schema();
+    let query_only = r#"(module
+      (memory (export "memory") 1)
+      (func (export "query") (result i32) (i32.const 0)))"#;
+    let errs = run_err(
+        &schema,
+        r#"mutation Once($w: BytesInput!) { wasmExecuteOnce(wasm: $w) { len } }"#,
+        json!({"w": {"text": query_only}}),
+    )
+    .await;
+    assert!(
+        errs[0].message.contains("`execute`"),
+        "names the missing entry: {}",
+        errs[0].message
+    );
+}
+
 // ---------------------------------------------------------------------------
 // admin
 // ---------------------------------------------------------------------------

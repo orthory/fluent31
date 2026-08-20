@@ -20,6 +20,13 @@
 //! Module bytes are resolved at the invocation's snapshot, so `query_at`
 //! time-travels code together with data, and each execute attempt sees a
 //! consistent module version.
+//!
+//! Invocations can also run **one-shot** on caller-provided bytes that are
+//! never installed (`Db::query_wasm` / `Db::execute_wasm`): same roles,
+//! same sandbox, same retry loop, but the code leaves no trace in the
+//! store — only an executor's committed writes persist. The natural shape
+//! for migrations: the script lives in the caller's repo, its effects in
+//! the database.
 
 pub(crate) mod abi;
 
@@ -125,6 +132,36 @@ fn exports_func(module: &Module, name: &str) -> bool {
     module.get_export(name).is_some_and(|e| e.func().is_some())
 }
 
+/// Where an invocation's module bytes come from.
+pub(crate) enum ModuleSource<'a> {
+    /// An installed module, resolved by name at the invocation's snapshot —
+    /// `query_at` time-travels code together with data, and each execute
+    /// attempt sees a consistent module version.
+    Installed(&'a str),
+    /// Caller-provided bytes, never installed: a one-shot script (e.g. a
+    /// migration) whose code leaves no trace in the store — only its
+    /// committed writes persist.
+    Bytes(&'a [u8]),
+}
+
+impl ModuleSource<'_> {
+    /// How error messages name the code being invoked.
+    fn ident(&self) -> String {
+        match self {
+            ModuleSource::Installed(name) => format!("module {name:?}"),
+            ModuleSource::Bytes(_) => "one-shot wasm".into(),
+        }
+    }
+}
+
+/// Compile candidate bytes WITHOUT touching the shared `ModuleCache`:
+/// bytes that are transient (one-shot invocations) or may yet be rejected
+/// (install validation) must not evict installed modules' compiled
+/// artifacts.
+fn compile_uncached(db: &Arc<DbInner>, wasm: &[u8]) -> Result<Module> {
+    Module::new(&db.wasm.engine, wasm).map_err(|e| Error::Wasm(format!("compile: {e}")))
+}
+
 fn validate_module_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
@@ -142,11 +179,9 @@ fn validate_module_name(name: &str) -> Result<()> {
 
 pub(crate) fn install_module(db: &Arc<DbInner>, name: &str, wasm: &[u8]) -> Result<()> {
     validate_module_name(name)?;
-    // compile first: refuse to store bytes that can never run. Uncached:
-    // rejected candidates must not evict installed modules' artifacts (the
-    // shared cache fills at first invocation instead).
-    let module = Module::new(&db.wasm.engine, wasm)
-        .map_err(|e| Error::Wasm(format!("compile: {e}")))?;
+    // compile first: refuse to store bytes that can never run (the shared
+    // cache fills at first invocation instead)
+    let module = compile_uncached(db, wasm)?;
     let has_entry = ROLE_ENTRIES.iter().any(|f| exports_func(&module, f));
     let has_memory = module
         .get_export("memory")
@@ -264,7 +299,7 @@ fn run_instance(
 
 pub(crate) fn query(
     db: &Arc<DbInner>,
-    name: &str,
+    source: &ModuleSource,
     input: &[u8],
     at: Option<SeqNo>,
 ) -> Result<Vec<u8>> {
@@ -287,12 +322,16 @@ pub(crate) fn query(
             }
         }
     };
-    let module = load_module_at(db, name, guard.seq)?;
+    let module = match source {
+        ModuleSource::Installed(name) => load_module_at(db, name, guard.seq)?,
+        ModuleSource::Bytes(wasm) => compile_uncached(db, wasm)?,
+    };
     // role check up front: misuse is a caller error at the boundary, not a
     // mid-execution EROFS surprise
     if !exports_func(&module, "query") {
         return Err(Error::InvalidArgument(format!(
-            "module {name:?} has no `query` entry point — not invocable as a query"
+            "{} has no `query` entry point — not invocable as a query",
+            source.ident()
         )));
     }
     let ctx = HostCtx::new(db.clone(), Access::ReadOnly(guard.seq), input.to_vec());
@@ -306,8 +345,8 @@ pub(crate) fn query(
     Ok(ctx.output)
 }
 
-pub(crate) fn execute(db: &Arc<DbInner>, name: &str, input: &[u8]) -> Result<Vec<u8>> {
-    execute_impl(db, name, input, &[], false, "execute")
+pub(crate) fn execute(db: &Arc<DbInner>, source: &ModuleSource, input: &[u8]) -> Result<Vec<u8>> {
+    execute_impl(db, source, input, &[], false, "execute")
 }
 
 /// Whether an installed module exports a function named `func` (probes the
@@ -331,12 +370,9 @@ pub(crate) fn module_entries(db: &Arc<DbInner>, name: &str) -> Result<Vec<String
     Ok(role_entries_of(&module))
 }
 
-/// Role entry points of candidate (not installed) module bytes. Compiles
-/// uncached for the same reason as `describe_wasm`: rejected candidates
-/// must not evict installed modules' artifacts.
+/// Role entry points of candidate (not installed) module bytes.
 pub(crate) fn wasm_entries(db: &Arc<DbInner>, wasm: &[u8]) -> Result<Vec<String>> {
-    let module = Module::new(&db.wasm.engine, wasm)
-        .map_err(|e| Error::Wasm(format!("compile: {e}")))?;
+    let module = compile_uncached(db, wasm)?;
     Ok(role_entries_of(&module))
 }
 
@@ -354,12 +390,12 @@ pub(crate) fn execute_system(
     consume: &[Vec<u8>],
     entry: &str,
 ) -> Result<Vec<u8>> {
-    execute_impl(db, name, input, consume, true, entry)
+    execute_impl(db, &ModuleSource::Installed(name), input, consume, true, entry)
 }
 
 fn execute_impl(
     db: &Arc<DbInner>,
-    name: &str,
+    source: &ModuleSource,
     input: &[u8],
     consume: &[Vec<u8>],
     system: bool,
@@ -368,6 +404,17 @@ fn execute_impl(
     if input.len() > db.opts.max_wasm_input {
         return Err(Error::InvalidArgument("input exceeds max_wasm_input".into()));
     }
+    // installed modules re-resolve at each attempt's snapshot (each attempt
+    // sees a consistent code version); one-shot bytes are pinned by the
+    // caller, so they compile once and serve every attempt
+    enum Code<'a> {
+        Installed(&'a str),
+        Pinned(Module),
+    }
+    let code = match source {
+        ModuleSource::Installed(name) => Code::Installed(name),
+        ModuleSource::Bytes(wasm) => Code::Pinned(compile_uncached(db, wasm)?),
+    };
     let attempts = db.opts.execute_retries.max(1);
     for _ in 0..attempts {
         // fresh everything per attempt: snapshot, txn, store, fuel, output
@@ -378,11 +425,15 @@ fn execute_impl(
         for key in consume {
             txn.sys_delete(key.clone())?;
         }
-        let module = load_module_at(db, name, txn.snapshot_seqno())?;
-        // role check per attempt (bytes resolve at each attempt's snapshot)
+        let module = match &code {
+            Code::Installed(name) => load_module_at(db, name, txn.snapshot_seqno())?,
+            Code::Pinned(m) => m.clone(),
+        };
+        // role check per attempt (installed bytes resolve per snapshot)
         if !exports_func(&module, entry) {
             return Err(Error::InvalidArgument(format!(
-                "module {name:?} has no `{entry}` entry point"
+                "{} has no `{entry}` entry point",
+                source.ident()
             )));
         }
         let ctx = HostCtx::new(db.clone(), Access::Txn(Some(txn)), input.to_vec());
@@ -442,10 +493,7 @@ pub(crate) fn describe_module(db: &Arc<DbInner>, name: &str) -> Result<Option<Ve
 /// `describe` candidate module bytes without installing them (install-time
 /// validation of the declared schema).
 pub(crate) fn describe_wasm(db: &Arc<DbInner>, wasm: &[u8]) -> Result<Option<Vec<u8>>> {
-    // compile WITHOUT touching the shared ModuleCache: candidate bytes may
-    // be rejected and must not evict installed modules' compiled artifacts
-    let module = Module::new(&db.wasm.engine, wasm)
-        .map_err(|e| Error::Wasm(format!("compile: {e}")))?;
+    let module = compile_uncached(db, wasm)?;
     let guard = SnapGuard {
         db: db.clone(),
         seq: db.register_snapshot(),

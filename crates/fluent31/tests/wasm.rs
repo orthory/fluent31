@@ -300,6 +300,78 @@ fn install_rejects_garbage_and_bad_exports() {
 }
 
 // ---------------------------------------------------------------------------
+// One-shot invocation (query_wasm / execute_wasm) — feed bytes in, run,
+// nothing installed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn one_shot_execute_commits_and_leaves_no_trace() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), opts()).unwrap();
+    let out = db.execute_wasm(PUT_INPUT.as_bytes(), b"migrated").unwrap();
+    assert!(out.is_empty());
+    assert_eq!(db.get(b"wk").unwrap().unwrap(), b"migrated");
+    // only the writes persist — the code was never installed
+    assert!(db.list_modules().unwrap().is_empty());
+}
+
+#[test]
+fn one_shot_query_reads_and_stays_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), opts()).unwrap();
+    db.put(b"gk".to_vec(), b"one-shot-value".to_vec()).unwrap();
+    assert_eq!(db.query_wasm(GET_ECHO.as_bytes(), b"").unwrap(), b"one-shot-value");
+    // the EROFS wall holds on the one-shot query path too
+    match db.query_wasm(PUT_ALWAYS.as_bytes(), b"") {
+        Err(Error::GuestFailed { code, .. }) => assert_eq!(code, -2),
+        other => panic!("expected GuestFailed(EROFS), got {other:?}"),
+    }
+}
+
+#[test]
+fn one_shot_query_at_time_travels_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), opts()).unwrap();
+    db.put(b"gk".to_vec(), b"old".to_vec()).unwrap();
+    let snap = db.snapshot();
+    db.put(b"gk".to_vec(), b"new".to_vec()).unwrap();
+    assert_eq!(db.query_wasm(GET_ECHO.as_bytes(), b"").unwrap(), b"new");
+    assert_eq!(db.query_wasm_at(GET_ECHO.as_bytes(), b"", &snap).unwrap(), b"old");
+}
+
+/// The export IS the role for one-shot bytes too, and errors name the
+/// anonymous source rather than a module.
+#[test]
+fn one_shot_role_entries_are_enforced() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), opts()).unwrap();
+    match db.execute_wasm(GET_ECHO.as_bytes(), b"") {
+        Err(Error::InvalidArgument(msg)) => {
+            assert!(msg.contains("`execute`"), "names the missing entry: {msg}");
+            assert!(msg.contains("one-shot"), "names the source: {msg}");
+        }
+        other => panic!("expected InvalidArgument, got {other:?}"),
+    }
+    match db.query_wasm(PUT_INPUT.as_bytes(), b"") {
+        Err(Error::InvalidArgument(msg)) => {
+            assert!(msg.contains("`query`"), "names the missing entry: {msg}")
+        }
+        other => panic!("expected InvalidArgument, got {other:?}"),
+    }
+}
+
+#[test]
+fn one_shot_rejects_garbage_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), opts()).unwrap();
+    assert!(matches!(
+        db.execute_wasm(b"not wasm at all", b""),
+        Err(Error::Wasm(_))
+    ));
+    assert!(matches!(db.query_wasm(b"not wasm at all", b""), Err(Error::Wasm(_))));
+}
+
+// ---------------------------------------------------------------------------
 // Real Rust guests
 // ---------------------------------------------------------------------------
 

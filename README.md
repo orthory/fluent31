@@ -424,6 +424,7 @@ mutation {
                    {delete: {text: "b"}}])                # atomic
   placeOrder(customer: "acme", amountCents: "4200") { id }  # typed executor module
   wasmExecute(module: "transfer", input: {base64: "..."}) { base64 }  # generic fallback
+  wasmExecuteOnce(wasm: {base64: "..."}) { base64 }  # one-shot: run without installing (migrations)
   installModule(name: "agg", wasm: {base64: "..."}) { name size }
   createTrigger(name: "idx", module: "customer_index",
                 lo: {text: "orders/"}, hi: {text: "orders0"})
