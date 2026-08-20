@@ -37,18 +37,10 @@ keyspace) with a `query` (the dynamic view serving reads over it) in one
 module.
 
 **One-shot invocation.** The querier and executor roles can also run on
-caller-provided bytes that are never installed: `Db::query_wasm` /
-`Db::query_wasm_at` / `Db::execute_wasm`, GraphQL `wasmOnce(wasm:, input:)`
-/ `wasmExecuteOnce(wasm:, input:)`, CLI `queryonce` / `execonce`. Same
-roles, same sandbox and limits, same commit/retry semantics — but the code
-leaves no trace in the store: only an executor's committed writes persist.
-This is the shape for migrations (the script lives in your repo, its
-effects in the database); it also skips the schema rebuild and, on a
-replicated store, never ships module bytes to replicas. The flip side of
-tracelessness: there is no in-database record of what code ran — an
-installed module's bytes are versioned, and `query_at` can time-travel
-them, so install the big audited migrations and one-shot the rest. Trigger
-consumers always run as installed modules (a trigger binds to a name).
+caller-provided bytes that are never installed — feed a script in, run it
+with full sandbox and transaction semantics, and only its committed
+writes persist. Made for migrations; surfaces, semantics, and the recipe
+in section 10.
 
 **Transactional retry semantics (critical):** on commit conflict the WHOLE
 attempt is discarded and re-run against a fresh snapshot — fresh Store,
@@ -306,7 +298,7 @@ mutation Install($w: BytesInput!) {
 query    { wasm(module: "myModule", input: {text: "..."}) { text base64 hex len } }
 mutation { wasmExecute(module: "myModule", input: {base64: "..."}) { base64 } }
 
-# one-shot: run the bytes without installing them (section 1)
+# one-shot: run the bytes without installing them (section 10)
 query    { wasmOnce(wasm: {base64: "..."}, input: {text: "..."}) { text } }
 mutation { wasmExecuteOnce(wasm: {base64: "..."}, input: {base64: "..."}) { base64 } }
 ```
@@ -669,3 +661,127 @@ that didn't commit, and a crash loses no events — the feed is data.
 The raw `changes` plane needs no module at all. The typed plane needs
 only a `feed` descriptor — no new WASM entry point, no SDK change: the
 `on_apply` role from section 8 is already the producer.
+
+## 10. One-shot invocation — migrations without install
+
+The querier and executor roles also run on bytes passed at call time and
+never installed:
+
+| Surface | Query (read-only) | Execute (transactional) |
+|---|---|---|
+| Engine | `Db::query_wasm(wasm, input)` / `Db::query_wasm_at(wasm, input, &snap)` | `Db::execute_wasm(wasm, input)` |
+| GraphQL | `wasmOnce(wasm:, input:)` | `wasmExecuteOnce(wasm:, input:)` |
+| CLI shell | `queryonce FILE.wasm [INPUT]` | `execonce FILE.wasm [INPUT]` |
+
+The module contract is unchanged: export `memory` plus the matching role
+entry (section 2), speak the same ABI (section 3), write it with the same
+SDK (section 4). Binary wasm and WAT text are both accepted, every
+resource limit and the reserved-keyspace wall apply, and
+`Options::wasm_enabled = false` refuses one-shot work like everything
+else.
+
+What differs from invoking an installed module:
+
+- **Nothing is stored.** The bytes compile for this invocation only —
+  uncached, so a stream of one-shot scripts cannot evict installed
+  modules' compiled artifacts — and are forgotten. `modules` never lists
+  them, there is nothing to uninstall, no schema rebuild happens, and on
+  a replicated store no module bytes ship to replicas. An executor's
+  committed writes are the only trace.
+- **Execute: same loop, pinned code.** Fresh optimistic transaction per
+  attempt, commit on guest exit 0, conflict retry up to
+  `execute_retries` — but where an installed module re-resolves at each
+  attempt's snapshot, one-shot bytes cannot change mid-call: one compile
+  serves every attempt. Section 1's retry contract applies unchanged —
+  the entry may run several times, so keep it a pure function of (input,
+  database state).
+- **Query: same snapshot pinning.** `Db::query_wasm` reads the current
+  visible state, `query_wasm_at` a registered snapshot (the data
+  time-travels; the code is whatever you passed). GraphQL `wasmOnce`
+  runs at the operation's pinned snapshot, consistent with `get`/`scan`
+  in the same request.
+- **Triggers still fire.** A one-shot executor is an ordinary writer:
+  its committed writes generate write-range trigger events (section 8),
+  so trigger-maintained indexes and feeds stay correct through a
+  migration. (Only writes *by* trigger invocations are exempt — the
+  no-stacking rule.)
+- **No typed surface, no trigger role.** `describe` is ignored — typed
+  root fields and feeds exist only for installed modules — and a trigger
+  binds to an installed module's *name*, so `on_touch` / `on_apply`
+  consumers must be installed.
+- **No in-database audit trail.** Installed bytes are versioned and
+  `query_at` time-travels them, so the store can answer "what code ran
+  here"; a one-shot leaves no such record — the script in your repo and
+  its git history are the audit trail. Install the big audited
+  migrations; one-shot the rest.
+
+### The migration recipe
+
+A migration is an ordinary executor (section 4) invoked one-shot. The
+skeleton — walk a prefix, skip already-migrated records, rewrite the
+rest:
+
+```rust
+use fluent_guest::Fail;
+
+#[fluent_guest::execute]
+fn user_v2(_input: Vec<u8>) -> Result<String, Fail> {
+    let scan = fluent_guest::scan_prefix(b"user/")
+        .map_err(|e| Fail::new(2, format!("scan: {e}")))?;
+    let mut migrated = 0u64;
+    for (key, value) in scan {
+        let old: serde_json::Value = serde_json::from_slice(&value).map_err(|_| {
+            Fail::new(3, format!("corrupt record {}", String::from_utf8_lossy(&key)))
+        })?;
+        if old.get("v").is_some() {
+            continue; // already v2: idempotent re-run
+        }
+        let new = serde_json::json!({ "v": 2, "name": old });
+        fluent_guest::put(&key, new.to_string().as_bytes())
+            .map_err(|e| Fail::new(4, format!("put: {e}")))?;
+        migrated += 1;
+    }
+    Ok(format!("migrated {migrated}"))
+}
+```
+
+Build like any guest (section 4), then run it — CLI:
+
+```
+$ fluent-cli ./db
+> execonce guests/target/wasm32-unknown-unknown/release/user_v2.wasm
+migrated 41283
+```
+
+or GraphQL:
+
+```graphql
+mutation Migrate($w: BytesInput!) {
+  wasmExecuteOnce(wasm: $w) { text }
+}
+# variables: {"w": {"base64": "<base64 of user_v2.wasm>"}}
+```
+
+The whole migration is ONE transaction: atomic (all-or-nothing, even
+across conflict retries), invisible until commit, and serialized against
+concurrent writers by OCC — a conflicting write just re-runs the attempt.
+That is also its bound: the write set must fit `max_txn_write_bytes`
+(256 MiB) and the work must fit `wasm_fuel`. For a keyspace bigger than
+that, shard by cursor: take a start key as input, migrate up to N
+records, return the next start key as output, and drive the loop from the
+caller — each invocation is then its own atomic, retry-tolerant chunk,
+and a conflict only re-runs that chunk.
+
+Checklist, on top of section 7's:
+
+1. **Idempotent by inspection** — detect an already-migrated record and
+   skip it, so a re-run (or a retried attempt) is always safe. Never
+   track "did it run" anywhere but the data itself.
+2. **Fail loudly on the unexpected** — a record that parses wrong is
+   corruption (distinct `Fail` code), not a default. A non-zero exit
+   aborts the whole transaction: nothing half-migrated survives.
+3. **Rehearse on a fork** — fork the instance, run the one-shot against
+   the fork (its own `/graphql/<instanceId>` endpoint), inspect the
+   result, then run on the primary and delete the fork.
+4. **Keep the script in your repo** — that is the audit trail one-shot
+   deliberately doesn't write into the store.
