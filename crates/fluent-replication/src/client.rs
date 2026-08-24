@@ -337,8 +337,8 @@ impl ReplicaInner {
 }
 
 /// A running edge replica: an [`EdgeStore`] kept in sync by a background
-/// thread. Serve reads through it directly (it implements
-/// `fluent_wire::WireBackend`) or via [`EdgeReplica::store`].
+/// thread. Read through [`EdgeReplica::store`] — the replica is a library
+/// component for the process that needs the scoped reads, not a server.
 pub struct EdgeReplica {
     inner: Arc<ReplicaInner>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -393,29 +393,6 @@ impl Drop for EdgeReplica {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-    }
-}
-
-/// Read delegation so the standard wire server can front a replica; the
-/// inner store is re-read per call, so a re-attach swap is invisible to
-/// connected readers.
-impl fluent_wire::WireBackend for EdgeReplica {
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.store().get(key)
-    }
-
-    fn scan(
-        &self,
-        lo: Option<&[u8]>,
-        hi: Option<&[u8]>,
-        reverse: bool,
-        limit: usize,
-    ) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, bool)> {
-        self.store().scan(lo, hi, reverse, limit)
-    }
-
-    fn stats_text(&self) -> Result<String> {
-        Ok(format!("{:#?}", self.store().stats()))
     }
 }
 

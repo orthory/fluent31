@@ -3,14 +3,14 @@
 The replication channel for fluent31: a small **ephemeral edge replica**
 holds the slice of one master's tree that overlaps its key scope
 `[lo, hi)`, serves reads locally, and reaches back for what it doesn't
-have. Server: `fluent-replication master` (default `127.0.0.1:8428`).
-Edge: `fluent-replication edge` (drives a replica and serves standard
-wire-v1 reads over it). Library types: `fluent_replication::{ReplServer,
-ReplClient, EdgeReplica}`, engine-side `fluent31::edge::EdgeStore`.
+have. Server: the `fluent-replication` binary (default
+`127.0.0.1:8428`). Edge replicas are embedded: the process that needs
+the scoped reads drives one with `fluent_replication::EdgeReplica` and
+reads through `EdgeReplica::store()`. Library types:
+`fluent_replication::{ReplServer, ReplClient, EdgeReplica}`, engine-side
+`fluent31::edge::EdgeStore`.
 
-This is a **separate channel** from `fluent-wire` — its own port and
-opcode space — but the frame layout is identical, so the framing code is
-shared. All integers little-endian; `blob` = `[u32 len][bytes]`;
+All integers little-endian; `blob` = `[u32 len][bytes]`;
 `opt X` = `[u8 present]` then the field when present=1.
 
 ## 1. Model
@@ -59,7 +59,7 @@ server never sends it.
 
 ## 3. Frame
 
-Identical to wire v1:
+Both directions:
 
 ```
 [u32 frame_len]   length of everything AFTER this field (id + op + payload)
@@ -140,10 +140,10 @@ slice (retrying `GONE` races), and then follows the stream. Slice
 refreshes (periodic, and after every re-sync) prune the overlay.
 Reads: overlay → fragments; values: inline → local value cache →
 `FETCH_VALUE`. The local value cache is an append-only file of verbatim
-records, reset wholesale when it exceeds its cap. The replica implements
-`fluent_wire::WireBackend`, so the standard wire server fronts it:
-GET/SCAN/STATS work (scans clamp to the scope, out-of-scope GETs answer
-INVALID), writes and WASM ops answer INVALID.
+records, reset wholesale when it exceeds its cap. The replica is read
+through `EdgeReplica::store()`: `get` and `scan`, clamped to the scope;
+an out-of-scope `get` answers `InvalidArgument`. It serves no network
+protocol of its own — the embedding process owns any onward surface.
 
 ## 9. Known limits (deliberate)
 

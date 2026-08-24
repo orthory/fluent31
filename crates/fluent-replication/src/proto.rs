@@ -1,17 +1,98 @@
-//! fluent replication (protocol version 2): payload codecs and opcode space.
+//! fluent replication (protocol version 2): frame codec, payload codecs,
+//! and opcode space.
 //!
-//! The frame layout is shared with wire v1 (`[u32 frame_len][u64
-//! request_id][u8 opcode|status][payload…]`, little-endian, blob =
-//! `[u32 len][bytes]`) but this is a separate channel on its own port with
-//! its own opcodes. After `SUBSCRIBE` succeeds, a connection becomes
-//! push-only: the server sends `PUSH_*` frames with `request_id = 0` and
-//! the client sends nothing further. Full specification: REPLICATION.md.
+//! Frame, both directions: `[u32 frame_len][u64 request_id][u8
+//! opcode|status][payload…]`, little-endian, blob = `[u32 len][bytes]`.
+//! After `SUBSCRIBE` succeeds, a connection becomes push-only: the server
+//! sends `PUSH_*` frames with `request_id = 0` and the client sends
+//! nothing further. Full specification: REPLICATION.md.
 
-use bytes::BytesMut;
+use bytes::{BufMut, Bytes, BytesMut};
 use fluent31::{SliceManifest, SliceRun, SliceTable, StreamEntry, ValueKind};
-pub use fluent_wire::proto::{put_blob, request, response, Rd, FRAME_OVERHEAD, HEADER_LEN};
 
 pub const REPL_VERSION: u32 = 2;
+
+// ------------------------------------------------------------- frame codec
+
+/// Bytes of [request_id][opcode] after the length field.
+pub const FRAME_OVERHEAD: usize = 8 + 1;
+/// Full header: length field + overhead.
+pub const HEADER_LEN: usize = 4 + FRAME_OVERHEAD;
+
+/// Minimal, allocation-free payload reader.
+pub struct Rd<'a>(pub &'a [u8]);
+
+impl<'a> Rd<'a> {
+    pub fn u8(&mut self) -> Result<u8, String> {
+        let (&b, rest) = self.0.split_first().ok_or("truncated payload")?;
+        self.0 = rest;
+        Ok(b)
+    }
+    pub fn u32(&mut self) -> Result<u32, String> {
+        if self.0.len() < 4 {
+            return Err("truncated payload".into());
+        }
+        let (a, rest) = self.0.split_at(4);
+        self.0 = rest;
+        Ok(u32::from_le_bytes(a.try_into().unwrap()))
+    }
+    pub fn u64(&mut self) -> Result<u64, String> {
+        if self.0.len() < 8 {
+            return Err("truncated payload".into());
+        }
+        let (a, rest) = self.0.split_at(8);
+        self.0 = rest;
+        Ok(u64::from_le_bytes(a.try_into().unwrap()))
+    }
+    /// A `[u32 len][bytes]` field.
+    pub fn blob(&mut self) -> Result<&'a [u8], String> {
+        let n = self.u32()? as usize;
+        if self.0.len() < n {
+            return Err("truncated payload".into());
+        }
+        let (a, rest) = self.0.split_at(n);
+        self.0 = rest;
+        Ok(a)
+    }
+    /// An OPTIONAL `[u8 present][u32 len][bytes]` field.
+    pub fn opt_blob(&mut self) -> Result<Option<&'a [u8]>, String> {
+        Ok(match self.u8()? {
+            0 => None,
+            _ => Some(self.blob()?),
+        })
+    }
+    pub fn rest(self) -> &'a [u8] {
+        self.0
+    }
+    pub fn done(&self) -> Result<(), String> {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err("trailing bytes in payload".into())
+        }
+    }
+}
+
+pub fn put_blob(out: &mut BytesMut, b: &[u8]) {
+    out.put_u32_le(b.len() as u32);
+    out.put_slice(b);
+}
+
+/// Encode one response frame.
+pub fn response(request_id: u64, status: u8, payload: &[u8]) -> Bytes {
+    let mut out = BytesMut::with_capacity(HEADER_LEN + payload.len());
+    out.put_u32_le((FRAME_OVERHEAD + payload.len()) as u32);
+    out.put_u64_le(request_id);
+    out.put_u8(status);
+    out.put_slice(payload);
+    out.freeze()
+}
+
+/// Encode one request frame (client side; also used by tests).
+pub fn request(request_id: u64, opcode: u8, payload: &[u8]) -> Bytes {
+    // same layout as a response — the direction gives the byte its meaning
+    response(request_id, opcode, payload)
+}
 
 // ---------------------------------------------------------------- opcodes
 

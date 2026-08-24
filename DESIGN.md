@@ -356,7 +356,7 @@ keys), so a busy range cannot starve its own feed.
 commits) discovers backlogged triggers by skip-seeking the queue prefix,
 then drains each in chunks of `trigger_batch`: it invokes the module as a
 normal executor — entry `on_touch` with packed touched keys (keys mode) or
-`on_apply` with the wire-framed change list (changes mode) — whose
+`on_apply` with the length-prefixed change list (changes mode) — whose
 transaction is pre-seeded: marked *system* and carrying deletes of the
 consumed queue entries. The module's writes and the queue consumption
 therefore commit atomically: invocation is at-least-once (a crash mid-run
@@ -561,7 +561,8 @@ inline → local record cache → `ValueFetcher` reach-back; every record
 re-verifies CRC + embedded key before serving or caching. Reads reuse
 the engine's merge/MVCC iterator stack at `MAX_SEQNO` over
 overlay + scoped runs. Slice refreshes prune the overlay to the new
-flush watermark. The replica serves standard wire-v1 reads through
-`fluent_wire::WireBackend`; writes answer INVALID. Re-sync after
+flush watermark. The replica is read in-process through
+`EdgeReplica::store()` (`get`/`scan`, clamped to the scope; it is
+read-only and serves no network protocol of its own). Re-sync after
 lag/disconnect keeps all local caches (same instance id); a provenance
 mismatch wipes and re-attaches behind an atomic store swap.

@@ -3,7 +3,7 @@
 //! Top-level keys and `[listen]` mirror CLI flags, Cargo-style kebab-case;
 //! the tuning sections are file-only and cover everything the composed
 //! crates expose as configuration: `[engine]` is the full
-//! [`fluent31::Options`] tunable surface, `[graphql]` / `[wire]` /
+//! [`fluent31::Options`] tunable surface, `[graphql]` /
 //! `[replication]` are the per-plane limits, and `[journal]` attaches the
 //! opt-in mutation journal ([`fluent31::journal`]) at its `dir`. An
 //! explicit flag overrides its file value, the file overrides the
@@ -17,16 +17,12 @@
 //!
 //! [listen]
 //! graphql = "127.0.0.1:8317"
-//! wire = "127.0.0.1:8427"
 //! replication = "127.0.0.1:8428"
 //!
 //! [graphql]
 //! max-body-bytes = 33554432
 //! fork-max-open = 8             # open fork instances beyond the primary
 //! fork-idle-ttl-secs = 300
-//!
-//! [wire]
-//! max-frame-bytes = 269484032
 //!
 //! [replication]
 //! max-frame-bytes = 1048576
@@ -93,7 +89,6 @@ pub struct FileConfig {
     pub sync: Option<String>,
     pub listen: Option<ListenSection>,
     pub graphql: Option<GraphqlSection>,
-    pub wire: Option<WireSection>,
     pub replication: Option<ReplicationSection>,
     pub journal: Option<JournalSection>,
     pub engine: Option<EngineSection>,
@@ -103,7 +98,6 @@ pub struct FileConfig {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ListenSection {
     pub graphql: Option<String>,
-    pub wire: Option<String>,
     pub replication: Option<String>,
 }
 
@@ -113,12 +107,6 @@ pub struct GraphqlSection {
     pub max_body_bytes: Option<usize>,
     pub fork_max_open: Option<usize>,
     pub fork_idle_ttl_secs: Option<u64>,
-}
-
-#[derive(Debug, Default, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct WireSection {
-    pub max_frame_bytes: Option<usize>,
 }
 
 #[derive(Debug, Default, PartialEq, Deserialize)]
@@ -289,7 +277,6 @@ impl FileConfig {
             sync: self.sync.or(file.sync),
             listen: merge(self.listen, file.listen, |a, b| ListenSection {
                 graphql: a.graphql.or(b.graphql),
-                wire: a.wire.or(b.wire),
                 replication: a.replication.or(b.replication),
             }),
             graphql: merge(self.graphql, file.graphql, |a, b| GraphqlSection {
@@ -297,7 +284,6 @@ impl FileConfig {
                 fork_max_open: a.fork_max_open.or(b.fork_max_open),
                 fork_idle_ttl_secs: a.fork_idle_ttl_secs.or(b.fork_idle_ttl_secs),
             }),
-            wire: self.wire.or(file.wire),
             replication: self.replication.or(file.replication),
             journal: self.journal.or(file.journal),
             engine: self.engine.or(file.engine),
@@ -312,9 +298,6 @@ impl FileConfig {
             if let Some(v) = &l.graphql {
                 c.graphql_addr = v.clone();
             }
-            if let Some(v) = &l.wire {
-                c.wire_addr = v.clone();
-            }
             if let Some(v) = &l.replication {
                 c.replication_addr = v.clone();
             }
@@ -328,11 +311,6 @@ impl FileConfig {
             }
             if let Some(v) = g.fork_idle_ttl_secs {
                 c.registry.idle_ttl = Duration::from_secs(v);
-            }
-        }
-        if let Some(w) = &self.wire {
-            if let Some(v) = w.max_frame_bytes {
-                c.wire.max_frame = v;
             }
         }
         if let Some(r) = &self.replication {
@@ -402,16 +380,12 @@ mod tests {
 
             [listen]
             graphql = "127.0.0.1:1"
-            wire = "127.0.0.1:2"
             replication = "127.0.0.1:3"
 
             [graphql]
             max-body-bytes = 1024
             fork-max-open = 2
             fork-idle-ttl-secs = 60
-
-            [wire]
-            max-frame-bytes = 4096
 
             [replication]
             max-frame-bytes = 2048
@@ -430,9 +404,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.dir.as_deref(), Some("./data"));
-        assert_eq!(cfg.listen.as_ref().unwrap().wire.as_deref(), Some("127.0.0.1:2"));
+        assert_eq!(cfg.listen.as_ref().unwrap().replication.as_deref(), Some("127.0.0.1:3"));
         assert_eq!(cfg.graphql.as_ref().unwrap().fork_max_open, Some(2));
-        assert_eq!(cfg.wire.as_ref().unwrap().max_frame_bytes, Some(4096));
         assert_eq!(cfg.replication.as_ref().unwrap().ping_every_ms, Some(500));
         assert_eq!(cfg.journal.as_ref().unwrap().dir.as_deref(), Some("./jrn"));
         let e = cfg.engine.as_ref().unwrap();
@@ -475,7 +448,7 @@ mod tests {
     fn flags_override_file_and_gaps_fall_through() {
         let cli = FileConfig {
             listen: Some(ListenSection {
-                wire: Some("cli:1".into()),
+                replication: Some("cli:1".into()),
                 ..ListenSection::default()
             }),
             ..FileConfig::default()
@@ -484,7 +457,7 @@ mod tests {
             dir: Some("./from-file".into()),
             listen: Some(ListenSection {
                 graphql: Some("file:2".into()),
-                wire: Some("file:1".into()),
+                replication: Some("file:1".into()),
                 ..ListenSection::default()
             }),
             engine: Some(EngineSection {
@@ -495,7 +468,7 @@ mod tests {
         };
         let eff = cli.overlay(file);
         let listen = eff.listen.as_ref().unwrap();
-        assert_eq!(listen.wire.as_deref(), Some("cli:1"));
+        assert_eq!(listen.replication.as_deref(), Some("cli:1"));
         assert_eq!(listen.graphql.as_deref(), Some("file:2"));
         assert_eq!(eff.dir.as_deref(), Some("./from-file"));
         assert_eq!(eff.engine.as_ref().unwrap().tier_width, Some(2));
@@ -532,12 +505,10 @@ mod tests {
         let cfg: FileConfig = toml::from_str(
             r#"
             [listen]
-            wire = "127.0.0.1:9"
+            replication = "127.0.0.1:9"
             [graphql]
             fork-max-open = 3
             fork-idle-ttl-secs = 60
-            [wire]
-            max-frame-bytes = 4096
             [replication]
             ping-every-ms = 500
             "#,
@@ -545,11 +516,10 @@ mod tests {
         .unwrap();
         let c = cfg.server_config();
         let d = crate::ServerConfig::default();
-        assert_eq!(c.wire_addr, "127.0.0.1:9");
+        assert_eq!(c.replication_addr, "127.0.0.1:9");
         assert_eq!(c.graphql_addr, d.graphql_addr);
         assert_eq!(c.registry.max_open, 3);
         assert_eq!(c.registry.idle_ttl, Duration::from_secs(60));
-        assert_eq!(c.wire.max_frame, 4096);
         assert_eq!(c.replication.ping_every, Duration::from_millis(500));
         assert_eq!(c.replication.max_frame, d.replication.max_frame);
         assert_eq!(c.max_body_bytes, d.max_body_bytes);

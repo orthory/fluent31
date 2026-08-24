@@ -532,7 +532,7 @@ Where keys mode answers "which keys need reconciling", changes mode
 delivers **the list of changes that were committed**, in commit order —
 what an audit log, event-sourced projection, or value-driven index
 generator needs and coalescing would destroy. Your `on_apply` receives
-(little-endian, `u32` lengths — wire-style framing):
+(little-endian, `u32` lengths, length-prefixed framing):
 
 ```
 [u32 count]
