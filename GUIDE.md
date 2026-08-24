@@ -5,8 +5,8 @@ modules for it, run it in production.
 
 This is the usage document. The specs behind it are [DESIGN.md](DESIGN.md)
 (the architecture as implemented), [WASM.md](WASM.md) (the module ABI and
-authoring manual), [WIRE.md](WIRE.md) (the binary protocol) and
-[REPLICATION.md](REPLICATION.md) (the replica protocol). When a detail
+authoring manual) and [REPLICATION.md](REPLICATION.md) (the replica
+protocol). When a detail
 matters, they win. [SKILL.md](SKILL.md) is the short entry point for
 agents.
 
@@ -26,12 +26,11 @@ agents.
 10. [The shell](#10-the-shell)
 11. [Server mode](#11-server-mode)
 12. [GraphQL plane](#12-graphql-plane)
-13. [Wire plane](#13-wire-plane)
-14. [Replicas and edge caches](#14-replicas-and-edge-caches)
-15. [Operations](#15-operations)
-16. [Testing](#16-testing)
-17. [Advanced: how it works](#17-advanced-how-it-works)
-18. [Glossary](#18-glossary)
+13. [Replicas and edge caches](#13-replicas-and-edge-caches)
+14. [Operations](#14-operations)
+15. [Testing](#15-testing)
+16. [Advanced: how it works](#16-advanced-how-it-works)
+17. [Glossary](#17-glossary)
 
 ---
 
@@ -58,8 +57,8 @@ Around the engine:
 | `fluent31` crate | The engine. Embed it in a Rust process. |
 | `fluent-guest` crate | The SDK for writing WASM modules. |
 | `fluent-cli` | An interactive shell. Also the journal rebuild tool. |
-| `fluent-server` | One process serving one store on three planes: GraphQL (typed and admin operations, subscriptions), wire (a binary data plane) and replication (the join point for replicas). |
-| `fluent-graphql`, `fluent-wire`, `fluent-replication` | Each plane as a standalone binary, with the same defaults. |
+| `fluent-server` | One process serving one store on two planes: GraphQL (typed and admin operations, subscriptions) and replication (the join point for replicas). |
+| `fluent-graphql`, `fluent-replication` | Each plane as a standalone binary, with the same defaults. |
 
 What it is not:
 
@@ -166,7 +165,6 @@ fluent31> help
 ```sh
 cargo run -p fluent-server -- ./data --store-name prod
 # graphql      http://127.0.0.1:8317/graphql   (GraphiQL at /)
-# wire         tcp 127.0.0.1:8427
 # replication  tcp 127.0.0.1:8428
 ```
 
@@ -663,7 +661,7 @@ replication are all built on this stream.
 
 The rest of the replication surface, `slice_manifest(lo, hi)`,
 `read_table_chunk` and `read_vlog_chunk`, serves raw fragment and
-value-log bytes to replicas ([§14](#14-replicas-and-edge-caches)).
+value-log bytes to replicas ([§13](#13-replicas-and-edge-caches)).
 Application code has no use for it.
 
 ### 5.12 Identity
@@ -878,8 +876,8 @@ fluent_guest::fluent_describe!(r#"{
   It is callable through the generic byte fields, has no typed field, and
   `modules { typed schemaError }` says why.
 - Other surfaces: the GraphQL layer builds the JSON arg object. Through
-  the shell, the wire protocol or `db.execute`, a typed module receives
-  whatever bytes you pass, so send the same JSON object yourself.
+  the shell or `db.execute`, a typed module receives whatever bytes you
+  pass, so send the same JSON object yourself.
 
 Install and confirm:
 
@@ -896,7 +894,6 @@ mutation Install($w: BytesInput!) { installModule(name: "placeOrder", wasm: $w) 
 | Shell | `query NAME [INPUT]` | `exec NAME [INPUT]` |
 | GraphQL (generic) | `wasm(module:, input:) { text base64 hex len }` | `wasmExecute(module:, input:) { .. }` |
 | GraphQL (typed) | `<module>(args) { fields }` on `Query` | `<module>(args) { fields }` on `Mutation` |
-| Wire | the `QUERY` opcode | the `EXEC` opcode |
 
 `installModule` also accepts WAT text (`wasm: {text: "(module ...)"}`).
 
@@ -1058,7 +1055,7 @@ where keys mode would coalesce it. The references are
   rebuilt from the journal has neither, so recreate the triggers.
 
 Every writer fires triggers: plain puts, batches, transactions,
-executors, one-shot executors, GraphQL and the wire protocol. Trigger
+executors, one-shot executors, and every network surface. Trigger
 invocations themselves, value-log GC relocations, and writes made while
 `wasm_enabled = false` do not.
 
@@ -1271,35 +1268,34 @@ committer wins)` line; the transaction is rolled back.
 
 ```
 fluent-server <db-dir> [--config FILE] [--store-name NAME]
-              [--graphql ADDR:PORT] [--wire ADDR:PORT] [--replication ADDR:PORT]
+              [--graphql ADDR:PORT] [--replication ADDR:PORT]
               [--sync always|never|periodic:<ms>] [--max-body-bytes N]
 ```
 
-One process, one `Db`, three planes:
+One process, one `Db`, two planes:
 
 | Plane | Default | Purpose |
 |---|---|---|
 | graphql | `127.0.0.1:8317` | typed and admin operations, GraphiQL at `/`, subscriptions over graphql-ws, fork instances at `/graphql/<instanceId>` |
-| wire | `127.0.0.1:8427` | the binary data plane ([§13](#13-wire-plane)) |
-| replication | `127.0.0.1:8428` | the join point for replicas and edge caches ([§14](#14-replicas-and-edge-caches)); opens only on a named store |
+| replication | `127.0.0.1:8428` | the join point for replicas and edge caches ([§13](#13-replicas-and-edge-caches)); opens only on a named store |
 
 The store directory is flocked, so the planes cannot be split across
 processes. Server mode is how they share one handle. `--store-name` is
-persisted in the store, so pass it once. Without a name, graphql and wire
-serve and the join point stays closed; the startup banner says so.
+persisted in the store, so pass it once. Without a name, graphql serves
+and the join point stays closed; the startup banner says so.
 
 On the first SIGINT or SIGTERM the server stops accepting and drains
-in-flight GraphQL requests, then the process exits and open wire and
-replication connections drop (the WAL keeps the store consistent). A
-second signal exits immediately. The banner prints each bound address
-and, for a named store, its name and instance id. If the engine degrades
-(`Error::Background`), GraphQL and wire answer `BACKGROUND` and
-replication answers `ERR`; restart the process.
+in-flight GraphQL requests, then the process exits and open replication
+connections drop (the WAL keeps the store consistent). A second signal
+exits immediately. The banner prints each bound address and, for a named
+store, its name and instance id. If the engine degrades
+(`Error::Background`), GraphQL answers `BACKGROUND` and replication
+answers `ERR`; restart the process.
 
 Every plane defaults to loopback and speaks plain TCP or HTTP with no
 authentication. To expose one, bind it explicitly and put TLS and access
 control in front: a reverse proxy for GraphQL, a network boundary for
-wire and replication.
+replication.
 
 ### 11.1 Config file
 
@@ -1315,16 +1311,12 @@ sync = "always"               # always | never | periodic:<ms>
 
 [listen]
 graphql = "127.0.0.1:8317"
-wire = "127.0.0.1:8427"
 replication = "127.0.0.1:8428"
 
 [graphql]
 max-body-bytes = 33554432     # 32 MiB request body cap
 fork-max-open = 8             # open fork instances beyond the primary (LRU past this)
 fork-idle-ttl-secs = 300      # idle instances close after this
-
-[wire]
-max-frame-bytes = 269484032   # 257 MiB: max_value_size + overhead
 
 [replication]
 max-frame-bytes = 1048576
@@ -1377,8 +1369,7 @@ Each plane also runs on its own, with the same defaults:
 ```sh
 fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync ..] [--max-body-bytes N] [--journal DIR ...]
 fluent-graphql --print-schema                 # the base SDL (built-ins only)
-fluent-wire <db-dir> [--listen ADDR:PORT] [--sync ..]
-fluent-replication master <db-dir> [--store-name NAME] [--listen ADDR:PORT]   # the name is needed once, then persisted
+fluent-replication <db-dir> [--store-name NAME] [--listen ADDR:PORT]   # the name is needed once, then persisted
 ```
 
 Only one of them can hold the store at a time. `fluent-graphql` refuses
@@ -1391,15 +1382,15 @@ use fluent_server::{Server, ServerConfig};
 
 let db = Arc::new(Db::open(&dir, opts.clone())?);
 let server = Server::start(db.clone(), &dir, opts, ServerConfig::default()).await?;
-server.graphql_addr; server.wire_addr; server.replication_addr;   // Option: None when unnamed
+server.graphql_addr; server.replication_addr;   // replication_addr: None when unnamed
 server.db();
 server.shutdown().await;
 ```
 
-`ServerConfig` holds `graphql_addr`, `wire_addr`, `replication_addr`,
-`max_body_bytes`, `registry: RegistryConfig { max_open, idle_ttl }`,
-`wire: fluent_wire::ServerConfig { max_frame }` and `replication:
-ReplServerConfig { max_frame, ping_every }`. Nothing is served unless
+`ServerConfig` holds `graphql_addr`, `replication_addr`,
+`max_body_bytes`, `registry: RegistryConfig { max_open, idle_ttl }` and
+`replication: ReplServerConfig { max_frame, ping_every }`. Nothing is
+served unless
 every bind succeeds; failures come back as `StartError::{Engine, Bind}`.
 The TOML loader is public too (`FileConfig::load`, `overlay`,
 `server_config`, `engine_options`, `parse_sync`).
@@ -1413,11 +1404,9 @@ fail. Call `registry.evict_idle()` periodically; the binaries tick every
 60 seconds. `SchemaManager::{execute, execute_stream, schema}` run
 operations in-process, and `base_sdl()` is the built-in schema text.
 
-For the wire plane: `WireServer::new(db, ServerConfig::default())
-.serve(listener)`, or `WireServer::with_backend` over anything that
-implements `fluent_wire::WireBackend`. For replication: `ReplServer::new(
-db, cfg)?` fails with `InvalidArgument` on an unnamed store; then
-`.serve(listener)`, and `.identity()` is the served instance.
+For replication: `ReplServer::new(db, cfg)?` fails with
+`InvalidArgument` on an unnamed store; then `.serve(listener)`, and
+`.identity()` is the served instance.
 
 ## 12. GraphQL plane
 
@@ -1562,80 +1551,20 @@ mutation { placeOrder(customer: "you", amountCents: "4200") { id customerTotalCe
 query    { topCustomers(limit: 3) { customer orders totalCents avgCents } }
 ```
 
-## 13. Wire plane
-
-The wire protocol is the data plane for hot paths: raw bytes, requests
-and responses correlated by id, out-of-order completion on one
-connection. [WIRE.md](WIRE.md) is the spec.
-
-A frame is `[u32 len][u64 request_id][u8 opcode|status][payload]`,
-little-endian, and a `blob` is `[u32 len][bytes]`. Ids are allocated by
-the client per connection, with `0` reserved, so start at 1.
-
-| Op | Request | OK response |
-|---|---|---|
-| `0x00 HELLO` | nothing | `[u32 version]["fluent31"]` |
-| `0x01 GET` | key | the value, or status `NOT_FOUND` |
-| `0x02 PUT` | `[blob key][value]` | nothing |
-| `0x03 DEL` | key | nothing |
-| `0x04 BATCH` | `[u32 n]` then `[u8 0][blob k][blob v]` or `[u8 1][blob k]` | `[u32 applied]`; atomic |
-| `0x05 SCAN` | `[u8 flags][opt lo][opt hi][opt after][u32 limit]` | `[u32 n]` pairs, then `[u8 has_more][opt next_after]`; flags bit 0 is reverse and other bits are rejected; limit 1..=100000; stateless, `after` restarts past that key |
-| `0x06 QUERY` | `[blob module][input]` | the guest output |
-| `0x07 EXEC` | `[blob module][input]` | the guest output |
-| `0x08 SYNC_WAL` | nothing | nothing |
-| `0x09 STATS` | nothing | UTF-8 text, format-unstable |
-
-The status codes are `OK 0x00`, `NOT_FOUND 0x01`, `INVALID 0x02`,
-`CONFLICT 0x03`, `GUEST_FAILED 0x04` (`[i32 code][output]`), `BACKGROUND
-0x05`, `CLOSED 0x06`, `IO 0x07`, `TOO_LARGE 0x08` (the connection
-closes), `BAD_FRAME 0x09`, `CORRUPTION 0x0a` and `WASM 0x0b`.
-
-Flow control: at most 128 requests are in flight per connection, after
-which the server stops reading and backpressure reaches the client as
-TCP flow control. 64 MiB of responses are budgeted per connection.
-Frames above `max-frame-bytes` get `TOO_LARGE`. On a disconnect, every
-in-flight request has an unknown outcome, and a write may have
-committed. Retry policy belongs to the client. For non-idempotent
-multi-key logic, use an `EXEC` module that is itself idempotent.
-
-The reference client:
-
-```rust
-use fluent_wire::WireClient;
-let c = WireClient::connect("127.0.0.1:8427").await?;   // Arc<WireClient>; pipelines freely
-c.put(b"k", b"v").await?;
-let v: Option<Vec<u8>> = c.get(b"k").await?;
-c.del(b"k").await?;
-let (pairs, next_after) = c.scan(Some(b"a/"), Some(b"a0"), None, false, 1000).await?;
-let out = c.query("agg", b"metric/").await?;
-let out = c.exec("transfer", &input).await?;
-c.sync_wal().await?;
-c.call(opcode, &payload).await?;                         // raw; HELLO, BATCH and STATS have no wrapper
-// errors: WireError { status: u8, body: Vec<u8> }; WireResult<T>
-// constants: fluent_wire::proto::{OP_*, ST_*, PROTOCOL_VERSION, put_blob}
-```
-
-## 14. Replicas and edge caches
+## 13. Replicas and edge caches
 
 A replica attaches to a running master's replication join point and
 holds the slice of the master's tree that overlaps its key scope `[lo,
 hi)`. The scope is unbounded for a full replica and narrow for an edge
 cache. The overlapping index fragments are copied locally, values are
-fetched lazily and cached, and committed in-scope writes stream in. Reads
-are served locally over the standard wire protocol: `HELLO`, `GET`,
-`SCAN` and `STATS` (which reports edge statistics rather than engine
-ones). Every other opcode answers `INVALID`. [REPLICATION.md](REPLICATION.md)
-is the spec.
+fetched lazily and cached, and committed in-scope writes stream in. The
+replica is a library component: the process that needs the scoped reads
+embeds an `EdgeReplica` and reads through its store (`get` and `scan`,
+clamped to the scope). [REPLICATION.md](REPLICATION.md) is the spec.
 
 ```sh
 # master: fluent-server on a named store (join point :8428), or the plane alone
-fluent-replication master ./data --store-name prod [--listen 127.0.0.1:8428]   # the name persists after the first open
-
-# edge: attach, serve wire-v1 reads
-fluent-replication edge --master 127.0.0.1:8428 --dir /tmp/edge \
-    [--lo user/] [--hi user0] [--serve 127.0.0.1:8427] [--refresh-secs 300]
-# keys: raw text or hex:<bytes>; hi omitted = unbounded; --refresh-secs 0 = refresh only on re-sync
-# a lo below the user keyspace is clamped; an empty scope is rejected
+fluent-replication ./data --store-name prod [--listen 127.0.0.1:8428]   # the name persists after the first open
 ```
 
 How it behaves:
@@ -1653,15 +1582,18 @@ How it behaves:
 - Ephemeral. The edge directory is a cache, wiped on attach, and the
   master keeps no per-edge state beyond the subscription. A stale file
   reference answers `GONE` and the edge re-pulls. Only committed user-key
-  data is served: no modules, no triggers, no queries or executors.
+  data is readable: no modules, no triggers, no queries or executors.
 - Lag. A slow edge is cut off (`LAGGED`) rather than stalling the master.
   It re-syncs and keeps its caches.
-- Scope. An out-of-scope `GET` answers `INVALID`, scans clamp to the
-  scope, and the reserved keyspace is never served or streamed.
+- Scope. An out-of-scope `get` is refused (`InvalidArgument`), scans
+  clamp to the scope, and the reserved keyspace is never copied or
+  streamed. A `lo` below the user keyspace is clamped; an empty scope is
+  rejected.
 
-The v1 limits are deliberate: one contiguous scope per replica,
-read-only, no proxying of out-of-scope requests, a memory-only stream
-overlay (a restart re-attaches), and no WASM at the edge.
+The limits are deliberate: one contiguous scope per replica, read-only,
+embedded (a replica serves no network protocol of its own), a
+memory-only stream overlay (a restart re-attaches), and no WASM at the
+edge.
 
 The library surface is `fluent_replication::{ReplServer,
 ReplServerConfig, ReplClient, EdgeReplica, EdgeReplicaConfig,
@@ -1673,18 +1605,17 @@ let mut cfg = EdgeReplicaConfig::new("127.0.0.1:8428", "/tmp/edge", b"user/".to_
 // fields: master_addr, dir, scope_lo, scope_hi, refresh_every (300 s; None = only on re-sync),
 //         value_cache_bytes (256 MiB), block_cache_size (32 MiB)
 cfg.refresh_every = Some(Duration::from_secs(60));
-let replica = EdgeReplica::start(cfg)?;                // returns once a complete scoped view is served
+let replica = EdgeReplica::start(cfg)?;                // returns once a complete scoped view is available
 replica.store().get(b"user/1")?;  replica.store().stats();   // EdgeStats
 replica.master();                                      // StoreIdentity
-// implements fluent_wire::WireBackend: WireServer::with_backend(Arc::new(replica), ..)
 
 // lower level: ReplClient::connect(addr) -> (client, MasterInfo { name, instance_id, visible_seqno });
 // client.snapshot(lo, hi), fetch_table_chunk(..), fetch_value(..); ReplClient implements edge::ValueFetcher
 ```
 
-## 15. Operations
+## 14. Operations
 
-### 15.1 Directory layout
+### 14.1 Directory layout
 
 ```
 <dir>/
@@ -1700,7 +1631,7 @@ replica.master();                                      // StoreIdentity
 One process per directory. Everything is CRC32C-checked. Don't hand-edit
 anything, and don't delete WALs or manifests.
 
-### 15.2 Sizing
+### 14.2 Sizing
 
 | Knob | Raise it when | Lower it when |
 |---|---|---|
@@ -1716,20 +1647,20 @@ Writers stall rather than fail when frozen memtables exceed
 `max_immutable_memtables` or L0 exceeds `l0_stall_trigger`. Sustained
 stalls mean compaction cannot keep up.
 
-### 15.3 Monitoring
+### 14.3 Monitoring
 
-- `stats` (engine, shell, GraphQL, wire `STATS`) reports the seqno, the
+- `stats` (engine, shell, GraphQL) reports the seqno, the
   memtable and level shape, value-log live, retired and discardable
-  bytes, the cache hit rate, and group commit amortization. On an edge,
-  `STATS` reports the replica instead: flushed and frontier seqno,
-  fragments, overlay and value-cache bytes.
+  bytes, the cache hit rate, and group commit amortization. An edge
+  replica reports through `EdgeStats` instead: flushed and frontier
+  seqno, fragments, overlay and value-cache bytes.
 - `triggers` reports `pending` (the backlog depth) and `lastError` per
   trigger.
 - `Journal::stats()`: `last_seqno` against `db.seqno()` is the journal
   lag; `last_error` is the last failure.
 - `FLUENT31_WASM_LOG=1` prints guest `log` calls to stderr.
 
-### 15.4 Limits
+### 14.4 Limits
 
 | | |
 |---|---|
@@ -1742,8 +1673,7 @@ stalls mean compaction cannot keep up.
 | GraphQL body | 32 MiB by default; document depth 32, complexity 5000 |
 | GraphQL `scan` page | at most 10000 |
 | fork nesting under the server | 8 |
-| engine calls in flight per plane | GraphQL 128 reads and 32 writes; wire 128 and 32; replication 64 |
-| wire frame | 257 MiB by default; `SCAN` limit at most 100000 |
+| engine calls in flight per plane | GraphQL 128 reads and 32 writes; replication 64 |
 | seqno | 56-bit |
 
 Known limits (v1, deliberate): no block compression by default (LZ4 is
@@ -1756,17 +1686,17 @@ Compatibility: every `Options` field except `store_name` may change
 between opens of the same store, and `compression` affects only newly
 written tables. On-disk formats are versioned. An unnamed store stays on
 manifest format 1, a named one writes format 2, and pins bump it to 3;
-older binaries read only the formats they know. The wire protocol
-advertises its version in `HELLO`.
+older binaries read only the formats they know. The replication
+protocol advertises its version in `HELLO`.
 
-### 15.5 Platform notes
+### 14.5 Platform notes
 
 `IoBackend::Auto` probes io_uring at open and falls back to portable IO;
 `stats.backend` tells you which one is active. Docker's default seccomp
 profile blocks io_uring, so use `--security-opt seccomp=unconfined` or
 `io-backend = "std"`. macOS uses portable IO throughout.
 
-## 16. Testing
+## 15. Testing
 
 ```sh
 cargo test --workspace                              # engine model tests, group commit, wasm, graphql,
@@ -1796,12 +1726,12 @@ Under Docker: `docker run --security-opt seccomp=unconfined -v
 $PWD:/src -w /src rust:1 sh -c "rustup target add wasm32-unknown-unknown
 && cargo test --workspace"`.
 
-## 17. Advanced: how it works
+## 16. Advanced: how it works
 
 Enough architecture to predict behavior. Each item names its section in
 [DESIGN.md](DESIGN.md).
 
-### 17.1 Write path (§2, §13)
+### 16.1 Write path (§2, §13)
 
 A batch is placed first: values at or above `value_threshold` are
 appended to the value-log head and the tree entry becomes a pointer.
@@ -1814,7 +1744,7 @@ approaches the number of concurrent writers. Transactions validate and
 apply inside the same critical section, revalidating against earlier
 batches in the same group.
 
-### 17.2 Storage shape (§3, §4, §8)
+### 16.2 Storage shape (§3, §4, §8)
 
 Lazy leveling: tiered merges on the upper levels, where a full level
 merges into one run at the front of the next, and one leveled run at the
@@ -1828,7 +1758,7 @@ only once no snapshot can still reach the old versions and the
 relocations sit in fsynced tables. `vlog_retired` in `stats` counts files
 between those two steps.
 
-### 17.3 MVCC and the watermark (§6)
+### 16.3 MVCC and the watermark (§6)
 
 The GC watermark is the oldest registered snapshot, and pins and
 subscriptions register too. Compaction keeps every version above the
@@ -1843,7 +1773,7 @@ same critical section every other writer uses. The transaction's own
 snapshot bounds the watermark, so that evidence cannot be compacted away
 mid-transaction.
 
-### 17.4 Recovery (§5)
+### 16.4 Recovery (§5)
 
 The manifest is a full metadata snapshot, rewritten per change and
 flipped by an atomic `CURRENT` rename. Tables are fsynced before any
@@ -1855,7 +1785,7 @@ and opens a fresh value-log head, because the engine never appends to a
 file that predates a crash. Orphaned files and crashed fork builds are
 swept.
 
-### 17.5 WASM layer (§9)
+### 16.5 WASM layer (§9)
 
 wasmtime with fuel metering, memory limits, NaN canonicalization,
 deterministic SIMD and no WASI. Queries run against a registered snapshot
@@ -1865,7 +1795,7 @@ hash; one-shot bytes are compiled uncached. Module bytes live at
 `\x00wasm\x00<name>` as ordinary versioned keys, which is what lets
 `query_at` time-travel code together with data.
 
-### 17.6 Triggers (§9, "Write-range triggers")
+### 16.6 Triggers (§9, "Write-range triggers")
 
 Capture runs inside the commit critical section. Each committed batch's
 keys are matched against the trigger registry and the event records are
@@ -1881,7 +1811,7 @@ set, so a re-touch that lands after the drain's snapshot conflicts the
 commit and the drain re-runs against fresh state. Ordinary OCC closes
 the race.
 
-### 17.7 Forks (§10)
+### 16.7 Forks (§10)
 
 A head fork flushes, pins a cut under a brief manifest lock, hard-links
 every table and sealed value-log file, copies the head value-log file up
@@ -1891,7 +1821,7 @@ one merge that keeps the newest version at or below the cut per key,
 while the values stay linked. Pins are manifest records that re-register
 a snapshot at every open before the background threads start.
 
-### 17.8 Change stream, subscriptions, journal (§14, WASM.md §9)
+### 16.8 Change stream, subscriptions, journal (§14, WASM.md §9)
 
 `Db::subscribe` taps the apply path right after the seqno is published,
 so delivery is ordered and gap-free from installation. Entries carry
@@ -1901,7 +1831,7 @@ that is still in flight. A subscriber past `sub_queue_bytes` is dropped.
 GraphQL subscriptions, the journal and replication are all consumers of
 this one stream.
 
-### 17.9 Identity and replication (§14, REPLICATION.md)
+### 16.9 Identity and replication (§14, REPLICATION.md)
 
 The instance id is `H(name)` for a root store and `H(parent ‖ cut ‖
 name)` for a fork. It is deterministic, so a crash between minting and
@@ -1913,7 +1843,7 @@ an overlay memtable, resolves values inline first, then from a local
 cache, then by fetching from the master, and reads through the same
 merge and MVCC iterator stack as the engine.
 
-### 17.10 Threads and locks (§11)
+### 16.10 Threads and locks (§11)
 
 Per store there are the user writers, one flush thread, one compaction
 thread that also runs value-log GC, the commit thread and the trigger
@@ -1923,7 +1853,7 @@ failures degrade the store (`Error::Background`) instead of hanging
 waiters. The lock order is strict: `write`, then `manifest`, then
 `state`, then `snapshots`.
 
-## 18. Glossary
+## 17. Glossary
 
 - **changes mode**: the trigger mode that delivers every committed op, in order, to `on_apply`.
 - **commit seqno**: the last seqno of an atomic commit; the state in which its ops became visible.

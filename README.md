@@ -21,10 +21,9 @@ instead of SQL.
 - Journal: opt-in and off the commit path. An independent mutation log
   from which a fresh database is rebuilt when the store directory is
   lost.
-- Server: one process, one store, three planes. GraphQL for typed and
-  admin operations with live subscriptions, a binary wire pipe as the
-  data plane, and a replication join point for full replicas and
-  key-range edge caches.
+- Server: one process, one store, two planes. GraphQL for typed and
+  admin operations with live subscriptions, and a replication join point
+  for full replicas and key-range edge caches.
 
 ## Quick start
 
@@ -47,7 +46,7 @@ txn.commit()?;                       // Err(Error::Conflict) if someone else wro
 
 ```sh
 cargo run -p fluent-cli -- ./data                        # interactive shell
-cargo run -p fluent-server -- ./data --store-name prod   # GraphQL :8317, wire :8427, replication :8428
+cargo run -p fluent-server -- ./data --store-name prod   # GraphQL :8317, replication :8428
 cargo run -p fluent31 --example live_stats               # a trigger-maintained GROUP BY, checked against a recount
 ```
 
@@ -69,11 +68,11 @@ db.query("count", b"user/")?;                            // b"1"
 
 | | |
 |---|---|
-| [GUIDE.md](GUIDE.md) | Start here. Everything about using fluent31: concepts, the embedded API, modules, triggers, forks, durability, the shell, server mode, GraphQL, wire, replication, operations, and an "advanced" section on how it works. |
+| [GUIDE.md](GUIDE.md) | Start here. Everything about using fluent31: concepts, the embedded API, modules, triggers, forks, durability, the shell, server mode, GraphQL, replication, operations, and an "advanced" section on how it works. |
 | [SKILL.md](SKILL.md) | The short entry point for agents: the model in twelve lines, commands, traps, and where to read more. |
 | [WASM.md](WASM.md) | The module authoring manual and ABI spec. |
 | [DESIGN.md](DESIGN.md) | The architecture as implemented, section by section. |
-| [WIRE.md](WIRE.md), [REPLICATION.md](REPLICATION.md) | The binary and replica protocol specs. |
+| [REPLICATION.md](REPLICATION.md) | The replica protocol spec. |
 
 ## Testing
 
@@ -93,10 +92,9 @@ Under Docker, io_uring is blocked by the default seccomp profile. Add
 crates/fluent31           the engine (lib)
 crates/fluent-guest       guest-side SDK for WASM modules (+ fluent-guest-macros)
 crates/fluent-cli         interactive shell, journal rebuild
-crates/fluent-server      server mode: all three planes in one process
+crates/fluent-server      server mode: both planes in one process
 crates/fluent-graphql     GraphQL plane (axum + async-graphql)
-crates/fluent-wire        binary wire protocol server + reference client
-crates/fluent-replication replication: master server + edge replica driver
+crates/fluent-replication replication: master server + embeddable edge replica
 guests/                   example modules (a separate wasm32 workspace)
 scripts/demo-orders.sh    typed-module demo against a running server
 ```
