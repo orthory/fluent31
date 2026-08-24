@@ -1,5 +1,5 @@
 //! fluent-server binary: formal server mode — one process, one store,
-//! all three network planes.
+//! every network plane.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -9,19 +9,18 @@ use fluent_server::{parse_sync, FileConfig, GraphqlSection, ListenSection, Serve
 
 const USAGE: &str = "\
 usage: fluent-server <db-dir> [--config FILE] [--store-name NAME]
-                     [--graphql ADDR:PORT] [--wire ADDR:PORT] [--replication ADDR:PORT]
+                     [--graphql ADDR:PORT] [--replication ADDR:PORT]
                      [--sync always|never|periodic:<ms>] [--max-body-bytes N]
 
 serves every plane of one store in one process:
   graphql      HTTP, default 127.0.0.1:8317 — typed/admin plane, GraphiQL at /
-  wire         TCP,  default 127.0.0.1:8427 — binary data-plane pipe (WIRE.md)
   replication  TCP,  default 127.0.0.1:8428 — join point for replicas and
                key-range edge caches (REPLICATION.md); needs a named store:
                pass --store-name once, the name persists
 
 --config FILE reads TOML settings, kebab-case: top-level dir / store-name /
-  sync, [listen] graphql/wire/replication, and the file-only tuning
-  sections [graphql] [wire] [replication] [journal] [engine] — [engine]
+  sync, [listen] graphql/replication, and the file-only tuning
+  sections [graphql] [replication] [journal] [engine] — [engine]
   covers every fluent31::Options tunable, [journal] dir attaches the
   opt-in mutation journal (rebuild: fluent-cli journal-rebuild). Explicit
   flags override the file. Annotated example:
@@ -49,10 +48,6 @@ fn main() -> ExitCode {
             },
             "--graphql" => match args.next() {
                 Some(v) => listen(&mut cli).graphql = Some(v),
-                None => return usage(),
-            },
-            "--wire" => match args.next() {
-                Some(v) => listen(&mut cli).wire = Some(v),
                 None => return usage(),
             },
             "--replication" => match args.next() {
@@ -189,10 +184,6 @@ async fn serve(db: Arc<Db>, dir: String, opts: Options, cfg: ServerConfig) -> Ex
         "fluent-server: graphql      http://{}/graphql (GraphiQL at /, forks at /graphql/<instanceId>)",
         server.graphql_addr
     );
-    println!(
-        "fluent-server: wire         {} (protocol v1, WIRE.md)",
-        server.wire_addr
-    );
     match (server.replication_addr, db.identity()) {
         (Some(addr), Some(id)) => println!(
             "fluent-server: replication  {addr} — store {:?} instance {} (replicas and edge caches join here, REPLICATION.md)",
@@ -205,8 +196,8 @@ async fn serve(db: Arc<Db>, dir: String, opts: Options, cfg: ServerConfig) -> Ex
     }
 
     // First signal: stop accepting and drain in-flight GraphQL requests
-    // (in-flight wire connections are severed at exit; the WAL keeps the
-    // store consistent). Second signal: exit immediately.
+    // (in-flight replication connections are severed at exit; the WAL
+    // keeps the store consistent). Second signal: exit immediately.
     any_signal().await;
     eprintln!("fluent-server: shutting down — draining in-flight requests (signal again to exit immediately)");
     tokio::spawn(async {

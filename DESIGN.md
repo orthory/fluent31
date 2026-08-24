@@ -356,7 +356,7 @@ keys), so a busy range cannot starve its own feed.
 commits) discovers backlogged triggers by skip-seeking the queue prefix,
 then drains each in chunks of `trigger_batch`: it invokes the module as a
 normal executor — entry `on_touch` with packed touched keys (keys mode) or
-`on_apply` with the wire-framed change list (changes mode) — whose
+`on_apply` with the length-prefixed change list (changes mode) — whose
 transaction is pre-seeded: marked *system* and carrying deletes of the
 consumed queue entries. The module's writes and the queue consumption
 therefore commit atomically: invocation is at-least-once (a crash mid-run
@@ -436,8 +436,9 @@ snapshots lock); everything else is refused with a pointer at pins.
 **Open = activate.** Every fork is a complete database; opening it
 read-write gives a live copy-on-write clone (its compactions unlink only
 its own hard links). `delete_fork` refuses if the fork is flock'd open as
-a database. `clone_to` re-links a fork to a fresh directory — work on the
-copy, keep the archived fork pristine.
+a database. `restore_to` re-links a fork to a fresh directory (a named
+lineage requires a fresh name per copy, so restored copies mint distinct
+identities) — work on the copy, keep the archived fork pristine.
 
 ## 11. Concurrency & locks
 
@@ -506,8 +507,8 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
   path degrade the store (`bg_error`) instead of leaving WAL/vlog state
   ambiguous; a committer panic fails the in-flight group (unwind guard)
   and parked writers poll `bg_error`, so client threads can never hang.
-- Known v1 limits (documented, deliberate): no block compression
-  (format-versioned for later); discard-stat lag under lazy leveling (no sampling fallback yet);
+- Known v1 limits (documented, deliberate): block compression is
+  LZ4-only and off by default; discard-stat lag under lazy leveling (no sampling fallback yet);
   GC relocations bump seqnos, so a hot large-value key can cost a user txn
   a retry; fixed `max_levels` (no dynamic depth); bottom merges rewrite the
   whole bottom level (fragments bound file sizes, not total merge work).
@@ -560,7 +561,8 @@ inline → local record cache → `ValueFetcher` reach-back; every record
 re-verifies CRC + embedded key before serving or caching. Reads reuse
 the engine's merge/MVCC iterator stack at `MAX_SEQNO` over
 overlay + scoped runs. Slice refreshes prune the overlay to the new
-flush watermark. The replica serves standard wire-v1 reads through
-`fluent_wire::WireBackend`; writes answer INVALID. Re-sync after
+flush watermark. The replica is read in-process through
+`EdgeReplica::store()` (`get`/`scan`, clamped to the scope; it is
+read-only and serves no network protocol of its own). Re-sync after
 lag/disconnect keeps all local caches (same instance id); a provenance
 mismatch wipes and re-attaches behind an atomic store swap.

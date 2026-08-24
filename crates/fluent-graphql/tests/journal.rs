@@ -21,12 +21,14 @@ fn opts() -> Options {
 }
 
 /// Rebuild the journal into a fresh directory and look `key` up there.
-/// `None` covers both "rebuild failed" (journal mid-write) and "key not
-/// journaled yet", so callers just poll until the value appears.
+/// `None` covers "rebuild failed" (journal mid-write), "key not journaled
+/// yet", and a transiently locked dest — a concurrently spawned test
+/// child can hold the fresh store's flock for the moment between fork and
+/// exec — so callers just poll until the value appears.
 fn rebuilt_value(jrn: &Path, key: &[u8]) -> Option<Vec<u8>> {
     let dest = tempfile::tempdir().unwrap();
     journal::rebuild(jrn, dest.path(), opts()).ok()?;
-    let db = Db::open(dest.path(), opts()).unwrap();
+    let db = Db::open(dest.path(), opts()).ok()?;
     db.get(key).unwrap()
 }
 

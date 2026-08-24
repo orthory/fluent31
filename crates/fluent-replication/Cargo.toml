@@ -14,7 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 fluent31 = { path = "../fluent31" }
-fluent-wire = { path = "../fluent-wire" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal"] }
 bytes = "1"
 

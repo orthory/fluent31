@@ -1,25 +1,22 @@
 //! Server mode for fluent31: every network plane over one store, in one
 //! process.
 //!
-//! The engine flocks its directory, so GraphQL, the wire pipe, and the
-//! replication master cannot run as separate processes against the same
-//! data. This crate is the one-process composition: a single [`Db`] handle
-//! shared by
+//! The engine flocks its directory, so GraphQL and the replication master
+//! cannot run as separate processes against the same data. This crate is
+//! the one-process composition: a single [`Db`] handle shared by
 //!
 //! - **GraphQL** (HTTP, default `:8317`) — the typed/admin plane: direct
 //!   operations, per-module typed WASM root fields, forks at
 //!   `/graphql/<instanceId>`;
-//! - **wire v1** (TCP, default `:8427`) — the data-plane pipe: raw bytes,
-//!   correlated frames, out-of-order completion (see `WIRE.md`);
-//! - **replication v1** (TCP, default `:8428`) — the join point where full
+//! - **replication** (TCP, default `:8428`) — the join point where full
 //!   replicas and key-range edge caches attach (see `REPLICATION.md`).
 //!   Replication's provenance model needs the deterministic store
 //!   identity, so this plane is served only when the store is named
 //!   (`Options::store_name`, persisted after first adoption).
 //!
 //! Each plane keeps its own blocking-pool gate (GraphQL 128 read + 32
-//! write, wire 128 + 32, replication 64); the combined worst case of 384
-//! parked engine calls stays under tokio's default 512 blocking threads.
+//! write, replication 64); the combined worst case of 224 parked engine
+//! calls stays under tokio's default 512 blocking threads.
 
 mod config;
 
@@ -30,13 +27,12 @@ use std::sync::Arc;
 use fluent31::{Db, Options};
 use fluent_graphql::{InstanceRegistry, RegistryConfig, SchemaManager};
 use fluent_replication::{ReplServer, ReplServerConfig};
-use fluent_wire::{ServerConfig as WireConfig, WireServer};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 pub use config::{
     parse_sync, CompressionKey, ConfigError, EngineSection, FileConfig, GraphqlSection,
-    IoBackendKey, JournalSection, ListenSection, ReplicationSection, WireSection,
+    IoBackendKey, JournalSection, ListenSection, ReplicationSection,
 };
 
 /// Listen addresses plus each composed plane's tunables. Every plane is
@@ -45,14 +41,11 @@ pub use config::{
 /// is anonymous.
 pub struct ServerConfig {
     pub graphql_addr: String,
-    pub wire_addr: String,
     pub replication_addr: String,
     /// GraphQL HTTP request body cap in bytes.
     pub max_body_bytes: usize,
     /// Fork-instance registry tuning (GraphQL plane).
     pub registry: RegistryConfig,
-    /// Wire plane limits.
-    pub wire: WireConfig,
     /// Replication plane limits.
     pub replication: ReplServerConfig,
 }
@@ -61,11 +54,9 @@ impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             graphql_addr: "127.0.0.1:8317".into(),
-            wire_addr: "127.0.0.1:8427".into(),
             replication_addr: "127.0.0.1:8428".into(),
             max_body_bytes: 32 << 20,
             registry: RegistryConfig::default(),
-            wire: WireConfig::default(),
             replication: ReplServerConfig::default(),
         }
     }
@@ -99,7 +90,6 @@ impl std::error::Error for StartError {}
 pub struct Server {
     db: Arc<Db>,
     pub graphql_addr: SocketAddr,
-    pub wire_addr: SocketAddr,
     /// `None` when the store is unnamed (replication plane not served).
     pub replication_addr: Option<SocketAddr>,
     graphql_task: JoinHandle<()>,
@@ -149,7 +139,6 @@ impl Server {
         };
 
         let graphql_listener = bind("graphql", &cfg.graphql_addr).await?;
-        let wire_listener = bind("wire", &cfg.wire_addr).await?;
         let repl_listener = match &repl {
             Some(_) => Some(bind("replication", &cfg.replication_addr).await?),
             None => None,
@@ -162,7 +151,6 @@ impl Server {
             })
         };
         let graphql_addr = local("graphql", &cfg.graphql_addr, &graphql_listener)?;
-        let wire_addr = local("wire", &cfg.wire_addr, &wire_listener)?;
         let replication_addr = match &repl_listener {
             Some(l) => Some(local("replication", &cfg.replication_addr, l)?),
             None => None,
@@ -196,13 +184,6 @@ impl Server {
             }
         }));
 
-        let wire = WireServer::new(db.clone(), cfg.wire);
-        accept_tasks.push(tokio::spawn(async move {
-            if let Err(e) = wire.serve(wire_listener).await {
-                eprintln!("fluent-server: wire plane failed: {e}");
-            }
-        }));
-
         if let (Some(repl), Some(listener)) = (repl, repl_listener) {
             accept_tasks.push(tokio::spawn(async move {
                 if let Err(e) = repl.serve(listener).await {
@@ -214,7 +195,6 @@ impl Server {
         Ok(Server {
             db,
             graphql_addr,
-            wire_addr,
             replication_addr,
             graphql_task,
             graphql_stop,
@@ -227,8 +207,8 @@ impl Server {
     }
 
     /// Stop accepting on every plane and drain in-flight GraphQL
-    /// requests. In-flight wire/replication connections are severed when
-    /// the process (or runtime) goes down — the WAL keeps the store
+    /// requests. In-flight replication connections are severed when the
+    /// process (or runtime) goes down — the WAL keeps the store
     /// consistent on reopen.
     pub async fn shutdown(self) {
         for t in &self.accept_tasks {

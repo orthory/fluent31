@@ -1,6 +1,6 @@
 //! End-to-end replication tests over real TCP: master server + edge
 //! replica in-process. Covers scoped equality, lazy value fetch, streamed
-//! syncs, wire-v1 serving off the edge, resync after a master restart
+//! syncs, scope enforcement on edge reads, resync after a master restart
 //! (same instance: caches retained), and full re-attach after the master
 //! is replaced by a restored fork (provenance mismatch).
 
@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use fluent31::{Db, Options, SyncMode};
 use fluent_replication::{EdgeReplica, EdgeReplicaConfig, ReplServer, ReplServerConfig};
-use fluent_wire::{ServerConfig, WireClient, WireServer};
 
 fn small_opts(name: &str) -> Options {
     Options {
@@ -112,7 +111,7 @@ fn edge_cfg(addr: &str, dir: &std::path::Path, lo: u32, hi: u32) -> EdgeReplicaC
 }
 
 /// The core loop over real TCP: attach, equality, laziness, streaming,
-/// and wire-v1 serving with writes refused.
+/// and scope enforcement on the edge's read surface.
 #[test]
 fn edge_replica_over_tcp() {
     let mdir = tempfile::tempdir().unwrap();
@@ -148,27 +147,10 @@ fn edge_replica_over_tcp() {
         assert_eq!(store.get(&k(i)).unwrap(), master.get(&k(i)).unwrap(), "post-stream {i}");
     }
 
-    // the edge serves standard wire v1: reads work, writes are refused
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let waddr = listener.local_addr().unwrap().to_string();
-        let wsrv = WireServer::with_backend(replica.clone(), ServerConfig::default());
-        tokio::spawn(wsrv.serve(listener));
-
-        let c = WireClient::connect(&waddr).await.unwrap();
-        assert_eq!(c.get(&k(139)).await.unwrap().unwrap(), v(139, "live"));
-        assert!(c.get(&k(150)).await.unwrap().is_none());
-        let (pairs, _after) = c
-            .scan(Some(&k(100)), Some(&k(110)), None, false, 100)
-            .await
-            .unwrap();
-        assert_eq!(pairs.len(), 10);
-        // out-of-scope get and any write answer INVALID
-        assert!(c.get(&k(250)).await.is_err());
-        assert!(c.put(&k(120), b"nope").await.is_err());
-    });
-    rt.shutdown_background();
+    // the edge's read surface: scoped scans work, out-of-scope reads refuse
+    let (pairs, _has_more) = store.scan(Some(&k(100)), Some(&k(110)), false, 100).unwrap();
+    assert_eq!(pairs.len(), 10);
+    assert!(store.get(&k(250)).is_err(), "out-of-scope get must refuse");
 }
 
 /// A master restart is a disconnect, not an identity change: the edge

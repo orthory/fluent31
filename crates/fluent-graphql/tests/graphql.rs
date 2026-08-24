@@ -1092,7 +1092,7 @@ async fn described_module_names_and_types_are_enforced() {
 
     // shadowing a built-in root field (either root: one shared namespace)
     let wat = wat_typed(r#"{"kind":"query","output":"Json"}"#, "1");
-    for shadowed in ["scan", "reloadSchema"] {
+    for shadowed in ["scan", "reloadSchema", "pin", "pins", "unpin", "seqno"] {
         let errs = run_err(
             &schema,
             &format!(
