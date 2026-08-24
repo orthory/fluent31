@@ -196,8 +196,8 @@ rotation-vs-GC data-loss window found in design review.
   retention of old versions is its side effect, and seqnos survive
   neither journal rebuild (replayed as fresh writes — seqnos renumber,
   pre-base history collapses) nor identity re-mint (§14). Applications that need per-entity history
-  materialize it as user keys via a changes-mode trigger (§9); README
-  "What MVCC is (and isn't) for" is the user-facing statement.
+  materialize it as user keys via a changes-mode trigger (§9); GUIDE.md
+  "The consistency contract" (§4.3) is the user-facing statement.
 
 ## 7. IO backends
 
