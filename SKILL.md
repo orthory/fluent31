@@ -20,7 +20,7 @@ replicas.
 | Write a WASM module: ABI, SDK, typed GraphQL, triggers, one-shot | [WASM.md](WASM.md) |
 | Why it behaves as it does; on-disk format; invariants | [DESIGN.md](DESIGN.md) |
 | The replica protocol | [REPLICATION.md](REPLICATION.md) |
-| Coding rules for changes to this repo | the repo's `CLAUDE.md`, when present |
+| Coding rules for changes to this repo | the repo's `AGENT.md`, when present |
 
 When the docs and the code disagree, the code wins. The public API is in
 `crates/fluent31/src/{db.rs,config.rs,txn.rs,journal.rs,fork.rs,trigger.rs}`,
@@ -83,7 +83,7 @@ cargo run -p fluent-cli -- journal-rebuild <journal-dir> <dest-dir>      # rebui
 
 ## Changing this repo
 
-Follow the repo's `CLAUDE.md`: docs ride the feature into the owning spec
+Follow the repo's `AGENT.md`: docs ride the feature into the owning spec
 (never a per-feature doc), ordered writes have one executor, control flow
 is explicit, predicates are named, and tests wait on events. Verify with
 `cargo test --workspace` plus a probe of the changed path.
