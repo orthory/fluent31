@@ -436,8 +436,9 @@ snapshots lock); everything else is refused with a pointer at pins.
 **Open = activate.** Every fork is a complete database; opening it
 read-write gives a live copy-on-write clone (its compactions unlink only
 its own hard links). `delete_fork` refuses if the fork is flock'd open as
-a database. `clone_to` re-links a fork to a fresh directory — work on the
-copy, keep the archived fork pristine.
+a database. `restore_to` re-links a fork to a fresh directory (a named
+lineage requires a fresh name per copy, so restored copies mint distinct
+identities) — work on the copy, keep the archived fork pristine.
 
 ## 11. Concurrency & locks
 
@@ -506,8 +507,8 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
   path degrade the store (`bg_error`) instead of leaving WAL/vlog state
   ambiguous; a committer panic fails the in-flight group (unwind guard)
   and parked writers poll `bg_error`, so client threads can never hang.
-- Known v1 limits (documented, deliberate): no block compression
-  (format-versioned for later); discard-stat lag under lazy leveling (no sampling fallback yet);
+- Known v1 limits (documented, deliberate): block compression is
+  LZ4-only and off by default; discard-stat lag under lazy leveling (no sampling fallback yet);
   GC relocations bump seqnos, so a hot large-value key can cost a user txn
   a retry; fixed `max_levels` (no dynamic depth); bottom merges rewrite the
   whole bottom level (fragments bound file sizes, not total merge work).

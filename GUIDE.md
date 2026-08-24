@@ -866,7 +866,7 @@ fluent_guest::fluent_describe!(r#"{
   names must not be reserved (`Query`,
   `Mutation`, `Subscription`, `Bytes`, `BytesInput`, `U64`, `Json`,
   `Pair`, `ScanPage`, `ChangeEvent`, `ChangeKind`, `Module`, `Fork`,
-  `Trigger`, `GcResult`, `LevelStats`, `Stats`, `WriteOp`, `PutOp`,
+  `Pin`, `Trigger`, `GcResult`, `LevelStats`, `Stats`, `WriteOp`, `PutOp`,
   `String`, `Int`, `Float`, `Boolean`, `ID`) and must not collide with a
   type another installed module declares, so prefix yours (`PlacedOrder`,
   not `Order`). A `feed` module also claims `<Module>Event`. The limits
@@ -1044,7 +1044,8 @@ where keys mode would coalesce it. The references are
   is.
 - Failure holds, never drops. A failing module (a guest error, a missing
   module, conflict exhaustion) leaves the batch queued. The runner backs
-  off per trigger, starting at 200 ms and doubling up to 6.4 s.
+  off per trigger, starting at 100 ms and doubling up to a 6.4 s
+  ceiling.
   `list_triggers` and `triggers { pending lastError }` show the depth and
   the reason. Fix the module by reinstalling it and the backlog drains.
 - Batch bounds. A drain hands the module at most `trigger_batch` events
@@ -1578,7 +1579,7 @@ the client per connection, with `0` reserved, so start at 1.
 | `0x02 PUT` | `[blob key][value]` | nothing |
 | `0x03 DEL` | key | nothing |
 | `0x04 BATCH` | `[u32 n]` then `[u8 0][blob k][blob v]` or `[u8 1][blob k]` | `[u32 applied]`; atomic |
-| `0x05 SCAN` | `[u8 flags][opt lo][opt hi][opt after][u32 limit]` | `[u32 n]` pairs, then `[u8 has_more][opt next_after]`; flags bit 0 is reverse; limit 1..=100000; stateless, `after` restarts past that key |
+| `0x05 SCAN` | `[u8 flags][opt lo][opt hi][opt after][u32 limit]` | `[u32 n]` pairs, then `[u8 has_more][opt next_after]`; flags bit 0 is reverse and other bits are rejected; limit 1..=100000; stateless, `after` restarts past that key |
 | `0x06 QUERY` | `[blob module][input]` | the guest output |
 | `0x07 EXEC` | `[blob module][input]` | the guest output |
 | `0x08 SYNC_WAL` | nothing | nothing |

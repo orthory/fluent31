@@ -126,6 +126,12 @@ async fn run(srv: &WireServer, opcode: u8, payload: &[u8]) -> Result<(u8, Vec<u8
         OP_SCAN => {
             let mut rd = Rd(payload);
             let flags = rd.u8()?;
+            // bit 0 = reverse; the rest of the flag byte is unassigned, and
+            // accepting it silently would give a future client old behavior
+            // instead of an error
+            if flags & !1 != 0 {
+                return Err(format!("unknown scan flags {flags:#04x}").into());
+            }
             let reverse = flags & 1 == 1;
             let lo = rd.opt_blob()?.map(<[u8]>::to_vec);
             let hi = rd.opt_blob()?.map(<[u8]>::to_vec);

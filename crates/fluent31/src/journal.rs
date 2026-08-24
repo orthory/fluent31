@@ -225,10 +225,10 @@ impl Journal {
     }
 
     /// Compact on the next drainer pass: write a fresh base snapshot (a new
-    /// checkpoint) into a new file and prune every file it supersedes.
-    /// Reclaims log disk on demand and captures any state the incremental
-    /// stream does not — call after installing modules / changing triggers if
-    /// you want those reflected at the next checkpoint's base.
+    /// checkpoint) into a new file and prune every file it supersedes — the
+    /// on-demand disk-reclaim hatch. The base scan covers the user keyspace
+    /// only, like everything the journal records; engine state (modules,
+    /// triggers) is never captured (see the module docs).
     pub fn request_checkpoint(&self) {
         self.shared.force_checkpoint.store(true, Ordering::Release);
     }

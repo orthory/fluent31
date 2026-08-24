@@ -172,6 +172,13 @@ async fn protocol_violations_are_rejected() {
     let err = c.call(0x7f, &[]).await.unwrap_err();
     assert_eq!(err.status, ST_BAD_FRAME);
 
+    // SCAN with an unassigned flag bit set: rejected, connection survives
+    // (payload: flags=0x02, no lo/hi/after, limit=10)
+    let scan = [0x02u8, 0, 0, 0, 10, 0, 0, 0];
+    let err = c.call(OP_SCAN, &scan).await.unwrap_err();
+    assert_eq!(err.status, ST_BAD_FRAME);
+    assert!(c.get(b"still-alive").await.unwrap().is_none());
+
     // raw socket: absurd frame_len
     let mut raw = tokio::net::TcpStream::connect(&addr).await.unwrap();
     let mut frame = Vec::new();

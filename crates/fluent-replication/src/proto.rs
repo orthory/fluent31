@@ -1,4 +1,4 @@
-//! fluent replication v1: payload codecs and opcode space.
+//! fluent replication (protocol version 2): payload codecs and opcode space.
 //!
 //! The frame layout is shared with wire v1 (`[u32 frame_len][u64
 //! request_id][u8 opcode|status][payload…]`, little-endian, blob =

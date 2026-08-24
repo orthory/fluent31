@@ -56,7 +56,8 @@ responses in any order and correlate by `request_id`.
 | 0x09 | STATS | (empty) | UTF-8 debug text (**format-unstable**, human eyes only) |
 
 `blob` = `[u32 len][bytes]`. `opt X` = `[u8 present]` then the field when
-present=1. SCAN `flags`: bit 0 = reverse; other bits MUST be 0. SCAN is
+present=1. SCAN `flags`: bit 0 = reverse; other bits MUST be 0 (the
+server answers BAD_FRAME). SCAN is
 **stateless**: `after` restarts strictly past that key in iteration order
 (the page executes at the then-current visible state; there is no
 server-side cursor). `limit` ∈ 1..=100000.

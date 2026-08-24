@@ -101,8 +101,8 @@ Conventions:
   `ELIMIT -6`, `EIO -8`. (`EIO` means the ENGINE failed — the invocation
   will fail host-side even if you swallow the errno and exit 0.)
 - Keys starting with byte `0x00` are the engine's reserved keyspace:
-  writes return `EINVAL`, reads return `NOT_FOUND`, scans are silently
-  clamped to the user keyspace. Empty keys are `EINVAL`.
+  reads and writes return `EINVAL`, scans are silently clamped to the
+  user keyspace. Empty keys are `EINVAL`.
 
 ### Imports
 
@@ -362,15 +362,15 @@ reference scalars only. `output` may reference a declared type.
   starting with `__` (only relevant for described modules; undescribed
   ones keep the engine's looser `[A-Za-z0-9._-]` rule);
 - module name must not shadow a built-in root field (`changes`, `get`,
-  `scan`, `wasm`, `wasmOnce`, `modules`, `stats`, `forks`, `triggers`,
-  `snapshotSeqno`, `put`, `delete`, `writeBatch`, `wasmExecute`,
-  `wasmExecuteOnce`, `installModule`, `uninstallModule`, `fork`,
-  `deleteFork`, `createTrigger`, `deleteTrigger`, `flush`, `compactAll`,
-  `gcVlog`, `reloadSchema`, `syncWal`);
+  `scan`, `wasm`, `wasmOnce`, `modules`, `stats`, `forks`, `pins`,
+  `triggers`, `snapshotSeqno`, `seqno`, `put`, `delete`, `writeBatch`,
+  `wasmExecute`, `wasmExecuteOnce`, `installModule`, `uninstallModule`,
+  `fork`, `deleteFork`, `pin`, `unpin`, `createTrigger`, `deleteTrigger`,
+  `flush`, `compactAll`, `gcVlog`, `reloadSchema`, `syncWal`);
 - declared type names must not be reserved (`Query`, `Mutation`,
   `Subscription`, `Bytes`, `BytesInput`, `U64`, `Json`, `Pair`,
-  `ScanPage`, `ChangeEvent`, `ChangeKind`, `Module`, `Fork`, `Trigger`,
-  `GcResult`, `LevelStats`, `Stats`,
+  `ScanPage`, `ChangeEvent`, `ChangeKind`, `Module`, `Fork`, `Pin`,
+  `Trigger`, `GcResult`, `LevelStats`, `Stats`,
   `WriteOp`, `PutOp`, `String`, `Int`, `Float`, `Boolean`, `ID`) and must
   not collide with a type another installed module already declares —
   prefix yours (`PlacedOrder`, not `Order`... think `MyModX`). A `feed`

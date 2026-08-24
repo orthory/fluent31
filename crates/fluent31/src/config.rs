@@ -121,7 +121,9 @@ pub struct Options {
     pub wasm_fuel: u64,
     /// Max linear memory a WASM invocation may grow to, in bytes.
     pub wasm_memory_limit: usize,
-    /// Automatic re-runs of an executor whose commit hit a conflict.
+    /// Attempts per executor call, the first run included (minimum 1); a
+    /// commit conflict re-runs the call until they are spent, then it
+    /// fails with `Error::Conflict`.
     pub execute_retries: usize,
     /// Cap on input passed to a WASM invocation (fits in i32 for the ABI).
     pub max_wasm_input: usize,
