@@ -1,8 +1,7 @@
 //! End-to-end server-mode tests over real TCP: one process, one store,
-//! all three planes. A write over the wire pipe is read back over
-//! GraphQL, an edge cache joins with a key-range scope, a full replica
-//! joins unbounded, and both see streamed writes. An unnamed store serves
-//! graphql + wire but keeps the replication join point closed.
+//! both planes. A GraphQL write streams to an edge cache joined with a
+//! key-range scope and to a full replica joined unbounded. An unnamed
+//! store serves graphql but keeps the replication join point closed.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,13 +10,11 @@ use std::time::{Duration, Instant};
 use fluent31::{journal, Db, Options, SyncMode};
 use fluent_replication::{EdgeReplica, EdgeReplicaConfig};
 use fluent_server::{Server, ServerConfig};
-use fluent_wire::WireClient;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn ephemeral_cfg() -> ServerConfig {
     ServerConfig {
         graphql_addr: "127.0.0.1:0".into(),
-        wire_addr: "127.0.0.1:0".into(),
         replication_addr: "127.0.0.1:0".into(),
         ..ServerConfig::default()
     }
@@ -73,12 +70,13 @@ async fn all_planes_over_one_store() {
         .replication_addr
         .expect("named store must open the join point");
 
-    // write over the wire pipe
-    let wc = WireClient::connect(&server.wire_addr.to_string()).await.unwrap();
-    wc.put(b"user/1", b"ada").await.unwrap();
-    assert_eq!(wc.get(b"user/1").await.unwrap().unwrap(), b"ada");
-
-    // read the same key back over GraphQL — both planes serve one store
+    // write and read back over GraphQL
+    let resp = graphql_post(
+        server.graphql_addr,
+        r#"{"query":"mutation { put(key: {text: \"user/1\"}, value: {text: \"ada\"}) }"}"#,
+    )
+    .await;
+    assert!(resp.contains(r#""put":true"#), "{resp}");
     let resp = graphql_post(
         server.graphql_addr,
         r#"{"query":"{ get(key: {text: \"user/1\"}) { text } }"}"#,
@@ -98,8 +96,13 @@ async fn all_planes_over_one_store() {
     let replica = attach(edge_cfg(repl_addr, &rdir.path().join("r"), b"", None)).await;
     assert_eq!(replica.store().get(b"user/1").unwrap().unwrap(), b"ada");
 
-    // a write over the pipe streams to both attached nodes
-    wc.put(b"user/2", b"grace").await.unwrap();
+    // a committed write streams to both attached nodes
+    let resp = graphql_post(
+        server.graphql_addr,
+        r#"{"query":"mutation { put(key: {text: \"user/2\"}, value: {text: \"grace\"}) }"}"#,
+    )
+    .await;
+    assert!(resp.contains(r#""put":true"#), "{resp}");
     wait_for("edge to stream user/2", || {
         edge.store().get(b"user/2").unwrap() == Some(b"grace".to_vec())
     })
@@ -125,9 +128,13 @@ async fn unnamed_store_keeps_join_point_closed() {
         .unwrap();
     assert!(server.replication_addr.is_none());
 
-    // graphql + wire still serve
-    let wc = WireClient::connect(&server.wire_addr.to_string()).await.unwrap();
-    wc.put(b"k", b"v").await.unwrap();
+    // graphql still serves
+    let resp = graphql_post(
+        server.graphql_addr,
+        r#"{"query":"mutation { put(key: {text: \"k\"}, value: {text: \"v\"}) }"}"#,
+    )
+    .await;
+    assert!(resp.contains(r#""put":true"#), "{resp}");
     let resp = graphql_post(
         server.graphql_addr,
         r#"{"query":"{ get(key: {text: \"k\"}) { text } }"}"#,
@@ -139,7 +146,7 @@ async fn unnamed_store_keeps_join_point_closed() {
 }
 
 /// A plane tunable set through ServerConfig must reach the running
-/// plane: with a tiny wire max-frame, an oversized request is refused.
+/// plane: with a tiny GraphQL body cap, an oversized request is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn plane_tunables_flow_through() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,14 +156,20 @@ async fn plane_tunables_flow_through() {
     };
     let db = Arc::new(Db::open(dir.path(), opts.clone()).unwrap());
     let mut cfg = ephemeral_cfg();
-    cfg.wire.max_frame = 64;
+    cfg.max_body_bytes = 64;
     let server = Server::start(db, dir.path(), opts, cfg).await.unwrap();
 
-    let wc = WireClient::connect(&server.wire_addr.to_string()).await.unwrap();
-    wc.put(b"k", b"v").await.unwrap();
+    let small = graphql_post(server.graphql_addr, r#"{"query":"{ seqno }"}"#).await;
+    assert!(small.starts_with("HTTP/1.1 200"), "{small}");
+    let big_padding = " ".repeat(128);
+    let big = graphql_post(
+        server.graphql_addr,
+        &format!(r#"{{"query":"{{ seqno }}{big_padding}"}}"#),
+    )
+    .await;
     assert!(
-        wc.put(b"big", &[0u8; 128]).await.is_err(),
-        "frame above the configured cap must be refused"
+        !big.starts_with("HTTP/1.1 200"),
+        "body above the configured cap must be refused: {big}"
     );
 
     server.shutdown().await;
@@ -178,7 +191,6 @@ sync = "never"
 
 [listen]
 graphql = "127.0.0.1:0"
-wire = "127.0.0.1:0"
 replication = "127.0.0.1:0"
 
 [graphql]
@@ -246,8 +258,10 @@ memtable-size = 4194304
 }
 
 /// Rebuild the journal into a fresh directory and look `key` up there.
-/// `None` covers both "rebuild failed" (journal mid-write) and "key not
-/// journaled yet", so callers just poll until the value appears.
+/// `None` covers "rebuild failed" (journal mid-write), "key not journaled
+/// yet", and a transiently locked dest — a concurrently spawned test
+/// child can hold the fresh store's flock for the moment between fork and
+/// exec — so callers just poll until the value appears.
 fn rebuilt_value(jrn: &std::path::Path, key: &[u8]) -> Option<Vec<u8>> {
     let dest = tempfile::tempdir().unwrap();
     let opts = Options {
@@ -255,7 +269,7 @@ fn rebuilt_value(jrn: &std::path::Path, key: &[u8]) -> Option<Vec<u8>> {
         ..Options::default()
     };
     journal::rebuild(jrn, dest.path(), opts.clone()).ok()?;
-    let db = Db::open(dest.path(), opts).unwrap();
+    let db = Db::open(dest.path(), opts).ok()?;
     db.get(key).unwrap()
 }
 
@@ -291,7 +305,6 @@ sync = "never"
 
 [listen]
 graphql = "127.0.0.1:0"
-wire = "127.0.0.1:0"
 replication = "127.0.0.1:0"
 
 [journal]
@@ -415,10 +428,13 @@ async fn wasm_disabled_server_serves_inert_layer() {
         .await
         .unwrap();
 
-    // KV planes unaffected
-    let wc = WireClient::connect(&server.wire_addr.to_string()).await.unwrap();
-    wc.put(b"k", b"v").await.unwrap();
-    assert_eq!(wc.get(b"k").await.unwrap().unwrap(), b"v");
+    // the KV surface is unaffected
+    let resp = graphql_post(
+        server.graphql_addr,
+        r#"{"query":"mutation { put(key: {text: \"k\"}, value: {text: \"v\"}) }"}"#,
+    )
+    .await;
+    assert!(resp.contains(r#""put":true"#), "{resp}");
 
     // the installed module stays visible (inert)...
     let resp = graphql_post(server.graphql_addr, r#"{"query":"{ modules { name } }"}"#).await;

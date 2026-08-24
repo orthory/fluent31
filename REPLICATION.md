@@ -1,16 +1,16 @@
-# fluent replication v1 — edge replica protocol specification
+# fluent replication v2 — edge replica protocol specification
 
 The replication channel for fluent31: a small **ephemeral edge replica**
 holds the slice of one master's tree that overlaps its key scope
 `[lo, hi)`, serves reads locally, and reaches back for what it doesn't
-have. Server: `fluent-replication master` (default `127.0.0.1:8428`).
-Edge: `fluent-replication edge` (drives a replica and serves standard
-wire-v1 reads over it). Library types: `fluent_replication::{ReplServer,
-ReplClient, EdgeReplica}`, engine-side `fluent31::edge::EdgeStore`.
+have. Server: the `fluent-replication` binary (default
+`127.0.0.1:8428`). Edge replicas are embedded: the process that needs
+the scoped reads drives one with `fluent_replication::EdgeReplica` and
+reads through `EdgeReplica::store()`. Library types:
+`fluent_replication::{ReplServer, ReplClient, EdgeReplica}`, engine-side
+`fluent31::edge::EdgeStore`.
 
-This is a **separate channel** from `fluent-wire` — its own port and
-opcode space — but the frame layout is identical, so the framing code is
-shared. All integers little-endian; `blob` = `[u32 len][bytes]`;
+All integers little-endian; `blob` = `[u32 len][bytes]`;
 `opt X` = `[u8 present]` then the field when present=1.
 
 ## 1. Model
@@ -51,12 +51,15 @@ and the client compares instance ids by equality:
 - different id (master restored, forked, replaced) ⇒
   `ProvenanceMismatch`: the replica wipes and re-attaches from scratch.
 
-A master with no identity (`Options::store_name` unset) refuses to serve
-replication (`NO_IDENTITY`).
+A master with no identity (`Options::store_name` unset) cannot serve
+replication at all: `ReplServer::new` refuses to construct, so the join
+point never opens. The `NO_IDENTITY` status is reserved for an
+implementation that accepts connections before checking identity; this
+server never sends it.
 
 ## 3. Frame
 
-Identical to wire v1:
+Both directions:
 
 ```
 [u32 frame_len]   length of everything AFTER this field (id + op + payload)
@@ -73,7 +76,7 @@ connections for parallel fetches).
 
 | op | name | request payload | OK response payload |
 |---|---|---|---|
-| 0x00 | HELLO | (empty) | `[u32 version][blob store_name][16B instance_id][u64 visible_seqno]` |
+| 0x00 | HELLO | (empty) | `[u32 version]` (currently 2) `[blob store_name][16B instance_id][u64 visible_seqno]` |
 | 0x01 | SNAPSHOT | `[opt lo][opt hi]` | slice manifest (§5) — flushes first |
 | 0x02 | FETCH_TABLE | `[u64 table_id][u64 off][u32 len]` | raw fragment bytes (clamped at file end) |
 | 0x03 | FETCH_VALUE | `[u64 vlog_id][u64 off][u32 len]` | raw record bytes `[crc][klen][vlen][key][value]` |
@@ -125,7 +128,7 @@ caches stay valid (same instance id).
 | 0x00 | OK |
 | 0x01 | ERR — engine/server failure; payload: UTF-8 message |
 | 0x02 | GONE — the file left the live version (compaction/GC); re-pull the slice |
-| 0x03 | NO_IDENTITY — master store is unnamed; replication refused |
+| 0x03 | NO_IDENTITY — reserved. This server never sends it: an unnamed store refuses to open a join point at all |
 | 0x04 | BAD_FRAME — unknown opcode / malformed payload |
 
 ## 8. Edge behavior (reference driver)
@@ -137,12 +140,12 @@ slice (retrying `GONE` races), and then follows the stream. Slice
 refreshes (periodic, and after every re-sync) prune the overlay.
 Reads: overlay → fragments; values: inline → local value cache →
 `FETCH_VALUE`. The local value cache is an append-only file of verbatim
-records, reset wholesale when it exceeds its cap. The replica implements
-`fluent_wire::WireBackend`, so the standard wire server fronts it:
-GET/SCAN/STATS work (scans clamp to the scope, out-of-scope GETs answer
-INVALID), writes and WASM ops answer INVALID.
+records, reset wholesale when it exceeds its cap. The replica is read
+through `EdgeReplica::store()`: `get` and `scan`, clamped to the scope;
+an out-of-scope `get` answers `InvalidArgument`. It serves no network
+protocol of its own — the embedding process owns any onward surface.
 
-## 9. Known v1 limits (deliberate)
+## 9. Known limits (deliberate)
 
 - One contiguous scope per replica; attach again for more ranges.
 - The edge is read-only and never proxies out-of-scope requests.

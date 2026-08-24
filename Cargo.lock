@@ -777,7 +777,6 @@ name = "fluent-replication"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "fluent-wire",
  "fluent31",
  "tempfile",
  "tokio",
@@ -790,22 +789,11 @@ dependencies = [
  "axum",
  "fluent-graphql",
  "fluent-replication",
- "fluent-wire",
  "fluent31",
  "serde",
  "tempfile",
  "tokio",
  "toml",
-]
-
-[[package]]
-name = "fluent-wire"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "fluent31",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

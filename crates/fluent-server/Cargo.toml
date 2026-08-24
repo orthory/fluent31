@@ -2,7 +2,7 @@
 name = "fluent-server"
 version.workspace = true
 edition.workspace = true
-description = "Server mode for fluent31: GraphQL, the wire pipe, and the replication join point over one shared database handle in one process"
+description = "Server mode for fluent31: GraphQL and the replication join point over one shared database handle in one process"
 
 [lib]
 name = "fluent_server"
@@ -15,7 +15,6 @@ path = "src/main.rs"
 [dependencies]
 fluent31 = { path = "../fluent31" }
 fluent-graphql = { path = "../fluent-graphql" }
-fluent-wire = { path = "../fluent-wire" }
 fluent-replication = { path = "../fluent-replication" }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }

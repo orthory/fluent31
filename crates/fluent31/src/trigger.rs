@@ -391,7 +391,7 @@ impl TriggerState {
         s.failures = s.failures.saturating_add(1);
         // 100ms doubling to a 6.4s ceiling: transient conflicts retry fast,
         // a persistently failing module cannot busy-spin the runner
-        let backoff = Duration::from_millis(100 << s.failures.min(6));
+        let backoff = Duration::from_millis(100 << (s.failures - 1).min(6));
         s.not_before = Instant::now() + backoff;
         s.last_error = msg;
     }

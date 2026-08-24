@@ -1,55 +1,29 @@
 # fluent31
 
-An embedded key-value database engine in Rust:
+An embedded key-value database engine in Rust that runs WebAssembly
+instead of SQL.
 
-- **LSM storage, tuned for writes *and* lookups** — lazy leveling (tiered
-  merges everywhere, leveled bottom), bloom-guarded fragmented runs,
-  WiscKey-style **key-value separation** so the index stays small and
-  memory-friendly while big values live in an append-only value log.
-- **MVCC everywhere** — consistent snapshots, optimistic transactions with
-  first-committer-wins conflicts and `get_for_update` write-skew defense.
-  MVCC is the engine's consistency machinery, not an application-facing
-  version store — the contract is spelled out in
-  [What MVCC is (and isn't) for](#what-mvcc-is-and-isnt-for).
-- **io_uring** on Linux (batched reads for scans/value resolution), portable
-  positioned IO elsewhere. Develops and tests fine on macOS.
-- **No SQL — WASM.** Install WebAssembly modules *into* the database and run
-  them as read-only **queries** or transactional **executors** against a
-  kernel-style syscall ABI (`get`/`put`/`delete`, batched scans, input/output
-  streams, fuel + memory limits).
-- **Write-range triggers** — bind a module to a key range and the engine
-  invokes it asynchronously whenever a committed write touches the range:
-  schema-free custom indexes, materialized views, and changefeeds with no
-  writer cooperation. Two modes, picked by the module's exports: **keys**
-  (coalesced touched keys — reconcile against current state) and
-  **changes** (`on_apply` receives the ordered list of committed changes,
-  values included). Events are durable (they commit atomically with the
-  triggering write) and consumed exactly-once.
-- **Database forks** — not PITR (no log archiving, no
-  restore-to-arbitrary-time; a fork is a named cut, from recent or from a
-  specific point): `fork("name")` pins an MVCC snapshot at the current
-  head and hard-links the immutable files into `archive/name/`, so
-  creation cost is independent of database size and live readers/writers
-  stay undisturbed. `pin("name")` durably marks the current seqno as
-  fork-able later; `fork_at("name", seqno)` then cuts at exactly that
-  point (only the small table side is rewritten to the cut, the value log
-  stays hard-linked). Each fork is itself a complete database directory —
-  open it read-write and it's a live, copy-on-write clone of the parent.
-  Mechanics and cost model: [Database forks](#database-forks).
-- **Opt-in rebuild journal** — an off-by-default catastrophe-recovery net
-  (`journal::Journal::attach`): a separate, async append-only record of every
-  user-key mutation, independent of the store's own files, from which a fresh
-  database is rebuilt from zero (`journal::rebuild`) for the day a disk block
-  goes bad or the directory is lost. It never sits on the commit path — the DB
-  stays the fast source of truth and the journal trails it.
-- **Server mode** — `fluent-server` serves one store over every network
-  plane in one process: GraphQL (typed/admin plane, where installed WASM
-  modules surface as their own query/mutation fields — plus **live
-  subscriptions**: raw key-range change streams and typed module feeds
-  over graphql-ws), the binary wire pipe (data plane), and a replication
-  join point where full replicas and key-range edge caches attach.
-
-See [DESIGN.md](DESIGN.md) for the full architecture.
+- Engine: LSM storage with WiscKey-style key-value separation (a small
+  index, big values in an append-only log), MVCC snapshots, optimistic
+  transactions, io_uring on Linux.
+- Modules: install WASM into the database and run it as read-only
+  queries or transactional executors against a kernel-style syscall ABI
+  (`get`, `put`, `delete`, batched scans, fuel and memory limits). A
+  module that describes itself becomes its own typed GraphQL field.
+- Triggers: bind a module to a key range and the engine invokes it after
+  every committed write into the range. Schema-free indexes,
+  materialized views, `GROUP BY` tables, cascades, changefeeds. Events
+  are durable with the write and effects are exactly-once.
+- Forks: `fork("name")` publishes a complete, consistent, hard-linked
+  copy of the database at a cost proportional to the file count, not the
+  data. Open it for a writable copy-on-write clone. Pins make a point
+  fork-able later.
+- Journal: opt-in and off the commit path. An independent mutation log
+  from which a fresh database is rebuilt when the store directory is
+  lost.
+- Server: one process, one store, two planes. GraphQL for typed and
+  admin operations with live subscriptions, and a replication join point
+  for full replicas and key-range edge caches.
 
 ## Quick start
 
@@ -60,559 +34,67 @@ let db = Db::open("./data", Options::default())?;
 db.put("user/1", "ada")?;
 assert_eq!(db.get(b"user/1")?.as_deref(), Some(&b"ada"[..]));
 
-// snapshots — one frozen, consistent view for the reads of one operation,
-// however many writes land meanwhile
-let snap = db.snapshot();
-db.put("user/1", "grace")?;
-assert_eq!(db.get_at(b"user/1", &snap)?.as_deref(), Some(&b"ada"[..]));
-drop(snap); // take, read, drop — a held snapshot pins GC for the whole store
-
-// transactions (optimistic, snapshot isolation)
-let mut txn = db.begin();
-let bal = txn.get_for_update(b"acct")?;
-txn.put("acct", "90")?;
-txn.commit()?; // Err(Error::Conflict) if someone else wrote acct
-
-// ordered scans, both directions
 for kv in db.iter(Some(b"user/"), Some(b"user0"), false)? {
     let (k, v) = kv?;
 }
 
-// fork — an MVCC cut, hard-linked; open it for a writable CoW clone
-let fork = db.fork("before-migration")?;
-let clone = Db::open(&fork.path, Options::default())?;
-
-// or address the cut explicitly: pin now, fork that exact point later
-let pin = db.pin("pre-import")?; // durable; holds GC store-wide until unpin
-// ... more writes ...
-let fork = db.fork_at("rollback-point", pin.seqno)?;
-
-// db.seqno() addresses "now" without the durable hold: capture once,
-// cut any number of deterministic forks of that same version
-let s = db.seqno();
-let a = db.fork_at("replica-a", s)?;
-let b = db.fork_at("replica-b", s)?; // same cut as replica-a
+let mut txn = db.begin();
+let bal = txn.get_for_update(b"acct")?;
+txn.put("acct", "90")?;
+txn.commit()?;                       // Err(Error::Conflict) if someone else wrote acct
 ```
 
-## What MVCC is (and isn't) for
-
-MVCC is how the engine gives you consistency — it is **not** an
-application version store, and applications must not lean on it as one.
-The contract, explicitly:
-
-- **Snapshots are operation-scoped.** A `Snapshot` freezes one consistent
-  view for the reads of one operation: take it, read, drop it. It is a
-  read timestamp, not a saved version — and its cost is global, because
-  the GC watermark is the *oldest registered snapshot*: one long-held
-  snapshot stalls compaction GC and value-log reclamation for the whole
-  store, not just for the keys it reads.
-- **Seqnos are transient addresses, not version ids.** `db.seqno()`
-  addresses a state only while GC hasn't passed it — `snapshot_at` and
-  `fork_at` refuse a below-watermark seqno *by design*. A seqno stored in
-  application data eventually stops resolving, and it doesn't travel: a
-  journal rebuild replays into a fresh store and renumbers seqnos
-  wholesale, and forks/restores re-mint the store identity
-  (DESIGN.md §14).
-- **Pins and forks are coarse, named cuts.** They exist for a handful of
-  deliberate points — before a migration, a staging clone, a rollback
-  anchor. A pin is a durable **store-wide** GC hold until `unpin`; a fork
-  is a complete database directory ([Database forks](#database-forks)).
-  Neither is priced for one-per-document, let alone one-per-write.
-- **Retention is a side effect, not a policy.** Old versions survive
-  exactly until the watermark passes them. There is no "keep the last N
-  versions of this key" and no per-key granularity — holding any version
-  holds every version of every key.
-
-**If your application needs history, materialize it as data you own.**
-The changes-mode trigger is the sanctioned primitive: bind an `on_apply`
-module to the range and every committed change (op kind, key, value,
-commit seqno) is delivered durably, in commit order, exactly once — fold
-it into ordinary keys under your own layout:
-
-```
-doc/42                     current value       (what the app writes)
-history/doc/42/<seqno>     one entry per write (what the trigger writes)
+```sh
+cargo run -p fluent-cli -- ./data                        # interactive shell
+cargo run -p fluent-server -- ./data --store-name prod   # GraphQL :8317, replication :8428
+cargo run -p fluent31 --example live_stats               # a trigger-maintained GROUP BY, checked against a recount
 ```
 
-History is then just data: scannable, replicable, retained on *your*
-policy (prune old entries like any other keys, with the GC watermark out
-of the picture) — and live-tailable, since a `feed` descriptor turns the
-same range into a typed GraphQL subscription
-([Live subscriptions](#live-subscriptions)). `guests/order_feed` is the
-reference implementation of exactly this shape (a durable, ordered
-changefeed with values); [WASM.md](WASM.md) §8 is the authoring contract.
-
-## Database forks
-
-A fork is a named, consistent branch of the whole database, published as
-a complete database directory under `archive/<name>/`. The word "fork"
-suggests a copy; it isn't one. Because tables and sealed value-log files
-are **immutable** in this engine, a fork can share them with its parent
-byte-for-byte as **hard links** — creation cost is proportional to the
-number of files (metadata operations), not to the bytes stored.
-
-**How a head fork is cut.** `db.fork("name")` flushes the memtable, pins
-an MVCC cut during a brief manifest-lock hold (no stop-the-world — this
-freezes structural installs, not traffic), then builds the archive in
-`archive/.tmp-<name>/`: hard links for every table and sealed value-log
-file, a bounded copy of the one still-growing value-log head up to its
-synced prefix (the only real byte copy in the operation, capped by the
-`vlog_file_size` rotation bound), and a fresh manifest + `fork.meta`.
-Everything is fsynced, then a single rename publishes the directory — a
-fork exists completely or not at all; a crashed build's `.tmp` dir is
-swept at the next open.
-
-**What it costs the live store.** Readers and writers keep running
-throughout; the cut registers as a snapshot for the duration of the
-build, so the one global effect is value-log GC deletions deferred until
-creation finishes. On disk, shared bytes exist **once** — a fresh fork
-adds almost nothing (`du` on the archive re-counts shared inodes;
-apparent size ≠ added size), and real divergence accrues only as parent
-and child compact/GC away from the shared base, each unlinking only its
-own references. `fork_under_concurrent_load`
-(`crates/fluent31/tests/fork_stress.rs`) is the proof in the suite:
-forks cut while writers, flush, compaction, and value-log GC all run,
-each then opened and verified complete.
-
-**Point cuts.** `db.fork_at("name", seqno)` cuts at an explicit earlier
-point. The shared table files also hold versions *above* that cut, so
-they can't be linked verbatim — the tables are rewritten to the cut (one
-merge keeping, per key, the newest version at-or-below it). Key-value
-separation is what keeps this cheap: only the small index side is
-rewritten; the value log — where the big bytes live — stays hard-linked.
-A point must still be materializable, i.e. at-or-above the GC watermark:
-either recent enough (`db.seqno()` captured moments ago) or held by
-`db.pin("name")`, a durable **store-wide** GC hold that keeps the point
-fork-able until `unpin`.
-
-**Open = activate.** A fork directory is a complete database:
-`Db::open` on its path gives a live, writable, copy-on-write clone —
-new writes land in its own files, and its compactions unlink only its
-own hard links. `restore_to` re-links an archive into a fresh directory
-first when the archived cut should stay pristine; `delete_fork` refuses
-while a fork is open as a database. Under `fluent-server`, every fork is
-addressable as its own instance at `/graphql/<instanceId>`
-([The GraphQL plane](#the-graphql-plane)).
-
-**Expectations.** Forks are coarse, deliberate cuts — a pre-migration
-anchor, a staging clone, a rollback point — priced for a handful of
-named branches, not for one-per-document versioning (that contract is
-[What MVCC is (and isn't) for](#what-mvcc-is-and-isnt-for)). Pins hold
-GC for the **whole store** until released. And a fork branches, it does
-not follow: it contains exactly the history up to its cut, and nothing
-the parent commits afterwards. Full mechanics: [DESIGN.md](DESIGN.md)
-§10.
-
-## WASM instead of SQL
-
-Write a guest with the SDK, build it for `wasm32-unknown-unknown`, install
-it, run it:
+A module, end to end:
 
 ```rust
-// guests/agg/src/lib.rs — "SELECT count,sum,min,max WHERE prefix"
-use fluent_guest::Fail;
-
-#[fluent_guest::query]                      // exports the `query` entry point
-fn agg(prefix: Vec<u8>) -> Result<Vec<u8>, Fail> {
-    let scan = fluent_guest::scan_prefix(&prefix).map_err(|_| Fail::new(3, "scan failed"))?;
-    let (mut count, mut sum) = (0u64, 0u64);
-    for (_k, v) in scan {
-        count += 1;
-        sum += u64::from_le_bytes(v[..8].try_into().unwrap());
-    }
-    Ok([count.to_le_bytes(), sum.to_le_bytes()].concat())
+#[fluent_guest::query]                                   // read-only at one snapshot
+fn count(prefix: Vec<u8>) -> Result<String, fluent_guest::Fail> {
+    Ok(fluent_guest::scan_prefix(&prefix).map_err(|_| "scan")?.count().to_string())
 }
 ```
-
-The exported entry point IS the module's role: `#[fluent_guest::query]`
-(read-only), `#[fluent_guest::execute]` (transactional), and the trigger
-hooks `#[on_touch]`/`#[on_apply]` — each invocation path requires its
-matching entry. `Ok` output becomes the invocation's result;
-`Err(Fail { code, message })` becomes a non-zero exit with the message in
-the output buffer. (The raw `fluent_query!`/`fluent_execute!`/...
-`fn() -> i32` layer still exists for exit-code-speaking modules.)
 
 ```rust
-db.install_module("agg", &std::fs::read("agg.wasm")?)?;
-let out = db.query("agg", b"metric/")?;          // read-only, snapshot-bound
-let out = db.execute("transfer", &input)?;        // transactional, auto-retried
+db.install_module("count", &std::fs::read("count.wasm")?)?;
+db.query("count", b"user/")?;                            // b"1"
 ```
 
-The same modules surface over the server: a module that describes its
-interface becomes its own typed GraphQL query, mutation, or subscription
-feed the moment it's installed (see [Server mode](#server-mode)).
+## Documentation
 
-Executors run inside a transaction: guest exit `0` commits, anything else
-aborts; commit conflicts re-run the module against a fresh snapshot
-automatically. Guests are sandboxed hard: fuel-metered, memory-capped,
-output/log/scan/write-set-capped, no WASI, reserved keyspace invisible.
-
-An executor can also be bound to a key range as a **trigger** — the engine
-then invokes it after every committed write into the range, with the
-touched keys as input:
-
-```rust
-db.create_trigger("customerIndex", "customer_index",
-                  Some(b"orders/"), Some(b"orders0"))?;
-db.put("orders/00000042", r#"{"customer":"acme","amountCents":500}"#)?;
-// moments later, with no writer cooperation:
-//   idx/customer/acme/00000042  (maintained by guests/customer_index)
-```
-
-A keys-mode trigger event means "this key was touched — reconcile it": the
-module reads current state and converges, so replays and coalesced
-re-touches are harmless. A module exporting `on_apply` gets **changes
-mode** instead: the ordered list of committed changes (op kind, key,
-value, commit seqno), one event per op — the post-apply filter that feeds
-changefeeds and event-driven index generation (see `guests/order_feed`).
-See [WASM.md](WASM.md) §8 for both authoring contracts.
-
-Build the bundled guests:
-
-```sh
-cargo build --manifest-path guests/Cargo.toml --target wasm32-unknown-unknown --release
-```
-
-Or watch the whole story run — self-asserting end-to-end walkthroughs that
-build the guests, open a store, and drive them (each is also the reference
-implementation of a classic SQL feature, rebuilt schema-free):
-
-```sh
-cargo run -p fluent31 --example dynamic_index   # CREATE INDEX at runtime: spec keys
-                                                # backfill, maintain, and tear down indexes
-cargo run -p fluent31 --example live_stats      # GROUP BY that's always fresh: exactly-once
-                                                # folding, proven drift-free under a storm
-cargo run -p fluent31 --example cascade_delete  # ON DELETE CASCADE: parent delete sweeps
-                                                # its subtree; no-stacking stops loops
-cargo run -p fluent31 --example claim           # UNIQUE constraint: 8 concurrent claimers,
-                                                # exactly one winner via OCC
-```
-
-## The shell
-
-```
-$ cargo run -p fluent-cli -- ./data
-fluent31 shell — ./data — opened in (54.78 ms) — `help` for commands
-io backend: std
-fluent31> put hello world
-OK  (3.02 ms)
-fluent31> get hello
-"world"  (28.7 µs)
-fluent31> scan - - --limit 10
-   1) "hello" => "world"  (237.6 µs)
-fluent31> fork snap1
-fork snap1 @ seq 2 -> ./data/archive/snap1  (61.20 ms)
-fluent31> stats
-backend        std
-visible seqno  2
-...
-```
-
-Every command prints its wall-clock latency. `begin/tput/commit` drive
-transactions, `install/query/exec` drive WASM, `mktrig/deltrig/triggers`
-manage write-range triggers, `gc` runs value-log GC.
-
-## Server mode
-
-The engine embeds, but it also serves. `fluent-server` is the formal
-server mode: one process, one `Db`, all three network planes —
-
-```sh
-cargo run -p fluent-server -- ./data --store-name prod
-# graphql      http://127.0.0.1:8317/graphql   typed/admin plane, GraphiQL at /
-# wire         tcp 127.0.0.1:8427              binary data-plane pipe (WIRE.md)
-# replication  tcp 127.0.0.1:8428              join point (REPLICATION.md)
-```
-
-The store directory is flocked — the planes cannot be split across
-processes, so server mode is how they share one database handle. From the
-replication join point, two kinds of node attach (via `fluent-replication
-edge`): a **full replica** (unbounded scope) or an **edge cache** holding
-only a key-range slice. Replication anchors provenance on the
-deterministic store identity, so the join point opens only on a named
-store: pass `--store-name` once — the name persists — and it opens on
-every later start; without a name, graphql + wire still serve and the
-join point stays closed. `--graphql/--wire/--replication` rebind the
-ports, `--sync` picks the durability mode.
-
-Settings can live in a TOML file instead — `fluent-server --config
-server.toml`. Top-level keys and `[listen]` mirror the flags (an explicit
-flag overrides the file); the tuning sections are file-only and cover
-everything the composed layers expose: `[engine]` is the full
-`fluent31::Options` tunable surface. Unknown keys are an error:
-
-```toml
-dir = "./data"
-store-name = "prod"
-sync = "periodic:50"          # always | never | periodic:<ms>
-
-[listen]
-graphql = "127.0.0.1:8317"
-wire = "127.0.0.1:8427"
-replication = "127.0.0.1:8428"
-
-[graphql]
-max-body-bytes = 33554432
-fork-max-open = 8             # open fork instances beyond the primary
-fork-idle-ttl-secs = 300
-
-[wire]
-max-frame-bytes = 269484032
-
-[replication]
-max-frame-bytes = 1048576
-ping-every-ms = 2000
-
-[engine]                      # every fluent31::Options tunable, kebab-case
-wasm-enabled = true           # false = WASM layer inert: module/trigger APIs
-                              # refuse, writes never fire triggers
-io-backend = "auto"           # auto | uring | std
-compression = "none"          # none | lz4
-memtable-size = 8388608
-block-cache-size = 67108864
-value-threshold = 4096
-wasm-fuel = 1000000000
-# ... full annotated list: crates/fluent-server/src/config.rs
-```
-
-When you want exactly one surface, each plane also runs standalone
-(`fluent-graphql`, `fluent-wire`, `fluent-replication master`) with the
-same defaults — those binaries are documented in the sections below.
-
-## The GraphQL plane
-
-```sh
-cargo run -p fluent-server -- ./data             # or standalone, one plane only:
-cargo run -p fluent-graphql -- ./data            # http://127.0.0.1:8317/graphql, GraphiQL at /
-cargo run -p fluent-graphql -- ./data --sync periodic:50   # memory-speed acks, <=50ms loss window
-cargo run -p fluent-graphql -- --print-schema    # dump the SDL
-```
-
-One schema covers the direct operations **and every installed WASM
-module**: a module that declares its interface becomes its own typed root
-field on `Query` or `Mutation` the moment it's installed — and, with a
-`feed` declaration, its own typed `Subscription` field (next sections) —
-the schema is dynamic, not fixed. Every field of a single GraphQL query
-operation executes at one pinned MVCC snapshot, so multi-field reads are
-mutually consistent.
-
-The server routes by instance: the primary database answers at
-`/graphql`, and every fork answers at `/graphql/<instanceId>` with the
-same full surface (its own schema, modules, even its own forks). The
-`fork` mutation returns the new branch's `instanceId`; instances open
-lazily on first request and idle ones close automatically. The id is an
-address, not a credential — put real access control in front if you need
-isolation.
-
-```graphql
-query {
-  snapshotSeqno
-  seqno            # current visible seqno — the `at:` address of "now"
-  get(key: {text: "user/1"}) { text }
-  scan(prefix: {text: "user/"}, limit: 100) {
-    pairs { key { text } value { base64 } }
-    hasMore
-    nextAfter { base64 }        # pass back as `after` to paginate
-  }
-  topCustomers(limit: 3) { customer totalCents }   # an installed module's own typed field
-  wasm(module: "agg", input: {text: "user/"}) { hex }   # generic fallback: raw bytes in/out
-}
-
-mutation {
-  put(key: {text: "user/3"}, value: {text: "carol"})
-  writeBatch(ops: [{put: {key: {text: "a"}, value: {text: "1"}}},
-                   {delete: {text: "b"}}])                # atomic
-  placeOrder(customer: "acme", amountCents: "4200") { id }  # typed executor module
-  wasmExecute(module: "transfer", input: {base64: "..."}) { base64 }  # generic fallback
-  wasmExecuteOnce(wasm: {base64: "..."}) { base64 }  # one-shot: run without installing (migrations)
-  installModule(name: "agg", wasm: {base64: "..."}) { name size }
-  createTrigger(name: "idx", module: "customer_index",
-                lo: {text: "orders/"}, hi: {text: "orders0"})
-  fork(name: "snap1") { instanceId }   # branch this instance at its head
-  pin(name: "p1") { seqno }            # durably mark this point fork-able
-  fork(name: "rollback", at: "42") { instanceId }  # branch at a pinned seqno
-}
-
-subscription {
-  changes(lo: {text: "user/"}, hi: {text: "user0"}) {  # live post-commit tail of a range
-    kind seqno commitSeqno key { text } value { base64 }
-    query { snapshotSeqno }   # full Query root, pinned at this item's commit
-  }
-}
-```
-
-Keys and values are raw bytes: inputs take exactly one of `text` / `base64` /
-`hex`, outputs expose all three plus `len`. 64-bit engine quantities (seqnos,
-timestamps, byte totals) use the string-encoded `U64` scalar — they don't fit
-GraphQL's 32-bit `Int` or JS double precision. Engine failures map to
-`extensions.code` (`CONFLICT`, `INVALID_ARGUMENT`, `GUEST_FAILED` with the
-guest's exit code and output, ...).
-
-### Live subscriptions
-
-The engine's post-commit change stream serves as `Subscription` fields
-over graphql-ws, on the same endpoints (`/graphql`,
-`/graphql/<instanceId>`). Two planes: **raw** — `changes(lo, hi)`
-streams every committed op in a key range, no module required (example
-above) — and **typed** — a module with a `feed` descriptor over its
-`on_apply` output becomes its own subscription field:
-
-```graphql
-subscription {
-  orderFeed {
-    commitSeqno
-    event { seqno op id record }   # typed per the module's descriptor
-  }
-}
-```
-
-Delivery is post-commit and gap-free: the stream opens with an
-`ATTACHED` boundary marker, and every item carries a `query` field — the
-full Query root pinned at that item's commit seqno, so a consumer can
-re-read exact commit-boundary state, never a torn view. The eventing
-idiom: an `on_apply` module materializes its feed durably as keys, and a
-subscription is just the live tail of that range — history/replay =
-`scan`, latest = `get`, live = subscribe; a disconnected client misses
-nothing durable. Full semantics (attach boundaries, typed event
-validation, lag policy) in [WASM.md](WASM.md) §9.
-
-### Every module can be its own query, mutation — or subscription
-
-Installing a WASM module doesn't just make it callable through the generic
-`wasm`/`wasmExecute` byte pipes — a module that exports `describe`
-(emitting a JSON schema descriptor — see
-`crates/fluent-graphql/src/descriptor.rs`) becomes its **own typed root
-field**, dynamically: `kind: "query"` modules land on `Query`, `kind:
-"execute"` on `Mutation`, and a `feed` declaration (`"feed": {"prefix":
-"feed/", "event": "OrderFeedEntry!"}` — see `guests/order_feed`) lands
-the module's live changefeed on `Subscription` — named after the module,
-with declared arguments and a declared output/event type. The GraphQL
-schema is rebuilt and hot-swapped
-on every `installModule`/`uninstallModule`, and at server startup for
-already-installed modules — install `placeOrder`, and `mutation {
-placeOrder(...) }` exists; uninstall it, and it's gone. Described modules
-must use a valid GraphQL field name and may not shadow built-in fields or
-redeclare reserved/claimed type names — enforced at install time. Modules
-without `describe` stay reachable through the generic `wasm`/`wasmExecute`
-fields. `mutation { reloadSchema }` re-describes everything — the resync
-path after installing modules through the CLI (or after a failed
-post-install rebuild).
-
-The full authoring manual and ABI spec live in [`WASM.md`](WASM.md).
-In a Rust guest this is one macro next to the entry-point function:
-
-```rust
-fluent_guest::fluent_describe!(r#"{
-  "kind": "execute",
-  "args": [{"name": "customer", "type": "String!"},
-           {"name": "amountCents", "type": "U64!"}],
-  "types": [{"name": "PlacedOrder", "fields": [
-    {"name": "id", "type": "U64!"},
-    {"name": "customerTotalCents", "type": "U64!"}]}],
-  "output": "PlacedOrder!"
-}"#);
-```
-
-Typed args arrive at the guest as one JSON object; the guest's output is
-parsed as JSON and validated against the declared type before it reaches the
-client.
-
-### Demo: the order pair
-
-`guests/place_order` (writer: id allocation + order record + customer stats,
-one transaction, OCC-retried) and `guests/top_customers` (reader: rank
-customers by lifetime spend at the operation's snapshot) show the full
-typed-module workflow. With a server running:
-
-```sh
-scripts/demo-orders.sh          # builds, installs both modules, seeds orders, ranks
-```
-
-Then in GraphiQL:
-
-```graphql
-mutation { placeOrder(customer: "you", amountCents: "4200") { id customerTotalCents } }
-query    { topCustomers(limit: 3) { customer orders totalCents avgCents } }
-```
-
-## The wire pipe
-
-For the data-plane heat lane — raw bytes, request/response correlation by
-id, out-of-order completion on one connection (a slow `EXEC` never blocks
-the `GET`s pipelined behind it). `fluent-server` opens it alongside
-GraphQL; standalone:
-
-```sh
-cargo run -p fluent-wire -- ./data --sync periodic:50    # tcp 127.0.0.1:8427
-```
-
-Spec in [`WIRE.md`](WIRE.md); reference client `fluent_wire::WireClient`.
-GraphQL stays the general/typed/admin plane.
-
-## Replicas and edge caches
-
-Read replicas that attach to a running server's replication join point
-(`fluent-server`'s `:8428`, or the standalone master below) and hold a
-key-range slice of it — `[lo, hi)` unbounded for a full replica, narrow
-for an edge cache: the overlapping index fragments copied locally, values
-fetched lazily and cached, committed writes streamed in. Provenance is
-anchored on a deterministic store identity — a restored/forked master
-re-mints its instance id and every edge invalidates wholesale instead of
-serving a divergent history.
-
-```sh
-cargo run -p fluent-server -- ./data --store-name prod                    # join point on :8428
-# or serve only the replication plane:
-cargo run -p fluent-replication -- master ./data --store-name prod       # tcp 127.0.0.1:8428
-
-cargo run -p fluent-replication -- edge --master 127.0.0.1:8428 \
-    --dir /tmp/edge-cache --lo user/ --hi user0 --serve 127.0.0.1:8427   # wire-v1 reads
-```
-
-Spec in [`REPLICATION.md`](REPLICATION.md); identity model in
-[`DESIGN.md`](DESIGN.md) §14.
+| | |
+|---|---|
+| [GUIDE.md](GUIDE.md) | Start here. Everything about using fluent31: concepts, the embedded API, modules, triggers, forks, durability, the shell, server mode, GraphQL, replication, operations, and an "advanced" section on how it works. |
+| [SKILL.md](SKILL.md) | The short entry point for agents: the model in twelve lines, commands, traps, and where to read more. |
+| [WASM.md](WASM.md) | The module authoring manual and ABI spec. |
+| [DESIGN.md](DESIGN.md) | The architecture as implemented, section by section. |
+| [REPLICATION.md](REPLICATION.md) | The replica protocol spec. |
 
 ## Testing
 
 ```sh
-cargo test --workspace           # randomized model, group commit, wasm, graphql, server-mode &
-                                 # replication e2e, plus durability: hard-crash recovery,
-                                 # corruption fuzz, journal rebuild
+cargo test --workspace                              # model tests, group commit, wasm, graphql, server and
+                                                    # replication e2e, hard-crash recovery, corruption fuzz,
+                                                    # journal rebuild
 cargo test -p fluent31 --features fault-injection   # fsync-failure / ENOSPC / read-fault paths
-cargo test --test backup_and_soak -- --ignored      # opt-in endurance soak
 ```
 
-The durability suites are the confidence floor for system-of-record use: a
-SIGKILLed child process proves acked writes survive a hard crash
-(`crash_recovery`), a fault-injecting IO backend proves a failed fsync is never
-a false ack (`fault_injection`), a mutation sweep proves no on-disk byte can
-panic the reader (`corruption_fuzz`), and a nuke-the-directory replay proves the
-journal rebuilds exact state (`journal_rebuild`).
+Under Docker, io_uring is blocked by the default seccomp profile. Add
+`--security-opt seccomp=unconfined`.
 
-On Linux the suite exercises the io_uring backend automatically. Under
-Docker, io_uring syscalls are blocked by the default seccomp profile:
-
-```sh
-docker run --security-opt seccomp=unconfined -v $PWD:/src -w /src rust:1 \
-  sh -c "rustup target add wasm32-unknown-unknown && cargo test --workspace"
-```
-
-`cargo check -p fluent31 --no-default-features` builds the engine without
-the WASM layer (no wasmtime).
-
-## Crate layout
+## Layout
 
 ```
-crates/fluent31           the engine (lib), incl. store identity + edge store
-crates/fluent-guest       guest-side SDK for WASM modules
-crates/fluent-cli         interactive shell
-crates/fluent-server      server mode: all three planes below in one process
-crates/fluent-graphql     GraphQL server (axum + async-graphql)
-crates/fluent-wire        binary wire-protocol server + reference client
-crates/fluent-replication edge replication channel: master server + replica driver
-guests/               example WASM guests (separate workspace): agg, transfer,
-                      place_order + top_customers (typed GraphQL demo pair),
-                      customer_index + order_feed (trigger-maintained index +
-                      subscribable changefeed), dynamic_index, live_stats,
-                      cascade_delete, claim (see WASM.md §6 for what each shows)
+crates/fluent31           the engine (lib)
+crates/fluent-guest       guest-side SDK for WASM modules (+ fluent-guest-macros)
+crates/fluent-cli         interactive shell, journal rebuild
+crates/fluent-server      server mode: both planes in one process
+crates/fluent-graphql     GraphQL plane (axum + async-graphql)
+crates/fluent-replication replication: master server + embeddable edge replica
+guests/                   example modules (a separate wasm32 workspace)
+scripts/demo-orders.sh    typed-module demo against a running server
 ```

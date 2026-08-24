@@ -573,3 +573,74 @@ pub(crate) fn build(
     }
     builder.finish().expect("schema build: internal invariant")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::descriptor::{RESERVED_FIELDS, RESERVED_TYPES, SCALARS};
+    use crate::SchemaManager;
+
+    /// The descriptor gate and the built schema must agree: every root
+    /// field and every type name the built-in schema owns must appear in
+    /// the reserved lists, or a module could claim the name at descriptor
+    /// validation and then collide at schema build — an internal panic
+    /// instead of a clean install rejection.
+    #[test]
+    fn reserved_lists_cover_the_builtin_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(
+            fluent31::Db::open(dir.path(), fluent31::Options::default()).expect("open"),
+        );
+        let sdl = SchemaManager::new(db).expect("schema manager").schema().sdl();
+        // block strings delimit with `"""`; the odd split segments are docs
+        let sdl: String = sdl.split("\"\"\"").step_by(2).collect::<Vec<_>>().join("");
+
+        let leading_name = |s: &str| -> Option<String> {
+            let name: String = s
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty() && !name.starts_with("__")).then_some(name)
+        };
+
+        // the root block we are inside of, if any
+        let mut root: Option<String> = None;
+        for raw in sdl.lines() {
+            let line = raw.trim();
+            if let Some(rest) = line.strip_prefix("scalar ") {
+                let name = leading_name(rest).expect("scalar name");
+                let reserved = RESERVED_TYPES.contains(&name.as_str())
+                    || SCALARS.contains(&name.as_str());
+                assert!(reserved, "built-in scalar {name:?} is not reserved");
+                continue;
+            }
+            let type_decl = ["type ", "input ", "enum ", "interface ", "union "]
+                .iter()
+                .find_map(|kw| line.strip_prefix(kw));
+            if let Some(rest) = type_decl {
+                let name = leading_name(rest).expect("type name");
+                assert!(
+                    RESERVED_TYPES.contains(&name.as_str()),
+                    "built-in type {name:?} is not reserved"
+                );
+                root = matches!(name.as_str(), "Query" | "Mutation" | "Subscription")
+                    .then_some(name);
+                continue;
+            }
+            if line == "}" {
+                root = None;
+                continue;
+            }
+            if root.is_none() {
+                continue;
+            }
+            if let Some(field) = leading_name(line) {
+                assert!(
+                    RESERVED_FIELDS.contains(&field.as_str()),
+                    "built-in root field {field:?} is not reserved"
+                );
+            }
+        }
+    }
+}
