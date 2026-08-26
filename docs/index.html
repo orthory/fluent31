@@ -4,8 +4,29 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fluent31 Docs</title>
+<meta name="description" content="An embedded key-value database engine in Rust whose query surface is WebAssembly: install code into the database and run it as reads, transactions and triggers.">
+<link rel="canonical" href="https://orthory.github.io/fluent31/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23171717'/%3E%3Ctext x='16' y='21' text-anchor='middle' fill='%23fff' font-family='ui-monospace,SFMono-Regular,Menlo,monospace' font-size='12' font-weight='500'%3Ef31%3C/text%3E%3C/svg%3E">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="fluent31 Docs">
+<meta property="og:title" content="fluent31 Docs">
+<meta property="og:description" content="An embedded key-value database engine in Rust whose query surface is WebAssembly: install code into the database and run it as reads, transactions and triggers.">
+<meta property="og:url" content="https://orthory.github.io/fluent31/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="fluent31 Docs">
+<meta name="twitter:description" content="An embedded key-value database engine in Rust whose query surface is WebAssembly: install code into the database and run it as reads, transactions and triggers.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<script>
+  /* Stamp a pinned theme before first paint; unstamped means follow the system. */
+  (function () {
+    try {
+      var t = localStorage.getItem('f31-theme');
+      if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+    } catch (e) {}
+  })();
+</script>
 <style>
   :root {
     --bg: #ffffff;
@@ -102,10 +123,15 @@
   }
   .brand .sub { color: var(--gray); font-weight: 400; }
   .hdr .spacer { flex: 1; }
-  .menu-btn {
-    display: none; background: none; border: 1px solid var(--border); border-radius: 6px;
-    color: var(--fg); font-size: 16px; line-height: 1; padding: 7px 9px; cursor: pointer;
+  .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px; flex: none;
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--gray); cursor: pointer; padding: 0;
   }
+  .icon-btn:hover { color: var(--fg); }
+  .icon-btn svg { width: 15px; height: 15px; display: block; }
+  .menu-btn { display: none; font-size: 16px; }
   .gh { font-size: 13.5px; color: var(--gray); white-space: nowrap; }
   .gh:hover { color: var(--fg); text-decoration: none; }
 
@@ -143,6 +169,12 @@
   }
   .search-results a:hover, .search-results a.sel { background: var(--hover-bg); text-decoration: none; }
   .search-results a .in { display: block; color: var(--gray); font-size: 12px; }
+  .search-results a .sn {
+    display: block; margin-top: 3px;
+    color: var(--gray); font-size: 12px; line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+  .search-results a mark { background: none; color: var(--fg); font-weight: 500; }
   .search-results .empty { padding: 10px 12px; color: var(--gray); font-size: 13.5px; }
 
   /* ================= layout ================= */
@@ -201,7 +233,7 @@
   @media (max-width: 1100px) { .shell { grid-template-columns: 264px minmax(0, 1fr); } .toc-rail { display: none; } }
   @media (max-width: 880px) {
     .shell { grid-template-columns: minmax(0, 1fr); }
-    .menu-btn { display: inline-block; }
+    .menu-btn { display: inline-flex; }
     .side {
       display: none;
       position: fixed; top: 64px; left: 0; z-index: 40;
@@ -331,20 +363,31 @@ document.addEventListener('DOMContentLoaded', function () {
     var pid = a.dataset.page;
     var pt = titles[pid] || pid;
     headings[pid] = [];
-    index.push({ p: pid, t: pt, h: null, id: null });
-    Array.prototype.forEach.call(a.querySelectorAll('h2, h3'), function (h) {
-      var text = h.textContent;
+    var section = { p: pid, t: pt, h: null, id: null, body: '' };
+    index.push(section);
+    Array.prototype.forEach.call(a.children, function (el) {
+      var tag = el.tagName;
+      if (tag !== 'H2' && tag !== 'H3') {
+        section.body += ' ' + el.textContent;
+        return;
+      }
+      var text = el.textContent;
       var id = pid + '--' + slug(text);
-      h.id = id;
-      headings[pid].push({ id: id, text: text, lvl: h.tagName === 'H3' ? 3 : 2 });
-      index.push({ p: pid, t: pt, h: text, id: id });
+      el.id = id;
+      headings[pid].push({ id: id, text: text, lvl: tag === 'H3' ? 3 : 2 });
+      section = { p: pid, t: pt, h: text, id: id, body: '' };
+      index.push(section);
       var link = document.createElement('a');
       link.className = 'hlink';
       link.href = '#' + pid + '/' + id;
       link.setAttribute('aria-label', 'Link to ' + text);
       link.textContent = '#';
-      h.appendChild(link);
+      el.appendChild(link);
     });
+  });
+  index.forEach(function (r) {
+    r.body = r.body.replace(/\s+/g, ' ').trim();
+    r.lc = { t: r.t.toLowerCase(), h: (r.h || '').toLowerCase(), body: r.body.toLowerCase() };
   });
 
   var toc = document.getElementById('toc');
@@ -434,6 +477,37 @@ document.addEventListener('DOMContentLoaded', function () {
     cb.appendChild(b);
   });
 
+  /* ---- theme ---- */
+  var themeBtn = document.getElementById('theme-btn');
+  var SUN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">' +
+    '<circle cx="8" cy="8" r="3.25"></circle>' +
+    '<path d="M8 1v1.6M8 13.4V15M15 8h-1.6M2.6 8H1M12.95 3.05l-1.13 1.13M4.18 11.82l-1.13 1.13M12.95 12.95l-1.13-1.13M4.18 4.18 3.05 3.05"></path></svg>';
+  var MOON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">' +
+    '<path d="M14 9.3A6.3 6.3 0 0 1 6.7 2 6 6 0 1 0 14 9.3z"></path></svg>';
+  var darkMq = window.matchMedia('(prefers-color-scheme: dark)');
+
+  function effectiveTheme() {
+    var pinned = document.documentElement.getAttribute('data-theme');
+    if (pinned === 'dark' || pinned === 'light') return pinned;
+    return darkMq.matches ? 'dark' : 'light';
+  }
+  /* The button shows the theme a click would switch TO. */
+  function paintTheme() {
+    var next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+    themeBtn.innerHTML = next === 'dark' ? MOON : SUN;
+    themeBtn.title = 'Switch to ' + next + ' theme';
+    themeBtn.setAttribute('aria-label', themeBtn.title);
+  }
+  themeBtn.addEventListener('click', function () {
+    var next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('f31-theme', next); } catch (e) {}
+    paintTheme();
+  });
+  if (darkMq.addEventListener) darkMq.addEventListener('change', paintTheme);
+  else if (darkMq.addListener) darkMq.addListener(paintTheme);
+  paintTheme();
+
   /* ---- mobile menu ---- */
   document.getElementById('menu-btn').addEventListener('click', function () {
     document.body.classList.toggle('nav-open');
@@ -446,13 +520,48 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function closeSearch() { box.classList.remove('open'); sel = -1; }
 
+  var ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return ESC[c]; }); }
+
+  function hits(hay, q) {
+    var n = 0, i = 0;
+    while ((i = hay.indexOf(q, i)) !== -1) { n++; i += q.length; }
+    return n;
+  }
+
+  /* Lower is better. -1 means no match at all. */
+  var BODY_TIER = 5;
+  function rank(r, q) {
+    if (r.lc.t === q) return 0;
+    if (r.lc.t.indexOf(q) === 0) return 1;
+    if (r.lc.h.indexOf(q) === 0) return 2;
+    if (r.lc.t.indexOf(q) !== -1) return 3;
+    if (r.lc.h.indexOf(q) !== -1) return 4;
+    if (r.lc.body.indexOf(q) !== -1) return BODY_TIER;
+    return -1;
+  }
+
+  /* A window of the section's text around the hit, with the hit marked. */
+  function snippet(r, q) {
+    var at = r.lc.body.indexOf(q);
+    if (at === -1) return '';
+    var from = Math.max(0, at - 45);
+    var to = Math.min(r.body.length, at + q.length + 55);
+    return (from > 0 ? '…' : '') + esc(r.body.slice(from, at)) +
+      '<mark>' + esc(r.body.slice(at, at + q.length)) + '</mark>' +
+      esc(r.body.slice(at + q.length, to)) + (to < r.body.length ? '…' : '');
+  }
+
   function render() {
     if (!results.length) { box.innerHTML = '<div class="empty">No results</div>'; return; }
     var html = '';
     results.forEach(function (r, i) {
       var target = '#' + r.p + (r.id ? '/' + r.id : '');
+      var sn = r.score === BODY_TIER ? snippet(r, r.q) : '';
       html += '<a href="' + target + '" class="' + (i === sel ? 'sel' : '') + '">' +
-        (r.h ? r.h : r.t) + (r.h ? '<span class="in">' + r.t + '</span>' : '<span class="in">Page</span>') + '</a>';
+        esc(r.h || r.t) +
+        '<span class="in">' + (r.h ? esc(r.t) : 'Page') + '</span>' +
+        (sn ? '<span class="sn">' + sn + '</span>' : '') + '</a>';
     });
     box.innerHTML = html;
     Array.prototype.forEach.call(box.querySelectorAll('a'), function (a) {
@@ -463,8 +572,13 @@ document.addEventListener('DOMContentLoaded', function () {
   input.addEventListener('input', function () {
     var q = input.value.trim().toLowerCase();
     if (!q) { closeSearch(); return; }
-    results = index.filter(function (r) {
-      return (r.h || r.t).toLowerCase().indexOf(q) !== -1 || (r.h && r.t.toLowerCase().indexOf(q) !== -1);
+    results = index.map(function (r) {
+      var s = rank(r, q);
+      if (s === -1) return null;
+      return { p: r.p, t: r.t, h: r.h, id: r.id, body: r.body, lc: r.lc,
+               score: s, n: hits(r.lc.body, q), q: q };
+    }).filter(Boolean).sort(function (a, b) {
+      return a.score - b.score || b.n - a.n || a.body.length - b.body.length;
     }).slice(0, 10);
     sel = -1;
     render();
@@ -496,7 +610,7 @@ document.addEventListener('DOMContentLoaded', function () {
 <body>
 
 <header class="hdr">
-  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <button id="menu-btn" class="icon-btn menu-btn" type="button" aria-label="Toggle navigation">☰</button>
   <a class="brand" href="#introduction"><span class="mark">f31</span> fluent31 <span class="sub">/ Docs</span></a>
   <span class="spacer"></span>
   <div class="search-wrap">
@@ -505,6 +619,7 @@ document.addEventListener('DOMContentLoaded', function () {
     <kbd>⌘K</kbd>
     <div id="search-results" class="search-results"></div>
   </div>
+  <button id="theme-btn" class="icon-btn" type="button"></button>
   <a class="gh" href="https://github.com/orthory/fluent31">GitHub ↗</a>
 </header>
 
@@ -646,7 +761,7 @@ subscription { orderFeed { seqno event { id record } query { snapshotSeqno } } }
       </article>
       <!-- ============================================================ -->
       <article data-page="installation">
-        <h1>Installation</h1>
+        <h1>Install</h1>
         <p class="lead">Stable Rust, one optional wasm target, two cargo features.</p>
 
         <p>You need stable Rust (2021 edition). For modules, add the wasm target:</p>
@@ -701,7 +816,7 @@ fluent31&gt; scan user/ user0
         <h2>Enough of the shell to be useful</h2>
         <div class="codeblock"><pre>fluent31&gt; count user/ user0            <span class="c"># how many, without printing them</span>
 fluent31&gt; scan user/ user0 --rev --limit 2
-fluent31&gt; del user/ada
+fluent31&gt; del hello                    <span class="c"># the scratch key from a moment ago</span>
 fluent31&gt; begin                        <span class="c"># a transaction; the prompt shows (txn)</span>
 fluent31&gt; tlock counter                <span class="c"># read + conflict-check at commit</span>
 fluent31&gt; tput counter 1
@@ -912,7 +1027,8 @@ db.stats();</pre></div>
         <h2>Where to go next</h2>
         <ul>
           <li><strong>Concepts</strong> explains why the engine behaves the way these steps showed — snapshots and the watermark, the consistency contract, what triggers guarantee, what a fork is.</li>
-          <li><strong>Reference</strong> is the exact surface of each entry point: every <code>Options</code> field, the module ABI, the GraphQL schema, the shell commands, server configuration, operations.</li>
+          <li><strong>Extending with WASM</strong> is the whole of the module story: what each role means, the catalogue of what to build, the guest SDK and the host ABI, and how a module becomes a typed GraphQL field.</li>
+          <li><strong>Reference</strong> is the exact surface of each entry point: every <code>Options</code> field, the GraphQL schema, the shell commands, server configuration, replication, operations.</li>
           <li><strong>Recipes</strong> are the worked shapes — aggregates, invariants, indexes, feeds, migrations, forks — each with the reference module that implements it.</li>
         </ul>
         <p>The repository also carries walkthroughs that assert their own results, which are the fastest way to see the trigger machinery under load:</p>
@@ -1025,7 +1141,7 @@ history/doc/42/&lt;seqno&gt;     <span class="c">one entry per write (what the t
         <p>Derived data is only worth maintaining if it cannot silently diverge from what it is derived from, and that is a property of where the work happens rather than of how carefully the module is written. An event is captured inside the commit that caused it, so a write that survives a crash has an event waiting for it afterwards and a write that does not leaves nothing behind. Consuming that event happens inside the module's own transaction, together with whatever the module writes, so the two cannot come apart: an aggregate folded this way is exact rather than approximately right, however many times the attempt is retried.</p>
         <p>Two consequences follow. Writes made by a trigger generate no events of their own, so no chain of triggers can loop or amplify — a cascade runs once. And the price of all of it is that the work is asynchronous: derived state trails the base data by whatever is queued, and nothing waits for it. A failure holds the queue rather than dropping it, which makes a broken module a visible backlog rather than a silent hole.</p>
 
-        <div class="note"><p><span class="lbl">Next</span><a href="#triggers">Triggers</a> is the reference — registration, both modes in detail, the delivery guarantees and the drain loop. <a href="#ex-indexes">Secondary indexes</a> and <a href="#ex-views-feeds">Views, feeds, cascades</a> are the worked shapes.</p></div>
+        <div class="note"><p><span class="lbl">Next</span>A trigger is a module, so <a href="#wasm-overview">Extending with WASM</a> comes next — what the consumer roles receive and how to write one. <a href="#triggers">Triggers</a> is the reference for the binding itself: registration, both modes in detail, the delivery guarantees and the drain loop.</p></div>
       </article>
       <!-- ============================================================ -->
       <article data-page="wasm-overview">
@@ -1332,8 +1448,8 @@ scan_skip       : (h: i32) -&gt; i32   <span class="c">// drop the next entry; 1
 scan_close      : (h: i32) -&gt; i32   <span class="c">// free the handle</span></pre></div>
         <p><code>EBADF</code> is a handle that is not open; <code>EIO</code> is an engine error. The SDK's <code>Scan</code> iterator is exactly this loop, with <code>skip_pending()</code> exposing <code>scan_skip</code>.</p>
 
-        <h2>Per-invocation limits</h2>
-        <p>Every one of these is an engine <code>Options</code> field, so they are the operator's to set — the defaults are what an unconfigured store uses.</p>
+        <h2>Limits</h2>
+        <p>Every one of these is an engine <code>Options</code> field, so they are the operator's to set — the defaults are what an unconfigured store uses. These are the per-invocation budgets, reset for every call and, for an executor, for every retry of it:</p>
         <div class="tablewrap"><table>
           <thead><tr><th>Option</th><th>Default</th><th>On breach</th></tr></thead>
           <tbody>
@@ -1343,11 +1459,10 @@ scan_close      : (h: i32) -&gt; i32   <span class="c">// free the handle</span>
             <tr><td><code>max_wasm_output</code></td><td>32 MiB</td><td><code>output_write</code> returns <code>ENOSPC</code></td></tr>
             <tr><td><code>max_wasm_log</code></td><td>1 MiB</td><td><code>log</code> returns <code>ENOSPC</code></td></tr>
             <tr><td><code>max_wasm_scans</code></td><td>64 open handles</td><td><code>scan_open</code> returns <code>ELIMIT</code></td></tr>
-            <tr><td><code>max_key_size</code></td><td>16 KiB</td><td><code>put</code> returns <code>EINVAL</code></td></tr>
-            <tr><td><code>max_value_size</code></td><td>256 MiB</td><td><code>put</code> returns <code>EINVAL</code></td></tr>
-            <tr><td><code>max_txn_write_bytes</code></td><td>256 MiB</td><td><code>put</code> returns <code>ENOSPC</code></td></tr>
+            <tr><td><code>max_txn_write_bytes</code></td><td>256 MiB</td><td><code>put</code> returns <code>ENOSPC</code> once the transaction's buffered writes would exceed it</td></tr>
           </tbody>
         </table></div>
+        <p>Two more bound any single write rather than the invocation, and apply to every writer on every surface: a key is at most <code>max_key_size</code> (16&nbsp;KiB) and a value at most <code>max_value_size</code> (256&nbsp;MiB). <code>put</code> returns <code>EINVAL</code> past either.</p>
         <div class="note"><p><span class="lbl">Spec.</span><a href="https://github.com/orthory/fluent31/blob/master/WASM.md">WASM.md</a> in the repository is the normative version of this page.</p></div>
       </article>
       <!-- ============================================================ -->
