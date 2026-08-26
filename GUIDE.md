@@ -519,7 +519,7 @@ db.gc_vlog()?;       // one value-log GC pass; Ok(Some(file_id)) if a file was r
 let s: DbStats = db.stats();
 ```
 
-`DbStats` has `backend` (`"uring"` or `"std"`), `visible_seqno`,
+`DbStats` has `backend` (`"io_uring"` or `"std"`), `visible_seqno`,
 `memtable_bytes`, `immutable_memtables`, `levels` as a `Vec<(runs, files,
 bytes)>`, `vlog_files`, `vlog_retired` (retired files waiting on the
 deletion gates), `discard_bytes` (value-log bytes known to be dead),

@@ -1,0 +1,1955 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fluent31 Docs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #171717;
+    --gray: #666666;
+    --gray-light: #999999;
+    --border: #eaeaea;
+    --hover-bg: #f2f2f2;
+    --sidebar-bg: #fafafa;
+    --code-bg: #fafafa;
+    --code-inline-bg: #f2f2f2;
+    --link: #0068d6;
+    --accent: #0070f3;
+    --note-bg: #f7f7f7;
+    --header-bg: rgba(255,255,255,.85);
+    --tk-c: #999999;
+    --tk-s: #297a3a;
+    --tk-k: #9d3ec2;
+    --tk-w: #b05a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0a0a0a;
+      --fg: #ededed;
+      --gray: #a1a1a1;
+      --gray-light: #6e6e6e;
+      --border: #262626;
+      --hover-bg: #1a1a1a;
+      --sidebar-bg: #0a0a0a;
+      --code-bg: #111111;
+      --code-inline-bg: #1c1c1c;
+      --link: #52a8ff;
+      --accent: #52a8ff;
+      --note-bg: #131313;
+      --header-bg: rgba(10,10,10,.85);
+      --tk-c: #6e6e6e;
+      --tk-s: #62c073;
+      --tk-k: #c88bdd;
+      --tk-w: #e0a24d;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0a0a;
+    --fg: #ededed;
+    --gray: #a1a1a1;
+    --gray-light: #6e6e6e;
+    --border: #262626;
+    --hover-bg: #1a1a1a;
+    --sidebar-bg: #0a0a0a;
+    --code-bg: #111111;
+    --code-inline-bg: #1c1c1c;
+    --link: #52a8ff;
+    --accent: #52a8ff;
+    --note-bg: #131313;
+    --header-bg: rgba(10,10,10,.85);
+    --tk-c: #6e6e6e;
+    --tk-s: #62c073;
+    --tk-k: #c88bdd;
+    --tk-w: #e0a24d;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+  /* ================= header ================= */
+  .hdr {
+    position: sticky; top: 0; z-index: 50;
+    display: flex; align-items: center; gap: 16px;
+    height: 64px; padding: 0 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--header-bg);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 16px; color: var(--fg); letter-spacing: -0.01em; white-space: nowrap; }
+  .brand:hover { text-decoration: none; }
+  .brand .mark {
+    width: 22px; height: 22px; border-radius: 6px;
+    background: var(--fg); color: var(--bg);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: "Geist Mono", monospace; font-size: 11px; font-weight: 500;
+  }
+  .brand .sub { color: var(--gray); font-weight: 400; }
+  .hdr .spacer { flex: 1; }
+  .menu-btn {
+    display: none; background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); font-size: 16px; line-height: 1; padding: 7px 9px; cursor: pointer;
+  }
+  .gh { font-size: 13.5px; color: var(--gray); white-space: nowrap; }
+  .gh:hover { color: var(--fg); text-decoration: none; }
+
+  /* search */
+  .search-wrap { position: relative; width: 280px; }
+  .search-wrap input {
+    width: 100%; height: 34px; padding: 0 60px 0 32px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--sidebar-bg); color: var(--fg);
+    font-family: inherit; font-size: 13.5px;
+  }
+  .search-wrap input::placeholder { color: var(--gray-light); }
+  .search-wrap .icon {
+    position: absolute; left: 10px; top: 9px; width: 15px; height: 15px;
+    color: var(--gray-light); pointer-events: none;
+  }
+  .search-wrap kbd {
+    position: absolute; right: 8px; top: 7px;
+    font-family: "Geist", sans-serif; font-size: 11px; color: var(--gray);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px 2px;
+    background: var(--bg); pointer-events: none;
+  }
+  .search-results {
+    display: none;
+    position: absolute; top: 42px; left: 0; width: 380px; max-width: 74vw;
+    max-height: 60vh; overflow-y: auto;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.12);
+    padding: 6px;
+  }
+  .search-results.open { display: block; }
+  .search-results a {
+    display: block; padding: 8px 10px; border-radius: 6px;
+    color: var(--fg); font-size: 13.5px; line-height: 1.4;
+  }
+  .search-results a:hover, .search-results a.sel { background: var(--hover-bg); text-decoration: none; }
+  .search-results a .in { display: block; color: var(--gray); font-size: 12px; }
+  .search-results .empty { padding: 10px 12px; color: var(--gray); font-size: 13.5px; }
+
+  /* ================= layout ================= */
+  .shell { display: grid; grid-template-columns: 264px minmax(0, 1fr) 224px; max-width: 1400px; margin: 0 auto; }
+
+  /* sidebar */
+  .side {
+    position: sticky; top: 64px; height: calc(100vh - 64px);
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 24px 12px 48px 24px;
+    border-right: 1px solid var(--border);
+  }
+  .nav h5 {
+    margin: 22px 0 6px; padding: 0 10px;
+    font-size: 13px; font-weight: 600; letter-spacing: 0;
+    color: var(--fg);
+  }
+  .nav h5:first-child { margin-top: 0; }
+  .nav a {
+    display: block; padding: 5px 10px; border-radius: 6px;
+    color: var(--gray); font-size: 14px; line-height: 1.5;
+  }
+  .nav a:hover { color: var(--fg); text-decoration: none; }
+  .nav a.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); font-weight: 500; }
+
+  /* main */
+  .main { padding: 44px 48px 96px; min-width: 0; }
+  .content { max-width: 720px; }
+
+  /* toc */
+  .toc-rail { position: sticky; top: 64px; height: calc(100vh - 64px); overflow-y: auto; padding: 44px 24px 48px 8px; font-size: 13px; }
+  .toc-rail h5 { margin: 0 0 10px; font-size: 12.5px; font-weight: 600; color: var(--fg); }
+  .toc-rail a { display: block; padding: 3px 0 3px 12px; color: var(--gray); border-left: 2px solid transparent; line-height: 1.45; }
+  .toc-rail a.lvl3 { padding-left: 26px; }
+  .toc-rail a:hover { color: var(--fg); text-decoration: none; }
+  .toc-rail a.active { color: var(--accent); border-left-color: var(--accent); }
+
+  @media (max-width: 1100px) { .shell { grid-template-columns: 264px minmax(0, 1fr); } .toc-rail { display: none; } }
+  @media (max-width: 880px) {
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    .menu-btn { display: inline-block; }
+    .side {
+      display: none;
+      position: fixed; top: 64px; left: 0; z-index: 40;
+      width: 300px; max-width: 85vw; height: calc(100vh - 64px);
+      background: var(--bg); border-right: 1px solid var(--border);
+      box-shadow: 0 8px 30px rgba(0,0,0,.15);
+    }
+    body.nav-open .side { display: block; }
+    .main { padding: 32px 22px 80px; }
+    .search-wrap { width: 40vw; min-width: 150px; }
+    .search-wrap kbd { display: none; }
+    .gh { display: none; }
+  }
+
+  /* ================= content ================= */
+  article[data-page] { display: none; }
+  article[data-page].on { display: block; }
+
+  .content h1 { font-size: 32px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.15; margin: 0 0 10px; text-wrap: balance; }
+  .lead { font-size: 16px; color: var(--gray); margin: 0 0 32px; max-width: 62ch; }
+  .content h2 {
+    font-size: 21px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.3;
+    margin: 44px 0 14px; scroll-margin-top: 84px;
+  }
+  .content h3 { font-size: 16.5px; font-weight: 600; margin: 30px 0 10px; scroll-margin-top: 84px; }
+  .content h2 .hlink, .content h3 .hlink { margin-left: 8px; color: var(--gray-light); opacity: 0; font-weight: 400; }
+  .content h2:hover .hlink, .content h3:hover .hlink { opacity: 1; }
+  .content p, .content li { max-width: 68ch; }
+  .content p { margin: 0 0 14px; }
+  .content ul, .content ol { margin: 0 0 16px; padding-left: 24px; }
+  .content li { margin: 0 0 6px; }
+  .content li::marker { color: var(--gray-light); }
+  .content strong { font-weight: 600; }
+
+  code {
+    font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: .86em;
+  }
+  p code, li code, td code, h1 code, h2 code, h3 code {
+    background: var(--code-inline-bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 5px 2px;
+  }
+
+  .codeblock {
+    position: relative;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--code-bg);
+    margin: 0 0 20px;
+    overflow: hidden;
+  }
+  .codeblock .bar {
+    display: flex; align-items: center;
+    padding: 9px 16px 8px; border-bottom: 1px solid var(--border);
+    font-family: "Geist Mono", monospace; font-size: 12px; color: var(--gray);
+  }
+  .codeblock pre {
+    margin: 0; padding: 14px 18px; overflow-x: auto;
+    font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 13px; line-height: 1.7;
+  }
+  .codeblock button.copy {
+    position: absolute; top: 6px; right: 6px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--gray);
+    font-family: "Geist", sans-serif; font-size: 11.5px;
+    padding: 4px 9px; cursor: pointer; opacity: 0;
+  }
+  .codeblock:hover button.copy, .codeblock button.copy:focus-visible { opacity: 1; }
+  .codeblock button.copy:hover { color: var(--fg); }
+  .c { color: var(--tk-c); } .s { color: var(--tk-s); } .k { color: var(--tk-k); } .w { color: var(--tk-w); }
+
+  .tablewrap { overflow-x: auto; margin: 0 0 22px; border: 1px solid var(--border); border-radius: 10px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th {
+    text-align: left; font-weight: 500; color: var(--gray);
+    font-size: 12.5px;
+    padding: 9px 16px; border-bottom: 1px solid var(--border);
+    background: var(--sidebar-bg);
+    white-space: nowrap;
+  }
+  td { padding: 9px 16px; border-bottom: 1px solid var(--border); vertical-align: top; line-height: 1.55; }
+  tr:last-child td { border-bottom: 0; }
+  td code { white-space: nowrap; }
+  .dim { color: var(--gray); }
+
+  .note {
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--note-bg);
+    padding: 12px 16px; margin: 0 0 20px;
+    font-size: 14px;
+  }
+  .note p { margin: 0; max-width: none; }
+  .note .lbl { font-weight: 600; margin-right: 6px; }
+
+  /* prev / next */
+  .pagenav { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 56px; }
+  .pagenav a {
+    display: block; padding: 14px 18px;
+    border: 1px solid var(--border); border-radius: 10px;
+    color: var(--fg);
+  }
+  .pagenav a:hover { border-color: var(--gray-light); text-decoration: none; }
+  .pagenav a .dir { display: block; font-size: 12px; color: var(--gray); margin-bottom: 2px; }
+  .pagenav a .ttl { font-size: 14.5px; font-weight: 500; color: var(--link); }
+  .pagenav a.next { text-align: right; grid-column: 2; }
+  .pagenav a.prev { grid-column: 1; }
+  @media (max-width: 560px) { .pagenav { grid-template-columns: 1fr; } .pagenav a.next { grid-column: auto; text-align: left; } }
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var articles = Array.prototype.slice.call(document.querySelectorAll('article[data-page]'));
+  var byId = {};
+  articles.forEach(function (a) { byId[a.dataset.page] = a; });
+  var navLinks = Array.prototype.slice.call(document.querySelectorAll('.nav a[data-nav]'));
+  var order = navLinks.map(function (l) { return l.dataset.nav; });
+  var titles = {};
+  navLinks.forEach(function (l) { titles[l.dataset.nav] = l.textContent; });
+
+  function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
+
+  var headings = {};
+  var index = [];
+  articles.forEach(function (a) {
+    var pid = a.dataset.page;
+    var pt = titles[pid] || pid;
+    headings[pid] = [];
+    index.push({ p: pid, t: pt, h: null, id: null });
+    Array.prototype.forEach.call(a.querySelectorAll('h2, h3'), function (h) {
+      var text = h.textContent;
+      var id = pid + '--' + slug(text);
+      h.id = id;
+      headings[pid].push({ id: id, text: text, lvl: h.tagName === 'H3' ? 3 : 2 });
+      index.push({ p: pid, t: pt, h: text, id: id });
+      var link = document.createElement('a');
+      link.className = 'hlink';
+      link.href = '#' + pid + '/' + id;
+      link.setAttribute('aria-label', 'Link to ' + text);
+      link.textContent = '#';
+      h.appendChild(link);
+    });
+  });
+
+  var toc = document.getElementById('toc');
+  var pagenav = document.getElementById('pagenav');
+  var spy = null;
+  var current = null;
+
+  function buildToc(pid) {
+    var hs = headings[pid] || [];
+    if (!hs.length) { toc.innerHTML = ''; return; }
+    var html = '<h5>On this page</h5>';
+    hs.forEach(function (h) {
+      html += '<a class="' + (h.lvl === 3 ? 'lvl3' : '') + '" data-h="' + h.id + '" href="#' + pid + '/' + h.id + '">' + h.text + '</a>';
+    });
+    toc.innerHTML = html;
+  }
+
+  function buildPagenav(pid) {
+    var i = order.indexOf(pid);
+    var html = '';
+    if (i > 0) html += '<a class="prev" href="#' + order[i - 1] + '"><span class="dir">Previous</span><span class="ttl">' + titles[order[i - 1]] + '</span></a>';
+    if (i >= 0 && i < order.length - 1) html += '<a class="next" href="#' + order[i + 1] + '"><span class="dir">Next</span><span class="ttl">' + titles[order[i + 1]] + '</span></a>';
+    pagenav.innerHTML = html;
+  }
+
+  function watch(pid) {
+    if (spy) spy.disconnect();
+    var links = {};
+    Array.prototype.forEach.call(toc.querySelectorAll('a[data-h]'), function (l) { links[l.dataset.h] = l; });
+    spy = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          Array.prototype.forEach.call(toc.querySelectorAll('a'), function (l) { l.classList.remove('active'); });
+          var l = links[e.target.id];
+          if (l) l.classList.add('active');
+        }
+      });
+    }, { rootMargin: '-70px 0px -75% 0px' });
+    Array.prototype.forEach.call(byId[pid].querySelectorAll('h2, h3'), function (h) { spy.observe(h); });
+  }
+
+  function show(pid, hid) {
+    if (!byId[pid]) { pid = order[0]; hid = null; }
+    var changed = pid !== current;
+    current = pid;
+    articles.forEach(function (a) { a.classList.toggle('on', a.dataset.page === pid); });
+    navLinks.forEach(function (l) { l.classList.toggle('active', l.dataset.nav === pid); });
+    document.title = (titles[pid] || 'fluent31') + ' · fluent31 Docs';
+    buildToc(pid);
+    buildPagenav(pid);
+    watch(pid);
+    document.body.classList.remove('nav-open');
+    if (hid) {
+      var el = document.getElementById(hid);
+      if (el) el.scrollIntoView();
+    } else if (changed) {
+      window.scrollTo(0, 0);
+    }
+    var active = document.querySelector('.nav a.active');
+    if (active) {
+      var side = document.querySelector('.side');
+      var r = active.getBoundingClientRect();
+      if (r.top < 80 || r.bottom > window.innerHeight - 20) active.scrollIntoView({ block: 'center' });
+    }
+  }
+
+  function route() {
+    var raw = location.hash.replace(/^#\/?/, '');
+    var parts = raw.split('/');
+    show(parts[0] || order[0], parts[1] || null);
+  }
+  window.addEventListener('hashchange', route);
+  route();
+
+  /* ---- copy buttons ---- */
+  Array.prototype.forEach.call(document.querySelectorAll('.codeblock'), function (cb) {
+    var b = document.createElement('button');
+    b.className = 'copy'; b.type = 'button'; b.textContent = 'Copy';
+    b.addEventListener('click', function () {
+      var text = cb.querySelector('pre').innerText;
+      try {
+        navigator.clipboard.writeText(text).then(function () {
+          b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1200);
+        });
+      } catch (e) {}
+    });
+    cb.appendChild(b);
+  });
+
+  /* ---- mobile menu ---- */
+  document.getElementById('menu-btn').addEventListener('click', function () {
+    document.body.classList.toggle('nav-open');
+  });
+
+  /* ---- search ---- */
+  var input = document.getElementById('search');
+  var box = document.getElementById('search-results');
+  var results = [], sel = -1;
+
+  function closeSearch() { box.classList.remove('open'); sel = -1; }
+
+  function render() {
+    if (!results.length) { box.innerHTML = '<div class="empty">No results</div>'; return; }
+    var html = '';
+    results.forEach(function (r, i) {
+      var target = '#' + r.p + (r.id ? '/' + r.id : '');
+      html += '<a href="' + target + '" class="' + (i === sel ? 'sel' : '') + '">' +
+        (r.h ? r.h : r.t) + (r.h ? '<span class="in">' + r.t + '</span>' : '<span class="in">Page</span>') + '</a>';
+    });
+    box.innerHTML = html;
+    Array.prototype.forEach.call(box.querySelectorAll('a'), function (a) {
+      a.addEventListener('click', function () { closeSearch(); input.blur(); });
+    });
+  }
+
+  input.addEventListener('input', function () {
+    var q = input.value.trim().toLowerCase();
+    if (!q) { closeSearch(); return; }
+    results = index.filter(function (r) {
+      return (r.h || r.t).toLowerCase().indexOf(q) !== -1 || (r.h && r.t.toLowerCase().indexOf(q) !== -1);
+    }).slice(0, 10);
+    sel = -1;
+    render();
+    box.classList.add('open');
+  });
+  input.addEventListener('keydown', function (e) {
+    if (!box.classList.contains('open')) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(sel + 1, results.length - 1); render(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(sel - 1, 0); render(); }
+    else if (e.key === 'Enter' && sel >= 0 && results[sel]) {
+      e.preventDefault();
+      var r = results[sel];
+      location.hash = '#' + r.p + (r.id ? '/' + r.id : '');
+      closeSearch(); input.blur(); input.value = '';
+    } else if (e.key === 'Escape') { closeSearch(); input.blur(); }
+  });
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.search-wrap')) closeSearch();
+  });
+  document.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); input.focus(); input.select(); }
+    else if (e.key === '/' && document.activeElement !== input && !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) {
+      e.preventDefault(); input.focus();
+    }
+  });
+});
+</script>
+</head>
+<body>
+
+<header class="hdr">
+  <button id="menu-btn" class="menu-btn" aria-label="Toggle navigation">☰</button>
+  <a class="brand" href="#introduction"><span class="mark">f31</span> fluent31 <span class="sub">/ Docs</span></a>
+  <span class="spacer"></span>
+  <div class="search-wrap">
+    <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"></circle><path d="m10.5 10.5 3 3"></path></svg>
+    <input id="search" type="text" placeholder="Search docs…" autocomplete="off" spellcheck="false" aria-label="Search docs">
+    <kbd>⌘K</kbd>
+    <div id="search-results" class="search-results"></div>
+  </div>
+  <a class="gh" href="https://github.com/orthory/fluent31">GitHub ↗</a>
+</header>
+
+<div class="shell">
+
+  <aside class="side">
+    <nav class="nav">
+      <h5>Getting started</h5>
+      <a data-nav="introduction" href="#introduction">Introduction</a>
+      <a data-nav="installation" href="#installation">Installation</a>
+      <a data-nav="quickstart" href="#quickstart">Quick start</a>
+
+      <h5>Concepts</h5>
+      <a data-nav="keys" href="#keys">Keys, seqnos, snapshots</a>
+      <a data-nav="consistency" href="#consistency">The consistency contract</a>
+      <a data-nav="transactions" href="#transactions">Transactions</a>
+      <a data-nav="sql-mapping" href="#sql-mapping">Coming from SQL</a>
+
+      <h5>Examples</h5>
+      <a data-nav="choosing" href="#choosing">Choosing the shape</a>
+      <a data-nav="ex-queries" href="#ex-queries">Queries in the database</a>
+      <a data-nav="ex-executors" href="#ex-executors">Invariants &amp; procedures</a>
+      <a data-nav="ex-indexes" href="#ex-indexes">Secondary indexes</a>
+      <a data-nav="ex-views-feeds" href="#ex-views-feeds">Views, feeds, cascades</a>
+      <a data-nav="ex-oneshot" href="#ex-oneshot">Migrations &amp; one-shots</a>
+      <a data-nav="ex-forks" href="#ex-forks">Forks in practice</a>
+
+      <h5>Guides</h5>
+      <a data-nav="embedded-api" href="#embedded-api">Embedded API</a>
+      <a data-nav="wasm-modules" href="#wasm-modules">WASM modules</a>
+      <a data-nav="triggers" href="#triggers">Triggers</a>
+      <a data-nav="forks" href="#forks">Forks, pins, clones</a>
+      <a data-nav="durability" href="#durability">Durability &amp; recovery</a>
+
+      <h5>Running it</h5>
+      <a data-nav="shell" href="#shell">The shell</a>
+      <a data-nav="server" href="#server">Server mode</a>
+      <a data-nav="graphql" href="#graphql">GraphQL API</a>
+      <a data-nav="replication" href="#replication">Replication</a>
+      <a data-nav="operations" href="#operations">Operations</a>
+      <a data-nav="testing" href="#testing">Testing</a>
+
+      <h5>Reference</h5>
+      <a data-nav="internals" href="#internals">How it works</a>
+      <a data-nav="glossary" href="#glossary">Glossary</a>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <!-- ============================================================ -->
+      <article data-page="introduction">
+        <h1>Introduction</h1>
+        <p class="lead">fluent31 is an embedded key-value database engine in Rust that runs WebAssembly instead of SQL.</p>
+
+        <p>The engine is an LSM tree with key-value separation — large values live in an append-only value log, so the index stays small enough to keep in memory — with MVCC snapshots, optimistic transactions, io_uring on Linux and portable IO elsewhere.</p>
+        <p>Where a SQL database gives you a query language, fluent31 gives you WebAssembly. You install modules into the database and run them as read-only queries or as transactional executors. You can also bind a module to a key range as a <a href="#triggers">trigger</a>, and the engine will invoke it after every commit into that range to maintain indexes, aggregates and changefeeds. There is no schema. Key layout and module code take its place.</p>
+
+        <h2>The pieces</h2>
+        <ul>
+          <li><strong>Engine</strong> — LSM storage with WiscKey-style key-value separation, MVCC snapshots, optimistic transactions, io_uring on Linux.</li>
+          <li><strong>Modules</strong> — install WASM into the database and run it as read-only queries or transactional executors against a kernel-style syscall ABI (<code>get</code>, <code>put</code>, <code>delete</code>, batched scans, fuel and memory limits). A module that describes itself becomes its own typed GraphQL field.</li>
+          <li><strong>Triggers</strong> — bind a module to a key range and the engine invokes it after every committed write into the range. Schema-free indexes, materialized views, <code>GROUP BY</code> tables, cascades, changefeeds. Events are durable with the write and effects are exactly-once.</li>
+          <li><strong>Forks</strong> — <code>fork("name")</code> publishes a complete, consistent, hard-linked copy of the database at a cost proportional to the file count, not the data. Open it for a writable copy-on-write clone. Pins make a point fork-able later.</li>
+          <li><strong>Journal</strong> — opt-in and off the commit path. An independent mutation log from which a fresh database is rebuilt when the store directory is lost.</li>
+          <li><strong>Server</strong> — one process, one store, two planes: GraphQL for typed and admin operations with live subscriptions, and a replication join point for full replicas and key-range edge caches.</li>
+        </ul>
+
+        <h2>The surfaces</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Surface</th><th>What it is</th></tr></thead>
+          <tbody>
+            <tr><td><code>fluent31</code> crate</td><td>The engine. Embed it in a Rust process.</td></tr>
+            <tr><td><code>fluent-guest</code> crate</td><td>The SDK for writing WASM modules.</td></tr>
+            <tr><td><code>fluent-cli</code></td><td>An interactive shell. Also the journal rebuild tool.</td></tr>
+            <tr><td><code>fluent-server</code></td><td>One process serving one store on two planes: GraphQL (typed and admin operations, subscriptions) and replication (the join point for replicas).</td></tr>
+            <tr><td><code>fluent-graphql</code>, <code>fluent-replication</code></td><td>Each plane as a standalone binary, with the same defaults.</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>What it is not</h2>
+        <ul>
+          <li><strong>Not SQL.</strong> There is no query language, no columns, no joins. You get key layout and modules.</li>
+          <li><strong>Not a version store.</strong> MVCC is the engine's own consistency machinery. The contract is in <a href="#consistency">The consistency contract</a>.</li>
+          <li><strong>Not point-in-time recovery.</strong> Forks are named cuts, not continuous log archiving.</li>
+          <li><strong>Not a public-facing sandbox.</strong> The WASM limits protect reliability and integrity. Authentication and authorization are a layer you put in front.</li>
+          <li><strong>Single-node today.</strong> A store is one directory, locked by one process. Replicas are read-only followers.</li>
+        </ul>
+
+        <h2>The documents</h2>
+        <p>This site is the usage documentation, built from the repository's <code>GUIDE.md</code>. The specs behind it live in the repo — when a detail matters, they win, and when the docs and the code disagree, the code wins.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Document</th><th>Covers</th></tr></thead>
+          <tbody>
+            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/GUIDE.md">GUIDE.md</a></td><td>The usage document this site is built from.</td></tr>
+            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/SKILL.md">SKILL.md</a></td><td>The short entry point for agents: the model in twelve lines, commands, traps.</td></tr>
+            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/WASM.md">WASM.md</a></td><td>The module authoring manual and ABI spec.</td></tr>
+            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/DESIGN.md">DESIGN.md</a></td><td>The architecture as implemented, section by section.</td></tr>
+            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/REPLICATION.md">REPLICATION.md</a></td><td>The replica protocol spec.</td></tr>
+          </tbody>
+        </table></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="installation">
+        <h1>Installation</h1>
+        <p class="lead">Stable Rust, one optional wasm target, two cargo features.</p>
+
+        <p>You need stable Rust (2021 edition). For modules, add the wasm target:</p>
+        <div class="codeblock"><pre>rustup target add wasm32-unknown-unknown</pre></div>
+
+        <p>Build and test the workspace:</p>
+        <div class="codeblock"><pre>cargo build --workspace --release
+cargo test --workspace</pre></div>
+
+        <p>The example modules live in a separate workspace under <code>guests/</code> and only build for wasm32:</p>
+        <div class="codeblock"><pre>cargo build --manifest-path guests/Cargo.toml --target wasm32-unknown-unknown --release
+<span class="c"># artifacts: guests/target/wasm32-unknown-unknown/release/&lt;name&gt;.wasm</span></pre></div>
+
+        <div class="note"><p><span class="lbl">Note</span>If your <code>cargo</code> is not rustup's, point it at rustup's rustc so the wasm32 standard library is found: <code>RUSTC="$(rustup which rustc)" cargo build …</code></p></div>
+
+        <h2>Cargo features</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Feature</th><th>Default</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>wasm</code></td><td>on</td><td>The WASM layer (wasmtime). <code>--no-default-features</code> builds the pure storage engine; module and trigger APIs do not exist.</td></tr>
+            <tr><td><code>fault-injection</code></td><td>off</td><td>A test seam that exposes the IO traits and <code>Db::open_with_io</code>. Never enable it in production.</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Platforms</h2>
+        <p>Linux, where io_uring is probed automatically with a fallback to portable IO, and macOS with portable IO. Docker's default seccomp profile blocks io_uring, so run with <code>--security-opt seccomp=unconfined</code> or set <code>io_backend = Std</code>.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="quickstart">
+        <h1>Quick start</h1>
+        <p class="lead">Embed the engine, drive it from the shell, serve it, and install a first module.</p>
+
+        <h2>Embedded</h2>
+        <div class="codeblock"><div class="bar">main.rs</div><pre><span class="k">use</span> fluent31::{Db, Options, WriteBatch};
+
+<span class="k">let</span> db = Db::open(<span class="s">"./data"</span>, Options::default())?;
+
+db.put(<span class="s">"user/1"</span>, <span class="s">"ada"</span>)?;
+assert_eq!(db.get(<span class="s">b"user/1"</span>)?.as_deref(), Some(&amp;<span class="s">b"ada"</span>[..]));
+
+<span class="c">// atomic batch</span>
+<span class="k">let mut</span> b = WriteBatch::new();
+b.put(<span class="s">"user/2"</span>, <span class="s">"grace"</span>);
+b.delete(<span class="s">"user/0"</span>);
+db.write(b)?;
+
+<span class="c">// ordered scan over [lo, hi)</span>
+<span class="k">for</span> kv <span class="k">in</span> db.iter(Some(<span class="s">b"user/"</span>), Some(<span class="s">b"user0"</span>), <span class="k">false</span>)? {
+    <span class="k">let</span> (k, v) = kv?;
+}
+
+<span class="c">// transaction: read-modify-write with conflict detection</span>
+<span class="k">let mut</span> txn = db.begin();
+<span class="k">let</span> n = txn.get_for_update(<span class="s">b"counter"</span>)?.map(parse).unwrap_or(0);
+txn.put(<span class="s">"counter"</span>, (n + 1).to_string())?;
+txn.commit()?;   <span class="c">// Err(Error::Conflict) if counter changed meanwhile</span></pre></div>
+        <p><code>Db</code> is <code>Send + Sync</code>, so share one handle across threads with <code>Arc&lt;Db&gt;</code>. Dropping it stops and joins the background threads. The memtable is not written out to tables on drop; the next open replays it from the WAL.</p>
+
+        <h2>Shell</h2>
+        <div class="codeblock"><pre>$ cargo run -p fluent-cli -- ./data
+fluent31&gt; put hello world
+OK  (3.02 ms)
+fluent31&gt; get hello
+"world"  (28.7 µs)
+fluent31&gt; scan - - --limit 10
+   1) "hello" =&gt; "world"  (237.6 µs)
+fluent31&gt; help</pre></div>
+
+        <h2>Server</h2>
+        <div class="codeblock"><pre>cargo run -p fluent-server -- ./data <span class="w">--store-name</span> prod
+<span class="c"># graphql      http://127.0.0.1:8317/graphql   (GraphiQL at /)</span>
+<span class="c"># replication  tcp 127.0.0.1:8428</span></pre></div>
+        <div class="codeblock"><pre>curl -s http://127.0.0.1:8317/graphql -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"query":"mutation { put(key:{text:\"user/1\"}, value:{text:\"ada\"}) }"}'</span>
+curl -s http://127.0.0.1:8317/graphql -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"query":"{ get(key:{text:\"user/1\"}) { text } }"}'</span></pre></div>
+
+        <h2>A module</h2>
+        <div class="codeblock"><div class="bar">guests/hello/src/lib.rs — built as a cdylib for wasm32-unknown-unknown</div><pre><span class="k">use</span> fluent_guest::Fail;
+
+<span class="w">#[fluent_guest::query]</span>                         <span class="c">// exports `query`: read-only</span>
+<span class="k">fn</span> count(prefix: Vec&lt;u8&gt;) -&gt; Result&lt;String, Fail&gt; {
+    <span class="k">let</span> n = fluent_guest::scan_prefix(&amp;prefix).map_err(|_| Fail::new(2, <span class="s">"scan"</span>))?.count();
+    Ok(n.to_string())
+}</pre></div>
+        <div class="codeblock"><pre>db.install_module(<span class="s">"count"</span>, &amp;std::fs::read(<span class="s">"count.wasm"</span>)?)?;
+<span class="k">let</span> out = db.query(<span class="s">"count"</span>, <span class="s">b"user/"</span>)?;        <span class="c">// b"2"</span></pre></div>
+
+        <h2>Walkthroughs</h2>
+        <p>Self-asserting examples that build the guest modules first:</p>
+        <div class="codeblock"><pre>cargo run -p fluent31 --example dynamic_index
+cargo run -p fluent31 --example live_stats      <span class="c"># a trigger-maintained GROUP BY, checked against a recount</span>
+cargo run -p fluent31 --example cascade_delete
+cargo run -p fluent31 --example claim
+scripts/demo-orders.sh                          <span class="c"># typed-module demo against a running server</span></pre></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="keys">
+        <h1>Keys, seqnos, snapshots</h1>
+        <p class="lead">Bytes for keys, sequence numbers for time, snapshots for consistency.</p>
+
+        <h2>Keys</h2>
+        <p>A user key is non-empty, does not start with byte <code>0x00</code>, and is at most <code>max_key_size</code> (16&nbsp;KiB). Values go up to <code>max_value_size</code> (256&nbsp;MiB).</p>
+        <p>The <code>0x00</code> prefix is the engine's reserved keyspace, where installed modules, trigger definitions and trigger queues live. Reads and writes of such keys are rejected (<code>InvalidArgument</code> from the API, <code>EINVAL</code> inside a module), and scans clamp to the user keyspace.</p>
+
+        <h2>Prefix scans</h2>
+        <p>There is no prefix argument in the Rust API or the shell. A prefix scan is <code>[prefix, prefix+1)</code>, where <code>prefix+1</code> is the prefix with its last byte incremented: <code>user/</code> scans to <code>user0</code>. GraphQL's <code>scan(prefix:)</code> and the SDK's <code>scan_prefix</code> compute this for you.</p>
+
+        <h2>Seqnos</h2>
+        <p>Every write — a <code>put</code>, a <code>WriteBatch</code>, a transaction commit or an executor's writes — gets a contiguous range of sequence numbers (seqnos) and becomes visible all at once. <code>db.seqno()</code> is the latest committed seqno, the address of "now". A <code>Snapshot</code> reads at one seqno; a GraphQL query operation pins one for all its fields; a module invocation runs at one.</p>
+
+        <h2>Key layout conventions</h2>
+        <p>The examples use <code>&lt;entity&gt;/&lt;id&gt;</code> for records, zero-padded numeric ids so they sort (<code>orders/00000042</code>), and derived data under its own prefix (<code>idx/customer/acme/00000042</code>).</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="consistency">
+        <h1>The consistency contract</h1>
+        <p class="lead">MVCC is how the engine gives you consistent reads and optimistic transactions. It is not an application-level version store, and the rules below follow from that.</p>
+
+        <h2>The rules</h2>
+        <ul>
+          <li><strong>Snapshots are operation-scoped.</strong> Take one, read, drop it. Its cost is store-wide: the GC watermark is the seqno of the oldest live snapshot, and nothing at or above it is reclaimed, for any key, not just the ones the snapshot reads.</li>
+          <li><strong>Seqnos are addresses, not ids.</strong> <code>db.seqno()</code> names the current state and stays resolvable only until GC passes it. Don't store seqnos in application data. A journal rebuild renumbers them wholesale, and a fork or restore mints a new store identity.</li>
+          <li><strong>Pins and forks are coarse, named cuts.</strong> Use them for a handful of deliberate points: before a migration, a staging clone, a rollback anchor. A pin is a durable store-wide GC hold; a fork is a whole database directory. Neither is priced per document, let alone per write.</li>
+          <li><strong>There is no retention policy.</strong> Old versions survive until the GC watermark passes them. There is no "keep N versions of this key".</li>
+        </ul>
+
+        <h2>If you need history, make it data</h2>
+        <p>Bind a changes-mode <a href="#triggers">trigger</a> to the range. Every committed change (kind, key, seqno, and the value up to <code>trigger_inline_value</code>; larger values arrive key-only and you read them back) is delivered durably, in order, with exactly-once effect. Write it under keys you own:</p>
+        <div class="codeblock"><pre>doc/42                     <span class="c">current value       (what the app writes)</span>
+history/doc/42/&lt;seqno&gt;     <span class="c">one entry per write (what the trigger writes)</span></pre></div>
+        <p>History is then scannable, replicable and live-tailable as a subscription, and you prune it yourself with a scan and a delete batch, on whatever schedule suits the data. Modules have no clock, so if entries need timestamps the writer puts them in the value. <code>guests/order_feed</code> is the reference shape.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="transactions">
+        <h1>Transactions</h1>
+        <p class="lead">Optimistic, snapshot isolation, first committer wins.</p>
+
+        <p><code>commit()</code> checks every key read with <code>get_for_update</code> and every key in the write set against the transaction's snapshot; a committed delete conflicts too. The loser gets <code>Error::Conflict</code> with nothing written, and the fix is to run the whole read-modify-write again. A plain <code>get</code> inside a transaction is a consistent read but not a conflict check, so use <code>get_for_update</code> for every key you base a write on.</p>
+
+        <h2>The retry loop</h2>
+        <div class="codeblock"><pre><span class="k">loop</span> {
+    <span class="k">let mut</span> txn = db.begin();
+    <span class="k">let</span> n = txn.get_for_update(<span class="s">b"seq"</span>)?.map(decode).unwrap_or(0);
+    txn.put(<span class="s">"seq"</span>, encode(n + 1))?;
+    <span class="k">match</span> txn.commit() {
+        Ok(()) =&gt; <span class="k">break</span>,
+        Err(fluent31::Error::Conflict) =&gt; <span class="k">continue</span>,
+        Err(e) =&gt; <span class="k">return</span> Err(e),
+    }
+}</pre></div>
+
+        <p>Under <code>SyncMode::Always</code>, concurrent commits share fsyncs with plain writers through group commit. Validation and application happen as one atomic step against every other writer, including plain <code>db.put</code>.</p>
+
+        <div class="note"><p><span class="lbl">Executors too.</span>A WASM <a href="#wasm-modules">executor</a> runs inside exactly this kind of transaction, and the engine drives the retry loop for you — up to <code>execute_retries</code> attempts (3), after which <code>Conflict</code> reaches the caller and the loop above becomes the caller's job again. That is why an executor must be a pure function of its input and the database state.</p></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="sql-mapping">
+        <h1>Coming from SQL</h1>
+        <p class="lead">Every familiar feature maps onto a fluent31 primitive, usually with a working reference module in <code>guests/</code>.</p>
+
+        <div class="tablewrap"><table>
+          <thead><tr><th>You want</th><th>Use</th><th>Reference</th></tr></thead>
+          <tbody>
+            <tr><td><code>SELECT … WHERE key LIKE 'p%'</code></td><td><code>iter</code>/<code>scan</code> with a prefix range</td><td><a href="#embedded-api/embedded-api--scans">Scans</a></td></tr>
+            <tr><td>an aggregate over a range</td><td>a <code>query</code> module</td><td><a href="#ex-queries">Queries in the database</a></td></tr>
+            <tr><td>a stored procedure, a multi-key transaction</td><td>an <code>execute</code> module</td><td><a href="#ex-executors">Invariants &amp; procedures</a></td></tr>
+            <tr><td>a <code>UNIQUE</code> constraint</td><td><code>execute</code> plus <code>get_for_update</code></td><td><a href="#ex-executors">Invariants &amp; procedures</a></td></tr>
+            <tr><td><code>CREATE INDEX</code></td><td>a keys-mode trigger</td><td><a href="#ex-indexes">Secondary indexes</a></td></tr>
+            <tr><td>an index created at runtime from a spec</td><td>a changes-mode trigger</td><td><a href="#ex-indexes">Secondary indexes</a></td></tr>
+            <tr><td>a <code>GROUP BY</code> that is always current</td><td>a changes-mode trigger folding deltas</td><td><a href="#ex-views-feeds">Views, feeds, cascades</a></td></tr>
+            <tr><td><code>ON DELETE CASCADE</code></td><td>a changes-mode trigger</td><td><a href="#ex-views-feeds">Views, feeds, cascades</a></td></tr>
+            <tr><td>CDC, an audit log, an event stream</td><td>a changes-mode trigger plus a <code>feed</code> subscription</td><td><a href="#ex-views-feeds">Views, feeds, cascades</a></td></tr>
+            <tr><td>per-row history</td><td>a changes-mode trigger writing <code>history/…</code> keys</td><td><a href="#consistency">The consistency contract</a></td></tr>
+            <tr><td>a migration script</td><td>a one-shot executor</td><td><a href="#ex-oneshot">Migrations &amp; one-shots</a></td></tr>
+            <tr><td>a staging copy, a rollback point</td><td>a fork or a pin</td><td><a href="#ex-forks">Forks in practice</a></td></tr>
+            <tr><td>a read replica, an edge cache</td><td>replication</td><td><a href="#replication">Replication</a></td></tr>
+          </tbody>
+        </table></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="choosing">
+        <h1>Choosing the shape</h1>
+        <p class="lead">fluent31 gives you six tools where SQL gives you one language. Start from the category of database work you have, not from the tool.</p>
+
+        <div class="tablewrap"><table>
+          <thead><tr><th>Your work</th><th>Shape</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>read a key or a range you can name</td><td>plain <code>get</code> / <code>iter</code> / <code>scan</code></td><td>already optimal; no module needed</td></tr>
+            <tr><td>a computation over many keys whose result is small</td><td>a <a href="#ex-queries">query module</a></td><td>the data stays in the database; only the answer travels</td></tr>
+            <tr><td>a write whose correctness depends on what was read</td><td>an <a href="#ex-executors">executor</a> (or an embedded <code>Txn</code>)</td><td>OCC makes the invariant hold under concurrency</td></tr>
+            <tr><td>derived data that must stay current no matter who writes</td><td>a <a href="#ex-indexes">trigger</a></td><td>the engine invokes it after every commit into the range</td></tr>
+            <tr><td>a change you make once — backfill, migration, repair</td><td>a <a href="#ex-oneshot">one-shot executor</a></td><td>nothing installed; the committed writes are the only trace</td></tr>
+            <tr><td>a safety point, a second environment, a backup</td><td>a <a href="#ex-forks">fork or pin</a></td><td>a complete consistent copy at hard-link cost</td></tr>
+            <tr><td>reads far from the store</td><td>a <a href="#replication">replica or edge cache</a></td><td>read-only follower scoped to a key range</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Module or app code?</h2>
+        <p>If your process is the only writer and the logic fits there, the embedded API is enough — <code>db.begin()</code> gives you the same OCC transaction an executor gets. Write a module when one of three things is true:</p>
+        <ul>
+          <li><strong>The computation must run near the data.</strong> An aggregate over a million keys should not ship a million values to the client for five numbers.</li>
+          <li><strong>The invariant must hold for every writer.</strong> An installed executor is the same logic on every surface — Rust, shell, GraphQL — so no caller can skip the constraint.</li>
+          <li><strong>The logic must react to writes you don't control.</strong> Only a trigger sees every commit into a range, whoever made it.</li>
+        </ul>
+
+        <h2>Installed or one-shot?</h2>
+        <p>Install what is part of the system: called repeatedly, backing a trigger, or exposed as a typed GraphQL field. Installed bytes are versioned in the store, recovered, forked and time-travelable, so the store can answer "what code ran here". One-shot what is an event: migrations, backfills, repairs. A one-shot leaves no record in the database — the script in your repo and its git history are the audit trail. Install the big audited migrations; one-shot the rest.</p>
+
+        <h2>Keys mode or changes mode?</h2>
+        <p>The two trigger modes are two different contracts, and the choice is about what your derived state is a function of.</p>
+        <ul>
+          <li><strong>Keys mode reconciles.</strong> An event means "this key was touched — reconcile it". Re-touches coalesce. Right when derived state is a function of <em>current</em> state, as an index is: read the key, upsert or remove the entry, converge.</li>
+          <li><strong>Changes mode folds.</strong> Every committed op arrives once, in order, with its value. Right when you need op kinds, ordering, or per-op deltas — feeds, exact aggregates, cascades — where coalescing would destroy information.</li>
+        </ul>
+        <p>Rule of thumb: if a replay of the same event must be harmless by <em>re-reading</em>, use keys mode; if it must be harmless by <em>overwriting the same derived keys</em>, use changes mode.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="ex-queries">
+        <h1>Queries in the database</h1>
+        <p class="lead">The category: report-shaped reads — count, sum, rank, filter, limit — where the answer is small and the data it summarizes is not.</p>
+
+        <p>This is SQL's aggregate <code>SELECT</code>: <code>count(*)</code>, <code>sum(...)</code>, <code>ORDER BY ... LIMIT</code> with a <code>HAVING</code> clause. Doing it from the client means scanning the whole range over the API to compute a few numbers. A <code>query</code> module moves the loop into the database: it runs at one pinned snapshot (so the report is internally consistent), it can only read (writes return <code>EROFS</code>), and it is callable from every surface.</p>
+
+        <h2>When to reach for it</h2>
+        <ul>
+          <li>The result is much smaller than the data scanned.</li>
+          <li>The whole answer must come from one consistent snapshot.</li>
+          <li>You want the same report callable from Rust, the shell and GraphQL.</li>
+        </ul>
+        <p><strong>When not:</strong> point reads and plain range reads. <code>get</code> and <code>scan</code> are already optimal — wrapping them in a module adds a WASM invocation and removes nothing.</p>
+
+        <h2>The shape</h2>
+        <p><code>guests/agg</code> is the minimal reference — "<code>SELECT count, sum, min, max WHERE prefix</code>" as one fold over a scan:</p>
+        <div class="codeblock"><div class="bar">guests/agg/src/lib.rs (trimmed)</div><pre><span class="w">#[fluent_guest::query]</span>
+<span class="k">fn</span> agg(prefix: Vec&lt;u8&gt;) -&gt; Result&lt;Vec&lt;u8&gt;, Fail&gt; {
+    <span class="k">if</span> prefix.is_empty() {
+        <span class="k">return</span> Err(Fail::new(2, <span class="s">"empty prefix not allowed"</span>));
+    }
+    <span class="k">let</span> scan = fluent_guest::scan_prefix(&amp;prefix).map_err(|_| Fail::new(3, <span class="s">"scan failed"</span>))?;
+    <span class="k">let</span> (<span class="k">mut</span> count, <span class="k">mut</span> sum, ..) = ..;
+    <span class="k">for</span> (_key, value) <span class="k">in</span> scan {
+        count += 1;
+        <span class="c">// fold the value into the aggregates</span>
+    }
+    Ok(out)                          <span class="c">// 40 bytes out, however many keys in</span>
+}</pre></div>
+        <p>The category's contract, visible even in the trimmed loop: validate the input (distinct <code>Fail</code> code per failure class), scan once, fold, return the answer — never the rows.</p>
+
+        <h2>The typed variant</h2>
+        <p><code>guests/top_customers</code> is the same category with a <code>describe</code> descriptor, so installing it (as <code>topCustomers</code> — the install name is the field name) creates a real GraphQL field — the <code>ORDER BY totalCents DESC LIMIT n HAVING total &gt;= floor</code> a SQL layer would run, executing inside the database at the operation's snapshot:</p>
+        <div class="codeblock"><pre>query { topCustomers(limit: 3, minTotalCents: <span class="s">"1000"</span>) { customer orders totalCents avgCents } }</pre></div>
+        <p>Two category-level details worth copying from it: <strong>clamp caller-supplied limits</strong> in the module (it caps <code>limit</code> at 100 — the module is the last line of defense, whatever the surface), and <strong>decide the corrupt-record policy per role</strong>: a read-only report may skip a malformed record and <code>log</code> it, because it damages nothing; a writer never may (see <a href="#ex-executors">Invariants &amp; procedures</a>).</p>
+
+        <h2>Run it</h2>
+        <div class="codeblock"><pre>db.query(<span class="s">"agg"</span>, <span class="s">b"accounts/"</span>)?          <span class="c">// Rust</span>
+query agg accounts/                      <span class="c"># shell</span>
+{ wasm(module: <span class="s">"agg"</span>, input: {text: <span class="s">"accounts/"</span>}) { hex } }   <span class="c"># GraphQL, untyped</span></pre></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="ex-executors">
+        <h1>Invariants &amp; procedures</h1>
+        <p class="lead">The category: writes whose correctness depends on what was read — transfers, unique claims, id allocation, multi-record updates that must land together.</p>
+
+        <p>This is SQL's stored procedure, its <code>UNIQUE</code> constraint, its serializable read-modify-write. In fluent31 it is an <code>execute</code> module: each call runs in a fresh optimistic transaction, exit 0 commits, and a conflicting concurrent write re-runs the whole attempt against a fresh snapshot. The engine's OCC loop is what turns "read, decide, write" into an invariant that holds under concurrency.</p>
+
+        <h2>When to reach for it</h2>
+        <ul>
+          <li>More than one key must change together, or not at all.</li>
+          <li>A constraint must survive concurrent writers: uniqueness, non-negative balances, monotonic ids.</li>
+          <li>Every surface must go through the same logic — an installed executor cannot be bypassed by a caller doing raw puts <em>if</em> callers write through it.</li>
+        </ul>
+        <p><strong>When not:</strong> independent blind writes — a <code>WriteBatch</code> is already atomic. And if your Rust process is the only writer, an embedded <code>Txn</code> with <code>get_for_update</code> is the same machinery without the module.</p>
+
+        <h2>The shape</h2>
+        <p><code>guests/claim</code> is the schema-free <code>UNIQUE</code> constraint in one match statement — concurrent claimers race through OCC and exactly one wins:</p>
+        <div class="codeblock"><div class="bar">guests/claim/src/lib.rs (trimmed)</div><pre><span class="k">let</span> key = format!(<span class="s">"uname/{}"</span>, input.username);
+<span class="k">let</span> already = <span class="k">match</span> fluent_guest::get_for_update(key.as_bytes()) {
+    Ok(Some(holder)) <span class="k">if</span> holder == input.owner.as_bytes() =&gt; <span class="k">true</span>,  <span class="c">// idempotent re-claim</span>
+    Ok(Some(holder)) =&gt; <span class="k">return</span> Err(Fail::new(1, format!(<span class="s">"taken by {..}"</span>))),
+    Ok(None) =&gt; {
+        fluent_guest::put(key.as_bytes(), input.owner.as_bytes())
+            .map_err(|_| Fail::new(3, <span class="s">"claim write failed"</span>))?;
+        <span class="k">false</span>
+    }
+    Err(_) =&gt; <span class="k">return</span> Err(Fail::new(3, <span class="s">"claim read failed"</span>)),
+};</pre></div>
+        <p>Everything the category demands is in those lines:</p>
+        <ul>
+          <li><strong><code>get_for_update</code> on every key a write depends on.</strong> That puts the key in the conflict set: two concurrent claims of one name cannot both commit — the loser re-runs, sees the winner, and fails cleanly.</li>
+          <li><strong>Idempotent under re-execution.</strong> The module is a pure function of (input, snapshot). A re-claim by the current owner is success (<code>"already": true</code>), not an error, so client retries and OCC re-runs are harmless.</li>
+          <li><strong>Distinct exit codes per failure class</strong>, message in the output — the caller can tell "taken" from "bad input" from "engine trouble".</li>
+        </ul>
+
+        <h2>Scaling the shape up</h2>
+        <p><code>guests/transfer</code> is the two-account balance move: both balances locked with <code>get_for_update</code>, insufficient funds as its own clean exit code, checked arithmetic throughout — an executor that overflows corrupts durable state.</p>
+        <p><code>guests/place_order</code> is the full stored procedure: allocate a monotonic id from a counter key, write the order record, fold the amount into the customer's running stats — three coordinated writes in one transaction, which is exactly the point of an executor over plain <code>put</code>. Its strictest rule is the one to internalize: <strong>present-but-malformed state is corruption, not a default.</strong> An unparseable counter fails loudly with its own code — "reset to 1" would silently overwrite existing orders.</p>
+
+        <h2>The caller's side</h2>
+        <p><code>execute_retries</code> bounds the engine's loop — 3 attempts by default. Under real contention (twenty writers on one key) those attempts get spent and <code>Error::Conflict</code> reaches the caller with nothing written. That is not a broken invariant; it is the caller's turn. Either raise <code>execute_retries</code> or retry from outside:</p>
+        <div class="codeblock"><pre><span class="k">let</span> out: Vec&lt;u8&gt; = <span class="k">loop</span> {
+    <span class="k">match</span> db.execute(<span class="s">"claim"</span>, &amp;input) {
+        Ok(out) =&gt; <span class="k">break</span> out,
+        Err(fluent31::Error::Conflict) =&gt; <span class="k">continue</span>,   <span class="c">// retries spent; the whole call is safe to re-run</span>
+        Err(e) =&gt; <span class="k">return</span> Err(e.into()),
+    }
+};</pre></div>
+        <p>Over GraphQL the same outcome is <code>CONFLICT</code> in <code>errors[].extensions.code</code>, and the client retries the mutation. Because the executor is a pure function of its input and the data, re-running the whole call is always safe — which is why that rule matters.</p>
+
+        <h2>Run it</h2>
+        <div class="codeblock"><pre>cargo run -p fluent31 --example claim    <span class="c"># N concurrent claimers, exactly one winner, asserted</span>
+db.execute(<span class="s">"claim"</span>, br#<span class="s">"{"username":"ada","owner":"a-1"}"</span>#)?     <span class="c">// a typed module takes the same JSON here</span>
+mutation { placeOrder(customer: <span class="s">"you"</span>, amountCents: <span class="s">"4200"</span>) { id } }   <span class="c"># typed field: the module is installed as "placeOrder"</span></pre></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="ex-indexes">
+        <h1>Secondary indexes</h1>
+        <p class="lead">The category: finding records by something other than their key. SQL's <code>CREATE INDEX</code>, as a trigger plus a key convention.</p>
+
+        <p>An index in fluent31 is not a special structure — it is ordinary keys under their own prefix, maintained by a trigger so it stays current no matter who writes:</p>
+        <div class="codeblock"><pre>orders/00000042                   <span class="c">the record            (what the app writes)</span>
+idx/customer/acme/00000042  ""    <span class="c">the index entry       (what the trigger writes)</span>
+idx/order/00000042          acme  <span class="c">the back-pointer      (how updates find the stale entry)</span></pre></div>
+        <p>The lookup is a prefix scan of <code>idx/customer/acme/</code>. No writer cooperates: plain puts, batches, transactions and other executors all keep the index current, because the trigger fires on every commit into the range.</p>
+
+        <h2>The keys-mode shape</h2>
+        <p><code>guests/customer_index</code> is the reference. Keys mode fits indexing exactly because an index is a function of <em>current</em> state — the event only says "this key was touched", and the module reconciles:</p>
+        <div class="codeblock"><div class="bar">guests/customer_index/src/lib.rs (the reconcile skeleton)</div><pre><span class="k">let</span> old = fluent_guest::get(&amp;back_key);          <span class="c">// what the index says now</span>
+<span class="k">let</span> cur = <span class="c">/* read the record; its customer, or None if deleted */</span>;
+<span class="k">if</span> old == cur { <span class="k">continue</span>; }                      <span class="c">// replay or no-op touch</span>
+<span class="k">if let</span> Some(o) = &amp;old {
+    fluent_guest::delete(&amp;stale_entry(o))?;      <span class="c">// unindex via the back-pointer</span>
+}
+<span class="k">match</span> &amp;cur {
+    Some(c) =&gt; {
+        fluent_guest::put(&amp;entry(c), <span class="s">b""</span>)?;      <span class="c">// index current state</span>
+        fluent_guest::put(&amp;back_key, c)?;
+    }
+    None =&gt; fluent_guest::delete(&amp;back_key)?,   <span class="c">// gone: drop the back-pointer too</span>
+}</pre></div>
+        <p>The two category rules this encodes:</p>
+        <ul>
+          <li><strong>Reconcile, don't apply.</strong> Read current state and make the index match it. Written this way the module converges under replay, coalescing and reordering — all of which keys mode will do to you.</li>
+          <li><strong>Keep a back-pointer, and delete it with the record.</strong> The event carries no old value, so updates and deletes need the module's own record of what it indexed last time. Dropping the back-pointer on delete is not optional: if it lingered, a delete followed by a re-create would compare equal (<code>old == cur</code>) and the record would never be re-indexed.</li>
+        </ul>
+
+        <h2>Indexes created at runtime</h2>
+        <p><code>guests/dynamic_index</code> pushes the category further: index <em>definitions</em> are themselves ordinary keys. Writing <code>idxspec/&lt;name&gt; = {"field": "city"}</code> creates a fully backfilled index over that field; updating the spec swaps generations; deleting it tears the index down. One module backs two changes-mode triggers — one on the data range, one on the spec range — and the backfill runs inside the same transaction that consumes the spec event, so the index appears atomically, already complete.</p>
+        <p>It is also the answer to a sharp edge: <strong>trigger registration does not backfill.</strong> Keys already in the range fire no events. Either scan on demand as <code>dynamic_index</code> does, or re-put the range with a <a href="#ex-oneshot">one-shot executor</a>.</p>
+
+        <h2>Run it</h2>
+        <div class="codeblock"><pre>mktrig customerIndex customer_index orders/ orders0      <span class="c"># shell</span>
+cargo run -p fluent31 --example dynamic_index            <span class="c"># spec write → backfilled index, asserted</span></pre></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="ex-views-feeds">
+        <h1>Views, feeds, cascades</h1>
+        <p class="lead">The category: derived data that must be exact and ordered — live <code>GROUP BY</code> tables, audit logs and event streams, referential cleanup. All changes mode.</p>
+
+        <p>Where an index is a function of current state (reconcile — <a href="#ex-indexes">keys mode</a>), everything on this page needs the actual sequence of committed operations: op kinds, order, values, one event per op. That is changes mode, and the engine's delivery guarantees — durable capture, exactly-once effects, no stacking — are what make these patterns correct rather than approximately correct.</p>
+
+        <h2>Live aggregates</h2>
+        <p><code>guests/live_stats</code> is the <code>SELECT count(*), sum(cents) GROUP BY customer</code> that never runs a query. Every committed change adjusts the group's totals by exactly its delta:</p>
+        <div class="codeblock"><div class="bar">guests/live_stats/src/lib.rs (the fold skeleton)</div><pre><span class="k">let</span> new = <span class="c">/* what this record is NOW: the event's inline value */</span>;
+<span class="k">let</span> old = fluent_guest::get(&amp;fold_key);   <span class="c">// what it contributed BEFORE</span>
+<span class="k">if</span> old == new { <span class="k">continue</span>; }
+<span class="k">if let</span> Some((customer, cents)) = &amp;old { adjust(customer, -1, -cents)?; }
+<span class="k">if let</span> Some((customer, cents)) = &amp;new { adjust(customer, 1, cents)?; }
+<span class="c">// then record the new contribution under fold_key</span></pre></div>
+        <p>Why this is exact and not merely close: the fold commits atomically with the events' consumption, so effects are exactly-once — totals cannot drift under retries, crashes or concurrency. Updates move a record between groups; deletes subtract it; the <code>fold/</code> back-pointer is what makes both subtractable. The demo (<code>cargo run -p fluent31 --example live_stats</code>) proves it: after a concurrent write storm, the folded stats equal a full recount.</p>
+
+        <h2>Changefeeds and audit logs</h2>
+        <p><code>guests/order_feed</code> materializes an ordered, durable changefeed — the CDC / audit-log / event-sourcing shape. One JSON entry per committed op, written under <code>feed/&lt;seqno, zero-padded&gt;</code>. Deriving the feed key from the seqno is the category's core trick: a replay after a crash or conflict <em>overwrites</em> the same entries instead of duplicating them.</p>
+        <p>Because it also declares a <code>feed</code> in its descriptor, installing it gives a typed live subscription. The idiom that falls out is the whole point:</p>
+        <div class="codeblock"><pre>history:  { scan(prefix: {text: <span class="s">"feed/"</span>}) { ... } }        <span class="c"># replayable, replicable</span>
+live:     subscription { orderFeed { event { seqno op id record } } }</pre></div>
+        <p>A disconnected consumer misses nothing durable — history is a scan, live is the tail of the same range. This is also how you build <a href="#consistency">per-record history</a>: the same shape, keyed <code>history/&lt;id&gt;/&lt;seqno&gt;</code>.</p>
+
+        <h2>Cascades</h2>
+        <p><code>guests/cascade_delete</code> is <code>ON DELETE CASCADE</code>: when a parent <code>doc/&lt;id&gt;</code> is deleted, scan and delete its <code>doc/&lt;id&gt;/…</code> subtree. Two contract details carry the pattern:</p>
+        <ul>
+          <li><strong>Op kinds matter.</strong> Only <code>Delete</code> events of parent keys act; puts and descendant traffic are filtered out in code. Keys mode would have to read every touched key just to ask "was this a delete?".</li>
+          <li><strong>No stacking, by construction.</strong> The sweep deletes keys inside its own watched range, yet trigger writes never generate events — cascades cannot loop or amplify. One event, one sweep, done.</li>
+        </ul>
+
+        <h2>Run them</h2>
+        <div class="codeblock"><pre>cargo run -p fluent31 --example live_stats       <span class="c"># folded stats == full recount, asserted</span>
+cargo run -p fluent31 --example cascade_delete
+mktrig orderFeed order_feed orders/ orders0      <span class="c"># mode auto-detected from on_apply</span></pre></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="ex-oneshot">
+        <h1>Migrations &amp; one-shots</h1>
+        <p class="lead">The category: changes you make once — format migrations, backfills, data repair, ad-hoc admin jobs. An ordinary executor, invoked without being installed.</p>
+
+        <p>One-shot invocation (<code>execonce</code> in the shell, <code>wasmExecuteOnce</code> in GraphQL, <code>db.execute_wasm</code> in Rust) runs module bytes that are never stored: nothing is listed, cached or replicated, and the committed writes are the only trace. Same ABI, same SDK, same limits, same OCC retry loop. Triggers still fire on its writes, so trigger-maintained indexes and feeds stay correct straight through a migration.</p>
+
+        <h2>The recipe</h2>
+        <p>Walk a prefix, skip already-migrated records, rewrite the rest — from <a href="https://github.com/orthory/fluent31/blob/master/WASM.md">WASM.md</a> §10:</p>
+        <div class="codeblock"><div class="bar">user_v2.rs (a one-shot migration)</div><pre><span class="w">#[fluent_guest::execute]</span>
+<span class="k">fn</span> user_v2(_input: Vec&lt;u8&gt;) -&gt; Result&lt;String, Fail&gt; {
+    <span class="k">let</span> scan = fluent_guest::scan_prefix(<span class="s">b"user/"</span>).map_err(|e| Fail::new(2, <span class="s">"scan"</span>))?;
+    <span class="k">let mut</span> migrated = 0u64;
+    <span class="k">for</span> (key, value) <span class="k">in</span> scan {
+        <span class="k">let</span> old: serde_json::Value = serde_json::from_slice(&amp;value)
+            .map_err(|_| Fail::new(3, <span class="s">"corrupt record"</span>))?;   <span class="c">// fail loudly, never default</span>
+        <span class="k">if</span> old.get(<span class="s">"v"</span>).is_some() {
+            <span class="k">continue</span>;              <span class="c">// already v2: idempotent re-run</span>
+        }
+        <span class="k">let</span> new = serde_json::json!({ <span class="s">"v"</span>: 2, <span class="s">"name"</span>: old });
+        fluent_guest::put(&amp;key, new.to_string().as_bytes())
+            .map_err(|e| Fail::new(4, <span class="s">"put"</span>))?;
+        migrated += 1;
+    }
+    Ok(format!(<span class="s">"migrated {migrated}"</span>))
+}</pre></div>
+        <div class="codeblock"><pre>$ fluent-cli ./db
+&gt; execonce guests/target/wasm32-unknown-unknown/release/user_v2.wasm
+migrated 41283</pre></div>
+        <p>The whole migration is <strong>one transaction</strong>: atomic even across conflict retries, invisible until commit, serialized against concurrent writers by OCC. That is also its bound — the write set must fit <code>max_txn_write_bytes</code> (256 MiB) and the work must fit <code>wasm_fuel</code>. For a bigger keyspace, shard by cursor: take a start key as input, migrate up to N records, return the next start key, and drive the loop from the caller. Each chunk is then its own atomic, retry-tolerant transaction.</p>
+
+        <h2>The category's rules</h2>
+        <ol>
+          <li><strong>Idempotent by inspection.</strong> Detect an already-migrated record in the data itself and skip it. Never track "did it run" anywhere else — a retried attempt or a re-run must always be safe.</li>
+          <li><strong>Fail loudly on the unexpected.</strong> A record that parses wrong is corruption, with its own exit code. A non-zero exit aborts the whole transaction: nothing half-migrated ever survives.</li>
+          <li><strong>Rehearse on a fork.</strong> Fork the instance, run the one-shot against the fork (its own <code>/graphql/&lt;instanceId&gt;</code> endpoint under the server), inspect the result, then run it on the primary. See <a href="#ex-forks">Forks in practice</a>.</li>
+          <li><strong>The repo is the audit trail.</strong> A one-shot leaves no record in the store, so the script and its git history are the record of what ran. Install the big audited migrations; one-shot the rest.</li>
+        </ol>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="ex-forks">
+        <h1>Forks in practice</h1>
+        <p class="lead">The category: everything you'd want a copy of production for — rehearsal, staging, rollback anchors, backups — priced at hard-link cost.</p>
+
+        <p><code>fork("name")</code> publishes a complete, consistent database directory under <code>archive/&lt;name&gt;/</code>, built from hard links: cost proportional to the file count, not the data. Opening it gives a live, writable, copy-on-write clone with its own identity — modules, triggers and data included. The playbooks below are the category; <a href="#forks">Forks, pins, clones</a> has the mechanics.</p>
+
+        <h2>The pre-change anchor</h2>
+        <p>Before anything risky — a migration, a bulk import, a new trigger over live data:</p>
+        <div class="codeblock"><pre>db.fork(<span class="s">"pre-migration"</span>)?;               <span class="c">// anchor now</span>
+<span class="c">// or: pin now, decide later whether to materialize the cut</span>
+<span class="k">let</span> p = db.pin(<span class="s">"pre-import"</span>)?;
+<span class="k">let</span> f = db.fork_at(<span class="s">"rollback"</span>, p.seqno)?;</pre></div>
+        <p>If the change goes wrong, rollback is a directory swap: stop the process, open the fork (or <code>restore_to</code> a pristine copy) as the new primary. Replicas notice the new identity and re-attach on their own. If the change goes right, <code>delete_fork</code> and move on. A pin is the lighter anchor — a durable GC hold you can still <code>fork_at</code> later — but it costs store-wide retention until <code>unpin</code>.</p>
+
+        <h2>The rehearsal</h2>
+        <p>Under the server, every fork is a full instance at <code>/graphql/&lt;instanceId&gt;</code> — same schema, same modules, its own data. That makes "try it on prod without trying it on prod" one mutation:</p>
+        <div class="codeblock"><pre>mutation { fork(name: <span class="s">"rehearsal"</span>) { instanceId } }
+<span class="c"># run the migration one-shot against /graphql/&lt;instanceId&gt;, inspect the result,</span>
+<span class="c"># then run the same bytes against the primary — or delete the fork and rethink</span></pre></div>
+        <p>This is the standing advice from <a href="#ex-oneshot">Migrations &amp; one-shots</a>: rehearse every migration on a fork first, with the exact bytes you will run for real.</p>
+
+        <h2>The staging clone</h2>
+        <p>Open a fork and you have a second environment with real data that cannot touch the first: new writes land in the clone's own files, its compactions unlink only its own links, the parent is untouched. Forks branch, they do not follow — the clone sees nothing the parent commits after the cut, which is exactly what a staging environment wants.</p>
+
+        <h2>The backup</h2>
+        <p>A fork <em>is</em> a consistent snapshot backup on the same filesystem, instantly. For an off-box copy, copy <code>archive/&lt;name&gt;/</code> — a plain directory tree — or <code>restore_to</code> onto a mount point; the hard links copy out as full files. For continuous off-box protection, that is the <a href="#durability">journal's</a> job, not a fork cadence.</p>
+
+        <h2>Identical cuts</h2>
+        <p>Seeding two environments that must start byte-identical: capture one seqno, cut twice.</p>
+        <div class="codeblock"><pre><span class="k">let</span> s = db.seqno();
+<span class="k">let</span> a = db.fork_at(<span class="s">"replica-a"</span>, s)?;
+<span class="k">let</span> b = db.fork_at(<span class="s">"replica-b"</span>, s)?;      <span class="c">// same cut, same contents</span></pre></div>
+
+        <h2>What forks are not for</h2>
+        <p>Per-document versioning and point-in-time recovery. Forks and pins are coarse, named, and few — a handful of deliberate cuts, each holding GC for the whole store while it matters. If you need history per record, <a href="#ex-views-feeds">materialize it with a changes-mode trigger</a>; that is the <a href="#consistency">consistency contract</a>.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="embedded-api">
+        <h1>Embedded API</h1>
+        <p class="lead">The <code>fluent31</code> crate, embedded in a Rust process: open, read, write, scan, snapshot, transact, maintain.</p>
+
+        <h2>Opening</h2>
+        <div class="codeblock"><pre><span class="k">let</span> db = Db::open(path, Options {
+    sync: SyncMode::Periodic { every: Duration::from_millis(50) },
+    ..Options::default()
+})?;</pre></div>
+        <p><code>Db::open</code> creates the directory when <code>create_if_missing</code> is set (the default), takes an exclusive flock so that a second open of the same directory fails, recovers from the WAL, and then starts the flush, compaction, commit and trigger threads. Recovery time is proportional to the unflushed WAL.</p>
+
+        <h2>Options</h2>
+        <p>Every field, with its default:</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>create_if_missing</code></td><td><code>bool</code></td><td><code>true</code></td><td>Create the directory. <code>false</code> fails on a missing store.</td></tr>
+            <tr><td><code>sync</code></td><td><code>SyncMode</code></td><td><code>Always</code></td><td>The <a href="#durability">durability mode</a>.</td></tr>
+            <tr><td><code>io_backend</code></td><td><code>IoBackend</code></td><td><code>Auto</code></td><td><code>Auto</code> probes io_uring and falls back; <code>Uring</code> forces it and open fails where unsupported; <code>Std</code> forces pread/pwrite.</td></tr>
+            <tr><td><code>wasm_enabled</code></td><td><code>bool</code></td><td><code>true</code></td><td><code>false</code> makes the WASM layer inert at runtime: module and trigger calls return <code>Error::Wasm</code>, the trigger runner does not start, and writes made while disabled never fire triggers. Listing still works.</td></tr>
+            <tr><td><code>store_name</code></td><td><code>Option&lt;String&gt;</code></td><td><code>None</code></td><td>An operator-chosen name, unique across your fleet, that fixes the store identity. Required for replication. Set it once: an unnamed store adopts it, an omitted name on reopen keeps the persisted one, and a different name is <code>InvalidArgument</code>. A fork's name is fixed at fork time.</td></tr>
+            <tr><td><code>memtable_size</code></td><td><code>usize</code></td><td>8 MiB</td><td>Freeze and flush the memtable past this.</td></tr>
+            <tr><td><code>max_immutable_memtables</code></td><td><code>usize</code></td><td>2</td><td>Frozen memtables waiting for flush before writers stall.</td></tr>
+            <tr><td><code>block_size</code></td><td><code>usize</code></td><td>8 KiB</td><td>Target data block size in tables.</td></tr>
+            <tr><td><code>compression</code></td><td><code>Compression</code></td><td><code>None</code></td><td><code>Lz4</code> compresses the data and index blocks of newly written tables. Reads never depend on it; a store is readable under either setting.</td></tr>
+            <tr><td><code>bloom_bits_per_key</code></td><td><code>usize</code></td><td>10</td><td>Bloom filter budget.</td></tr>
+            <tr><td><code>block_cache_size</code></td><td><code>usize</code></td><td>64 MiB</td><td>The shared block cache (table blocks and value-log records up to 64 KiB).</td></tr>
+            <tr><td><code>l0_compaction_trigger</code></td><td><code>usize</code></td><td>4</td><td>L0 runs that trigger a merge into L1.</td></tr>
+            <tr><td><code>tier_width</code></td><td><code>usize</code></td><td>4</td><td>Runs per level that trigger a merge to the next.</td></tr>
+            <tr><td><code>max_levels</code></td><td><code>usize</code></td><td>7</td><td>The level count; the last level is one leveled run.</td></tr>
+            <tr><td><code>l0_stall_trigger</code></td><td><code>usize</code></td><td>12</td><td>L0 runs at which writers stall until compaction catches up.</td></tr>
+            <tr><td><code>target_file_size</code></td><td><code>u64</code></td><td>64 MiB</td><td>Compaction splits runs into fragments of about this size.</td></tr>
+            <tr><td><code>value_threshold</code></td><td><code>usize</code></td><td>4096</td><td>Values at or above this go to the value log; smaller ones stay inline. <code>0</code> separates everything and <code>usize::MAX</code> disables separation.</td></tr>
+            <tr><td><code>vlog_file_size</code></td><td><code>u64</code></td><td>128 MiB</td><td>Seal and rotate the value-log head at this size.</td></tr>
+            <tr><td><code>vlog_gc_ratio</code></td><td><code>f64</code></td><td>0.5</td><td>A sealed value-log file becomes a GC victim once this fraction of it is known dead.</td></tr>
+            <tr><td><code>max_key_size</code></td><td><code>usize</code></td><td>16 KiB</td><td>Hard cap.</td></tr>
+            <tr><td><code>max_value_size</code></td><td><code>usize</code></td><td>256 MiB</td><td>Hard cap.</td></tr>
+            <tr><td><code>max_txn_write_bytes</code></td><td><code>usize</code></td><td>256 MiB</td><td>Cap on one transaction's buffered writes, executors included.</td></tr>
+            <tr><td><code>sub_queue_bytes</code></td><td><code>usize</code></td><td>8 MiB</td><td>Buffered bytes per change-stream subscriber. Past it the subscriber is cut off (<code>Lagged</code>); writers are never stalled.</td></tr>
+            <tr><td><code>wasm_fuel</code></td><td><code>u64</code></td><td>1e9</td><td>Fuel per invocation. Exhaustion traps.</td></tr>
+            <tr><td><code>wasm_memory_limit</code></td><td><code>usize</code></td><td>64 MiB</td><td>Linear memory cap per invocation.</td></tr>
+            <tr><td><code>execute_retries</code></td><td><code>usize</code></td><td>3</td><td>Attempts per executor call, the first included (minimum 1). A commit conflict re-runs until they are spent, then the call returns <code>Conflict</code>.</td></tr>
+            <tr><td><code>max_wasm_input</code></td><td><code>usize</code></td><td>64 MiB</td><td>Input cap, rejected before execution.</td></tr>
+            <tr><td><code>max_wasm_output</code></td><td><code>usize</code></td><td>32 MiB</td><td>Output cap (<code>ENOSPC</code> to the guest).</td></tr>
+            <tr><td><code>max_wasm_log</code></td><td><code>usize</code></td><td>1 MiB</td><td>Guest log cap.</td></tr>
+            <tr><td><code>max_wasm_scans</code></td><td><code>usize</code></td><td>64</td><td>Open scan handles per invocation.</td></tr>
+            <tr><td><code>wasm_module_cache</code></td><td><code>usize</code></td><td>32</td><td>Compiled modules kept in memory, keyed by content hash.</td></tr>
+            <tr><td><code>trigger_batch</code></td><td><code>usize</code></td><td>512</td><td>Events per trigger invocation.</td></tr>
+            <tr><td><code>trigger_inline_value</code></td><td><code>usize</code></td><td>64 KiB</td><td>Changes-mode events carry the written value up to this size. Above it the value is elided and the event carries the key only.</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Point operations and batches</h2>
+        <div class="codeblock"><pre>db.put(key, value)?;           <span class="c">// key/value: impl Into&lt;Vec&lt;u8&gt;&gt;</span>
+db.delete(key)?;               <span class="c">// succeeds whether or not the key exists</span>
+<span class="k">let</span> v: Option&lt;Vec&lt;u8&gt;&gt; = db.get(<span class="s">b"key"</span>)?;
+
+<span class="k">let mut</span> b = WriteBatch::new();
+b.put(<span class="s">"a"</span>, <span class="s">"1"</span>); b.delete(<span class="s">"b"</span>);
+b.len(); b.is_empty(); b.byte_size();
+db.write(b)?;                  <span class="c">// atomic, one contiguous seqno range</span></pre></div>
+
+        <h2>Scans</h2>
+        <div class="codeblock"><pre><span class="c">// [lo, hi); None = open end; reverse = descending</span>
+<span class="k">let</span> it: DbIterator = db.iter(Some(<span class="s">b"user/"</span>), Some(<span class="s">b"user0"</span>), <span class="k">false</span>)?;
+<span class="k">for</span> kv <span class="k">in</span> it {
+    <span class="k">let</span> (key, value): (Vec&lt;u8&gt;, Vec&lt;u8&gt;) = kv?;   <span class="c">// Item = Result&lt;(Vec&lt;u8&gt;, Vec&lt;u8&gt;)&gt;</span>
+}</pre></div>
+        <p>The iterator resolves value-log pointers in batches (a prefetch window of 32 entries or 256&nbsp;KiB, one batched read per value-log file), so a scan over large values costs one IO round per group rather than one per entry. An error ends iteration. Bounds are byte-exact and there is no prefix argument at this layer, so compute <code>hi</code> as in <a href="#keys/keys--prefix-scans">Prefix scans</a>. To resume after a key <code>k</code> when paging, start the next scan at <code>k ++ 0x00</code>, the smallest key greater than <code>k</code>. Pages that belong to one logical read should share a snapshot (<code>iter_at</code>).</p>
+
+        <h2>Snapshots</h2>
+        <div class="codeblock"><pre><span class="k">let</span> snap: Snapshot = db.snapshot();          <span class="c">// registers a GC hold</span>
+snap.seqno();
+db.get_at(<span class="s">b"k"</span>, &amp;snap)?;
+db.iter_at(lo, hi, reverse, &amp;snap)?;
+db.query_at(<span class="s">"module"</span>, input, &amp;snap)?;        <span class="c">// module bytes AND data at the snapshot</span>
+drop(snap);                                  <span class="c">// releases the hold</span>
+
+<span class="k">let</span> s: SeqNo = db.seqno();                   <span class="c">// "now", without a hold</span>
+<span class="k">let</span> snap = db.snapshot_at(s)?;               <span class="c">// Err(InvalidArgument) once GC passed s</span></pre></div>
+        <div class="note"><p><span class="lbl">Hold snapshots briefly.</span>A snapshot held across a long job stalls value-log reclamation and version GC for the whole store.</p></div>
+
+        <h2>Transactions</h2>
+        <div class="codeblock"><pre><span class="k">let mut</span> txn: Txn = db.begin();
+txn.snapshot_seqno();
+<span class="k">let</span> cur = txn.get(<span class="s">b"k"</span>)?;                    <span class="c">// consistent read, no conflict check</span>
+<span class="k">let</span> cur = txn.get_for_update(<span class="s">b"k"</span>)?;         <span class="c">// read + conflict check at commit</span>
+txn.put(<span class="s">"k"</span>, <span class="s">"v"</span>)?; txn.delete(<span class="s">"j"</span>)?;        <span class="c">// buffered until commit</span>
+txn.write_set_len();
+<span class="k">for</span> kv <span class="k">in</span> txn.iter(lo, hi, reverse)? { }     <span class="c">// snapshot merged with this txn's writes</span>
+txn.commit()?;                               <span class="c">// or txn.rollback(), or drop to discard</span></pre></div>
+        <p>Semantics and the retry loop are on <a href="#transactions">Transactions</a>.</p>
+
+        <h2>Durability and maintenance</h2>
+        <div class="codeblock"><pre>db.sync_wal()?;      <span class="c">// barrier: everything acked before this is durable on return</span>
+db.flush()?;         <span class="c">// freeze the memtable and wait until it is in tables</span>
+db.compact_all()?;   <span class="c">// compact until no trigger fires</span>
+db.gc_vlog()?;       <span class="c">// one value-log GC pass; Ok(Some(file_id)) if a file was retired</span>
+<span class="k">let</span> s: DbStats = db.stats();</pre></div>
+        <p><code>DbStats</code> has <code>backend</code> (<code>"io_uring"</code> or <code>"std"</code>), <code>visible_seqno</code>, <code>memtable_bytes</code>, <code>immutable_memtables</code>, <code>levels</code> as a <code>Vec&lt;(runs, files, bytes)&gt;</code>, <code>vlog_files</code>, <code>vlog_retired</code> (retired files waiting on the deletion gates), <code>discard_bytes</code> (value-log bytes known to be dead), <code>cache_hits</code>, <code>cache_misses</code>, <code>commit_groups</code>, <code>commit_batches</code> (the difference from <code>commit_groups</code> is how many fsyncs group commit saved) and <code>wal_syncs</code>.</p>
+        <p>Compaction and value-log GC run on their own on background threads. The manual calls exist for tests, benchmarks and "reclaim now".</p>
+
+        <h2>Modules and triggers</h2>
+        <div class="codeblock"><pre>db.install_module(<span class="s">"name"</span>, &amp;wasm_bytes)?;   <span class="c">// validates: exports memory + a role entry</span>
+db.uninstall_module(<span class="s">"name"</span>)?;
+db.list_modules()?;                        <span class="c">// Vec&lt;ModuleInfo&gt;: name, size, content_hash</span>
+
+<span class="k">let</span> out: Vec&lt;u8&gt; = db.query(<span class="s">"name"</span>, input)?;     <span class="c">// requires the `query` export</span>
+<span class="k">let</span> out: Vec&lt;u8&gt; = db.execute(<span class="s">"name"</span>, input)?;   <span class="c">// requires `execute`; OCC-retried</span>
+db.query_wasm(&amp;wasm, input)?;              <span class="c">// one-shot: bytes never installed</span>
+db.execute_wasm(&amp;wasm, input)?;
+
+db.create_trigger(<span class="s">"name"</span>, <span class="s">"module"</span>, Some(<span class="s">b"orders/"</span>), Some(<span class="s">b"orders0"</span>))?;
+db.delete_trigger(<span class="s">"name"</span>)?;
+db.list_triggers()?;                       <span class="c">// Vec&lt;TriggerInfo&gt; { name: String, module: String,</span>
+                                           <span class="c">//   lo: Vec&lt;u8&gt;, hi: Vec&lt;u8&gt; (empty = open), mode: TriggerMode::{Keys, Changes},</span>
+                                           <span class="c">//   pending: u64, last_error: Option&lt;String&gt; }</span></pre></div>
+        <p>The full contracts are on <a href="#wasm-modules">WASM modules</a> and <a href="#triggers">Triggers</a>.</p>
+
+        <h2>Change stream</h2>
+        <div class="codeblock"><pre><span class="k">let mut</span> sub: Subscription = db.subscribe(<span class="s">b"orders/"</span>, Some(<span class="s">b"orders0"</span>))?;
+sub.start_seqno();                                   <span class="c">// everything strictly above flows</span>
+<span class="k">loop</span> {
+    <span class="k">match</span> sub.recv_timeout(Duration::from_secs(1))? {
+        None =&gt; <span class="k">continue</span>,                            <span class="c">// timeout</span>
+        Some(StreamEvent::Batch(entries)) =&gt; <span class="k">for</span> e <span class="k">in</span> entries {
+            <span class="c">// StreamEntry { key, seqno, commit_seqno, kind: Put|Delete, value: Option&lt;Vec&lt;u8&gt;&gt; }</span>
+        },
+        Some(StreamEvent::Lagged) =&gt; <span class="k">break</span>,          <span class="c">// queue cap exceeded; re-subscribe</span>
+    }
+}</pre></div>
+        <p>Delivery is post-commit, seqno-ascending and gap-free past <code>start_seqno</code>, and values arrive resolved. <code>seqno</code> is the op's own. <code>commit_seqno</code> is the last seqno of the atomic commit the op belonged to, which is the one state in which the op became visible; <code>snapshot_at(commit_seqno)</code> reads it. Value-log GC relocations re-put a live value through the write path, so they show up as <code>Put</code> entries carrying the unchanged value, which is harmless for any consumer. Drop subscriptions you stop consuming, since an undropped one holds a GC pin. The journal, GraphQL subscriptions and replication are all built on this stream.</p>
+
+        <h2>Identity</h2>
+        <div class="codeblock"><pre><span class="k">if let</span> Some(id) = db.identity() {
+    id.name; id.instance_id; id.instance_hex();
+    id.parent;   <span class="c">// Option&lt;(InstanceId, cut_seqno)&gt;</span>
+}</pre></div>
+
+        <h2>Errors</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Error</th><th>Meaning</th><th>What to do</th></tr></thead>
+          <tbody>
+            <tr><td><code>Io(e)</code></td><td>an OS-level failure</td><td>inspect it; a hard IO failure in the write path degrades the store</td></tr>
+            <tr><td><code>Corruption(msg)</code></td><td>on-disk data failed validation</td><td>stop; restore from a fork or the journal</td></tr>
+            <tr><td><code>InvalidArgument(msg)</code></td><td>a reserved key, a bad name, an unknown module, a seqno below the watermark, and so on</td><td>fix the call</td></tr>
+            <tr><td><code>Conflict</code></td><td>the transaction lost first-committer-wins</td><td>retry the whole read-modify-write</td></tr>
+            <tr><td><code>Closed</code></td><td>the database was shut down</td><td>nothing</td></tr>
+            <tr><td><code>Background(msg)</code></td><td>a background thread or the write path failed; writes and maintenance refuse until reopened, reads keep serving</td><td>reopen</td></tr>
+            <tr><td><code>Wasm(msg)</code></td><td>a compile error, trap, fuel or memory exhaustion, or <code>wasm_enabled = false</code></td><td>fix the module or raise the limit</td></tr>
+            <tr><td><code>GuestFailed { code: i32, output: Vec&lt;u8&gt; }</code></td><td>the guest exited non-zero; <code>output</code> holds its message</td><td>an application-level failure</td></tr>
+            <tr><td><code>ProvenanceMismatch(msg)</code></td><td>replica data does not descend from the expected instance</td><td>re-attach from scratch (the <code>edge</code> driver does this itself)</td></tr>
+            <tr><td><code>Gone(msg)</code></td><td>a replicated file left the master's live version</td><td>re-pull the slice</td></tr>
+            <tr><td><code>JournalGap(msg)</code></td><td>a middle journal segment is missing</td><td>restore the segment and rebuild again</td></tr>
+          </tbody>
+        </table></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="wasm-modules">
+        <h1>WASM modules</h1>
+        <p class="lead">A module is a WASM binary stored in the database. Its exports are its roles.</p>
+
+        <div class="tablewrap"><table>
+          <thead><tr><th>Export</th><th>Role</th><th>Runs as</th></tr></thead>
+          <tbody>
+            <tr><td><code>query</code></td><td>read-only query</td><td>one pinned snapshot; writes return <code>EROFS</code></td></tr>
+            <tr><td><code>execute</code></td><td>executor</td><td>a fresh transaction; exit 0 commits, non-zero aborts; conflicts re-run it</td></tr>
+            <tr><td><code>on_touch</code></td><td>keys-mode trigger consumer</td><td>an executor, invoked by the engine with touched keys</td></tr>
+            <tr><td><code>on_apply</code></td><td>changes-mode trigger consumer</td><td>an executor, invoked by the engine with the ordered change list</td></tr>
+            <tr><td><code>describe</code></td><td>optional, the typed GraphQL surface</td><td>read-only at install and schema build</td></tr>
+          </tbody>
+        </table></div>
+        <p>Modules are sandboxed. They are fuel-metered and memory-capped, have no WASI, no clock and no randomness, and can import only the <code>fluent</code> host functions. An executor may run several times per call because of conflict retries, so it has to be a pure function of its input and the database state.</p>
+        <div class="note"><p><span class="lbl">Spec.</span><a href="https://github.com/orthory/fluent31/blob/master/WASM.md">WASM.md</a> is the complete authoring manual and ABI spec; this page is the working summary.</p></div>
+
+        <h2>Crate setup</h2>
+        <div class="codeblock"><div class="bar">guests/&lt;name&gt;/Cargo.toml — add the crate to guests/Cargo.toml members</div><pre>[package]
+name = <span class="s">"my_module"</span>
+version = <span class="s">"0.1.0"</span>
+edition = <span class="s">"2021"</span>
+
+[lib]
+crate-type = [<span class="s">"cdylib"</span>]
+
+[dependencies]
+fluent-guest = { path = <span class="s">"../../crates/fluent-guest"</span> }
+serde_json = <span class="s">"1"</span>      <span class="c"># optional; works on wasm32-unknown-unknown</span></pre></div>
+        <p>There is no WASI, so don't use <code>std::time</code>, <code>std::env</code>, <code>rand</code> or anything else that needs an operating system. Take entropy and time as input.</p>
+
+        <h2>Entry points</h2>
+        <p>Put one attribute per role on a function of the shape <code>fn(T: FromInput) -&gt; Result&lt;O: IntoOutput, Fail&gt;</code>. The macro exports the entry point. <code>Ok</code> becomes exit 0 with the encoded output, and <code>Err(Fail { code, message })</code> becomes a non-zero exit with the message in the output buffer.</p>
+        <div class="codeblock"><pre><span class="k">use</span> fluent_guest::{Change, Fail};
+
+<span class="w">#[fluent_guest::query]</span>     <span class="k">fn</span> view(input: Vec&lt;u8&gt;)        -&gt; Result&lt;String, Fail&gt; { .. }
+<span class="w">#[fluent_guest::execute]</span>   <span class="k">fn</span> write(input: String)        -&gt; Result&lt;Vec&lt;u8&gt;, Fail&gt; { .. }
+<span class="w">#[fluent_guest::on_touch]</span>  <span class="k">fn</span> index(keys: Vec&lt;Vec&lt;u8&gt;&gt;)   -&gt; Result&lt;(), Fail&gt;     { .. }
+<span class="w">#[fluent_guest::on_apply]</span>  <span class="k">fn</span> feed(changes: Vec&lt;Change&gt;)  -&gt; Result&lt;(), Fail&gt;     { .. }
+fluent_guest::fluent_describe!(<span class="s">r#"{ ... }"#</span>);   <span class="c">// optional typed surface</span></pre></div>
+        <p><code>FromInput</code> is implemented for <code>Vec&lt;u8&gt;</code> (raw bytes), <code>String</code> (UTF-8, with invalid input failing with code 3), <code>Vec&lt;Vec&lt;u8&gt;&gt;</code> (the keys-mode input) and <code>Vec&lt;Change&gt;</code> (the changes-mode input). <code>IntoOutput</code> covers <code>Vec&lt;u8&gt;</code>, <code>String</code> and <code>()</code>. The annotated function must not carry the name of the export it generates: a <code>#[query]</code> function named <code>query</code> is a duplicate definition. A module may export any combination of roles. <code>Fail</code> also converts from <code>String</code> and <code>&amp;str</code> with code 1, so <code>?</code> works on string errors.</p>
+
+        <h2>SDK functions</h2>
+        <div class="codeblock"><pre>fluent_guest::input() -&gt; Vec&lt;u8&gt;         <span class="c">// the input blob</span>
+fluent_guest::output(&amp;[u8])              <span class="c">// append to the output</span>
+fluent_guest::log(&amp;str)                  <span class="c">// debug log (printed when FLUENT31_WASM_LOG is set)</span>
+fluent_guest::get(&amp;[u8]) -&gt; Option&lt;Vec&lt;u8&gt;&gt;
+fluent_guest::get_for_update(&amp;[u8]) -&gt; Result&lt;Option&lt;Vec&lt;u8&gt;&gt;, i32&gt;   <span class="c">// Err = errno</span>
+fluent_guest::put(&amp;[u8], &amp;[u8]) -&gt; Result&lt;(), i32&gt;
+fluent_guest::delete(&amp;[u8]) -&gt; Result&lt;(), i32&gt;
+fluent_guest::scan(lo: Option&lt;&amp;[u8]&gt;, hi: Option&lt;&amp;[u8]&gt;) -&gt; Result&lt;Scan, i32&gt;
+fluent_guest::scan_rev(lo: Option&lt;&amp;[u8]&gt;, hi: Option&lt;&amp;[u8]&gt;) -&gt; Result&lt;Scan, i32&gt;
+fluent_guest::scan_prefix(&amp;[u8]) -&gt; Result&lt;Scan, i32&gt;
+<span class="c">// Scan: Iterator&lt;Item = (Vec&lt;u8&gt;, Vec&lt;u8&gt;)&gt;; .skip_pending() skips an oversized entry</span>
+
+<span class="k">enum</span> Change { Put { seqno: u64, key: Vec&lt;u8&gt;, value: Option&lt;Vec&lt;u8&gt;&gt; },   <span class="c">// None = elided</span>
+              Delete { seqno: u64, key: Vec&lt;u8&gt; } }</pre></div>
+        <p>Reads see the invocation's snapshot, plus the transaction's own buffered writes in an executor. Big values can be read in chunks through the raw ABI, where <code>get</code> returns the full length and copies from an offset. The SDK's <code>get</code> fetches whole values.</p>
+
+        <h2>Executor semantics</h2>
+        <ul>
+          <li>Each attempt is a fresh transaction. Exit 0 commits. Any other exit aborts and surfaces as <code>GuestFailed { code: i32, output: Vec&lt;u8&gt; }</code>.</li>
+          <li>On a commit conflict the whole attempt is discarded and re-run against a fresh snapshot, with fresh memory, fuel and output, until <code>execute_retries</code> attempts (3, first run included) are spent. Then the call returns <code>Conflict</code>. Your code may run several times per call, so no side channels and no "did I already run" state anywhere but the data.</li>
+          <li>Use <code>get_for_update</code> on every key you base a write on.</li>
+          <li>Use distinct non-zero exit codes per failure class and put the message in the output. Present-but-malformed state is corruption: fail loudly, never default.</li>
+          <li>Use checked arithmetic. An executor that overflows corrupts durable state.</li>
+          <li><code>EIO</code> from any host call means the engine failed. The invocation fails on the host side even if you exit 0.</li>
+        </ul>
+
+        <h2>Limits and errnos</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Limit (Options)</th><th>Default</th><th>On breach</th></tr></thead>
+          <tbody>
+            <tr><td><code>wasm_fuel</code></td><td>1e9</td><td>trap, <code>Error::Wasm</code></td></tr>
+            <tr><td><code>wasm_memory_limit</code></td><td>64 MiB</td><td><code>memory.grow</code> fails</td></tr>
+            <tr><td><code>max_wasm_input</code></td><td>64 MiB</td><td><code>InvalidArgument</code> before execution</td></tr>
+            <tr><td><code>max_wasm_output</code></td><td>32 MiB</td><td><code>output_write</code> returns <code>ENOSPC</code></td></tr>
+            <tr><td><code>max_wasm_log</code></td><td>1 MiB</td><td><code>log</code> returns <code>ENOSPC</code></td></tr>
+            <tr><td><code>max_wasm_scans</code></td><td>64</td><td><code>scan_open</code> returns <code>ELIMIT</code></td></tr>
+            <tr><td><code>max_txn_write_bytes</code></td><td>256 MiB</td><td><code>put</code> returns <code>ENOSPC</code></td></tr>
+          </tbody>
+        </table></div>
+        <p>The errnos are <code>NOT_FOUND -1</code>, <code>EROFS -2</code> (a write in a query), <code>EINVAL -3</code> (a reserved, empty or oversized key, an oversized value, bad flags), <code>ENOSPC -4</code>, <code>EBADF -5</code> (a bad scan handle), <code>ELIMIT -6</code> and <code>EIO -8</code>. Memory-safety violations trap. On reserved keys, <code>get</code>, <code>get_for_update</code>, <code>put</code> and <code>delete</code> return <code>EINVAL</code>, and scans clamp to the user keyspace.</p>
+
+        <h2>Typed GraphQL surface</h2>
+        <p>A module that exports <code>describe</code> becomes its own typed root field as soon as it is installed on a server. <code>kind: "query"</code> lands on <code>Query</code>, <code>kind: "execute"</code> on <code>Mutation</code>, and a <code>feed</code> declaration on <code>Subscription</code>. The schema is rebuilt and hot-swapped on every install and uninstall, at server start, and on <code>mutation { reloadSchema }</code>.</p>
+        <div class="codeblock"><pre>fluent_guest::fluent_describe!(<span class="s">r#"{
+  "kind": "execute",
+  "description": "docs for the root field",
+  "args": [{"name": "customer", "type": "String!"},
+           {"name": "amountCents", "type": "U64!"},
+           {"name": "note", "type": "String"}],
+  "types": [{"name": "PlacedOrder", "fields": [
+    {"name": "id", "type": "U64!"},
+    {"name": "customerTotalCents", "type": "U64!"}]}],
+  "output": "PlacedOrder!",
+  "feed": {"prefix": "feed/", "event": "OrderFeedEntry!"}
+}"#</span>);</pre></div>
+        <ul>
+          <li>Scalars are <code>String</code>, <code>Int</code> (32-bit), <code>Float</code>, <code>Boolean</code>, <code>U64</code> (a string on the wire, with numbers accepted on input) and <code>Json</code> (opaque). At most one list level. <code>args</code> reference scalars only; <code>output</code> and <code>types</code> may reference declared types.</li>
+          <li>Shape: at least one of <code>kind</code> and <code>feed</code>. A trigger-only module declares just <code>feed</code> plus <code>types</code> — no <code>kind</code>, no <code>output</code>. <code>output</code> is required with <code>kind</code> and rejected without it; <code>args</code> require <code>kind</code>; the feed's <code>event</code> type must be one of the declared <code>types</code>.</li>
+          <li>Every declaration must be backed by its export (<code>"query"</code> by <code>query</code>, <code>"execute"</code> by <code>execute</code>, <code>feed</code> by <code>on_apply</code>) or the install is rejected.</li>
+          <li>With <code>args</code>, the entry receives one JSON object holding every declared arg, with omitted optional args as <code>null</code> and <code>U64</code> as a number. Without <code>args</code>, the field takes an optional <code>input: BytesInput</code> and the entry receives raw bytes. Only the GraphQL layer builds that object: through the shell or <code>db.execute</code> a typed module receives whatever bytes you pass, so send the same JSON object yourself.</li>
+          <li>Output is parsed as JSON and validated against <code>output</code>. Undeclared keys are dropped. Missing declared fields become <code>null</code>, which is an error if the field is <code>!</code>. A violation is <code>OUTPUT_SCHEMA_VIOLATION</code>, and for executors it carries <code>committed: true</code> because the transaction has already committed. Don't blind-retry those.</li>
+          <li><strong>The field is named exactly what you install the module as</strong> — the crate name is irrelevant. The reference guests are installed under camelCase names: <code>scripts/demo-orders.sh</code> installs <code>place_order.wasm</code> as <code>placeOrder</code> and <code>top_customers.wasm</code> as <code>topCustomers</code>, and those are the field names. The name must be a valid GraphQL name that doesn't shadow a built-in root field, and type names must not be reserved or collide with another module's — so prefix yours (<code>PlacedOrder</code>, not <code>Order</code>). The limits are 32 types, 64 fields per type, 16 args, and a 64&nbsp;KiB descriptor.</li>
+          <li>The server's <code>installModule</code> runs <code>describe</code> and rejects a bad descriptor. The engine's <code>install_module</code> (Rust and shell) checks only the exports, so a module installed that way with a bad descriptor ends up degraded: callable through the generic byte fields, no typed field, and <code>modules { typed schemaError }</code> says why.</li>
+        </ul>
+
+        <h2>Invoking</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Surface</th><th>Query</th><th>Execute</th></tr></thead>
+          <tbody>
+            <tr><td>Engine</td><td><code>db.query(name, input)</code></td><td><code>db.execute(name, input)</code></td></tr>
+            <tr><td>Shell</td><td><code>query NAME [INPUT]</code></td><td><code>exec NAME [INPUT]</code></td></tr>
+            <tr><td>GraphQL (generic)</td><td><code>wasm(module:, input:)</code></td><td><code>wasmExecute(module:, input:)</code></td></tr>
+            <tr><td>GraphQL (typed)</td><td><code>&lt;module&gt;(args)</code> on <code>Query</code></td><td><code>&lt;module&gt;(args)</code> on <code>Mutation</code></td></tr>
+          </tbody>
+        </table></div>
+        <p><code>installModule</code> also accepts WAT text (<code>wasm: {text: "(module ...)"}</code>).</p>
+
+        <h2>One-shot: migrations without install</h2>
+        <p>You can run module bytes that are never stored:</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Surface</th><th>Query</th><th>Execute</th></tr></thead>
+          <tbody>
+            <tr><td>Engine</td><td><code>db.query_wasm(wasm, input)</code>, <code>query_wasm_at(.., &amp;snap)</code></td><td><code>db.execute_wasm(wasm, input)</code></td></tr>
+            <tr><td>Shell</td><td><code>queryonce FILE.wasm [INPUT]</code></td><td><code>execonce FILE.wasm [INPUT]</code></td></tr>
+            <tr><td>GraphQL</td><td><code>wasmOnce(wasm:, input:)</code></td><td><code>wasmExecuteOnce(wasm:, input:)</code></td></tr>
+          </tbody>
+        </table></div>
+        <p>Same ABI, SDK, limits and retry loop, except that the code is pinned for all attempts. Nothing is listed, cached or replicated; an executor's committed writes are the only trace. Triggers still fire on those writes. <code>describe</code> is ignored, so there is no typed field, and a trigger can only bind to an installed module.</p>
+        <p>The migration shape is to walk a prefix, skip already-migrated records and rewrite the rest, all in one transaction: atomic, invisible until commit, serialized by OCC. It has to fit <code>max_txn_write_bytes</code> and <code>wasm_fuel</code>. Past that, shard by cursor (start key in, next start key out) and drive the loop from the caller. Rehearse on a fork first, and keep the script in your repo, because that is the audit trail.</p>
+
+        <h2>Reference modules</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Module</th><th>Role</th><th>Shows</th></tr></thead>
+          <tbody>
+            <tr><td><code>agg</code></td><td>query (untyped)</td><td>prefix count/sum/min/max over u64 LE values; raw bytes in and out</td></tr>
+            <tr><td><code>transfer</code></td><td>execute (untyped)</td><td>a balance transfer with <code>get_for_update</code>, OCC retries, an exit code per failure</td></tr>
+            <tr><td><code>place_order</code></td><td>execute (typed)</td><td>id allocation, a record and a stats fold in one transaction; input validation</td></tr>
+            <tr><td><code>top_customers</code></td><td>query (typed)</td><td>typed list output, snapshot aggregation, limit clamping</td></tr>
+            <tr><td><code>claim</code></td><td>execute</td><td>a UNIQUE constraint: exactly one winner under concurrency, idempotent re-claim</td></tr>
+            <tr><td><code>customer_index</code></td><td>keys-mode trigger</td><td>a secondary index that reconciles against current state, with a back-pointer for updates and deletes</td></tr>
+            <tr><td><code>order_feed</code></td><td>changes-mode trigger + feed</td><td>an ordered changefeed materialized as keys, subscribable live, with an <code>elided</code> flag for oversized values</td></tr>
+            <tr><td><code>dynamic_index</code></td><td>changes-mode trigger</td><td>index specs stored as keys, backfill on spec write, teardown on delete; one module, two triggers</td></tr>
+            <tr><td><code>live_stats</code></td><td>changes-mode trigger</td><td>an always-fresh <code>GROUP BY</code> folded exactly once per change; the demo checks it against a full recount</td></tr>
+            <tr><td><code>cascade_delete</code></td><td>changes-mode trigger</td><td>a parent delete sweeps its subtree; no-stacking stops loops</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Authoring checklist</h2>
+        <ol>
+          <li>Pick the role or roles and export the matching entries.</li>
+          <li>Define the keyspace. Validate any input that becomes a key segment: no <code>/</code>, non-empty, bounded length.</li>
+          <li><code>get_for_update</code> on every read-modify-write key.</li>
+          <li>Distinct exit codes with the message in the output. Malformed state fails loudly.</li>
+          <li>Checked arithmetic.</li>
+          <li>A static descriptor with prefixed type names.</li>
+          <li>Build with <code>--release</code>, install, and confirm <code>typed: true, schemaError: null</code>.</li>
+          <li>Test the happy path, each failure exit, concurrency for executors, and a restart (the typed field must reappear).</li>
+        </ol>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="triggers">
+        <h1>Triggers</h1>
+        <p class="lead">Bind a module to a key range and the engine invokes it after every committed write into the range: indexes, views, feeds, cascades.</p>
+
+        <h2>Registering</h2>
+        <div class="codeblock"><pre>db.create_trigger(<span class="s">"name"</span>, <span class="s">"module"</span>, Some(<span class="s">b"orders/"</span>), Some(<span class="s">b"orders0"</span>))?;   <span class="c">// Rust</span></pre></div>
+        <div class="codeblock"><pre>mktrig NAME MODULE [LO|-] [HI|-]            <span class="c"># shell; - = open end</span></pre></div>
+        <div class="codeblock"><pre>mutation { createTrigger(name: <span class="s">"idx"</span>, module: <span class="s">"customer_index"</span>,
+                         lo: {text: <span class="s">"orders/"</span>}, hi: {text: <span class="s">"orders0"</span>}) }
+query { triggers { name module lo { text } hi { text } mode pending lastError } }
+mutation { deleteTrigger(name: <span class="s">"idx"</span>) }     <span class="c"># discards pending events</span></pre></div>
+        <p><code>None</code> bounds mean an open end. The module must already be installed. Names follow the module-name rules and must be unique. <code>lo &gt;= hi</code>, or a bound longer than <code>max_key_size</code>, is rejected. One module may back many triggers.</p>
+        <p>The mode is detected from the module's exports at registration and fixed for the trigger's life: <code>on_apply</code> present means changes mode; otherwise <code>on_touch</code> means keys mode; neither is rejected. Replacing the module's bytes later does not change the mode. A changes-mode trigger whose module lost <code>on_apply</code> fails its drains loudly (<code>lastError</code>) and holds its events.</p>
+        <div class="note"><p><span class="lbl">No backfill.</span>Keys already in the range fire no events. To index existing data, have the module scan on demand (as <code>guests/dynamic_index</code> does when a spec key is written) or re-put the range with a one-shot executor.</p></div>
+        <p>Each trigger has its own queue, and one runner thread drains them independently. There is no ordering between triggers, and overlapping ranges each get their own copy of an event.</p>
+
+        <h2>Keys mode (on_touch)</h2>
+        <p>The input is the touched keys, up to <code>trigger_batch</code> per invocation. No values, no op kind, no order. Re-touches of one key coalesce into one pending event while a backlog exists.</p>
+        <p><strong>The contract:</strong> an event means "reconcile this key". Read the key at your snapshot. If it is present, upsert your derived state; if it is absent, remove it. Written this way the module converges under replay, coalescing and reordering. Updates and deletes need your own back-pointer (say <code>idx/order/&lt;id&gt;</code> pointing at the customer) to find the stale entry, because the event carries no old value. <code>guests/customer_index</code> is the reference.</p>
+
+        <h2>Changes mode (on_apply)</h2>
+        <p>The input is the ordered list of committed changes, one per op, up to <code>trigger_batch</code> per invocation. Each carries <code>seqno</code> (the op's own seqno, assigned at commit, unique and strictly increasing across the feed), the kind (put, delete, or put with the value elided), the key, and the value inline up to <code>trigger_inline_value</code> (64&nbsp;KiB). Above that, <code>value</code> is <code>None</code>, and you read the key knowing the read is current state, possibly newer than the change.</p>
+        <p><strong>The contract:</strong> one event per op, in commit order, never coalesced. A key written three times yields three changes. Filter in code; the range is only the coarse cut. Derive output keys from the seqno (<code>feed/&lt;seqno zero-padded&gt;</code>) so that replays overwrite instead of duplicating. Old values are still your job. A hot key grows the backlog where keys mode would coalesce it. The references are <code>guests/order_feed</code>, <code>guests/live_stats</code>, <code>guests/dynamic_index</code> and <code>guests/cascade_delete</code>.</p>
+
+        <h2>Delivery guarantees</h2>
+        <ul>
+          <li><strong>Durable capture.</strong> Events commit in the same atomic batch as the write that caused them. A write that survives a crash fires its trigger after recovery; one that doesn't, doesn't.</li>
+          <li><strong>At-least-once invocation, exactly-once effects.</strong> Consumed events are deleted inside the module's own transaction. A crash or a conflict re-runs the whole attempt, and your writes and the events' consumption are inseparable.</li>
+          <li><strong>No stacking.</strong> Writes made by a trigger invocation never generate events, for any trigger. No chains, no loops.</li>
+          <li><strong>Asynchronous.</strong> Derived state trails the base data by the backlog. Nothing waits for a trigger. Watch <code>pending</code> to see how far behind it is.</li>
+          <li><strong>Failure holds, never drops.</strong> A failing module (a guest error, a missing module, conflict exhaustion) leaves the batch queued. The runner backs off per trigger, starting at 100&nbsp;ms and doubling up to a 6.4&nbsp;s ceiling. <code>list_triggers</code> and <code>triggers { pending lastError }</code> show the depth and the reason. Fix the module by reinstalling it and the backlog drains.</li>
+          <li><strong>Batch bounds.</strong> A drain hands the module at most <code>trigger_batch</code> events and never more than <code>max_wasm_input</code> bytes. Inlined values are clamped so that every event fits.</li>
+          <li>Trigger definitions and queues live in the reserved keyspace, so they are versioned, recovered and forked with everything else. A store rebuilt from the journal has neither, so recreate the triggers.</li>
+        </ul>
+        <p>Every writer fires triggers: plain puts, batches, transactions, executors, one-shot executors, and every network surface. Trigger invocations themselves, value-log GC relocations, and writes made while <code>wasm_enabled = false</code> do not.</p>
+
+        <h2>Waiting for a drain</h2>
+        <p>There is no synchronous "run the triggers now". Poll <code>list_triggers()</code> until <code>pending == 0</code> for the triggers you care about and <code>last_error</code> is <code>None</code>. This is the reference loop (<code>crates/fluent31/examples/util/mod.rs::drain</code>):</p>
+        <div class="codeblock"><pre><span class="k">let</span> deadline = Instant::now() + Duration::from_secs(30);
+<span class="k">loop</span> {
+    <span class="k">let</span> triggers = db.list_triggers()?;
+    <span class="k">if let</span> Some(err) = triggers.iter().find_map(|t| t.last_error.clone()) {
+        panic!(<span class="s">"trigger failed: {err}"</span>);          <span class="c">// a failing module never clears itself</span>
+    }
+    <span class="k">if</span> triggers.iter().all(|t| t.pending == 0) { <span class="k">break</span>; }
+    assert!(Instant::now() &lt; deadline, <span class="s">"triggers did not drain in 30s"</span>);
+    std::thread::sleep(Duration::from_millis(10));
+}</pre></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="forks">
+        <h1>Forks, pins, clones</h1>
+        <p class="lead">A fork is a named, consistent branch of the whole database, published as a complete database directory.</p>
+
+        <h2>What a fork is</h2>
+        <p>Forks land under <code>&lt;dir&gt;/archive/&lt;name&gt;/</code>. Tables and sealed value-log files are immutable, so the fork hard-links them. Creation cost is proportional to the number of files, plus one bounded copy of the still-growing value-log head (at most <code>vlog_file_size</code>). Shared bytes exist once on disk. <code>du</code> on the archive re-counts shared inodes, so the apparent size is not the added size. Real divergence accrues only as parent and child compact away from the shared base.</p>
+        <p>A fork exists completely or not at all. It is built in a temporary directory, fsynced and published by a single rename, and a crashed build is swept at the next open.</p>
+
+        <h2>Cutting</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Call</th><th>Cut</th><th>Cost</th></tr></thead>
+          <tbody>
+            <tr><td><code>fork(name)</code></td><td>the current flushed head</td><td>a memtable flush plus hard links</td></tr>
+            <tr><td><code>fork_at(name, seqno)</code></td><td>that exact seqno</td><td>the same, plus the table files are rewritten to the cut (values stay hard-linked)</td></tr>
+          </tbody>
+        </table></div>
+        <p><code>fork_at</code> needs a point that is still materializable: the head, a seqno captured moments ago with <code>db.seqno()</code>, or one held by <code>pin(name)</code>. A pin is a durable, store-wide GC hold recorded in the manifest. It survives restarts and costs retention until <code>unpin</code>. Seqnos below the watermark are refused.</p>
+        <p>Live readers and writers keep running during a fork. What the store pays is one memtable flush, a brief hold of the manifest lock (structural installs pause, traffic does not), and, because the cut is a registered snapshot for the build's duration, GC held at the cut and value-log deletions deferred until the build finishes.</p>
+
+        <h2>The API</h2>
+        <div class="codeblock"><pre><span class="k">let</span> f: ForkInfo = db.fork(<span class="s">"before-migration"</span>)?;
+<span class="c">// ForkInfo { name, instance_id, created_unix_ms, last_seqno, path }</span>
+<span class="k">let</span> clone = Db::open(&amp;f.path, Options::default())?;      <span class="c">// live CoW clone</span>
+
+<span class="k">let</span> p: PinInfo = db.pin(<span class="s">"pre-import"</span>)?;                  <span class="c">// durable store-wide GC hold</span>
+<span class="k">let</span> f = db.fork_at(<span class="s">"rollback"</span>, p.seqno)?;                <span class="c">// cut exactly there</span>
+db.unpin(<span class="s">"pre-import"</span>)?;
+db.pins();                                               <span class="c">// Vec&lt;PinInfo&gt;, oldest first</span>
+
+<span class="k">let</span> s = db.seqno();                                      <span class="c">// capture "now"</span>
+<span class="k">let</span> a = db.fork_at(<span class="s">"replica-a"</span>, s)?;
+<span class="k">let</span> b = db.fork_at(<span class="s">"replica-b"</span>, s)?;                     <span class="c">// identical cuts</span>
+
+db.list_forks()?;  db.delete_fork(<span class="s">"name"</span>)?;              <span class="c">// refused while the fork is open</span>
+fluent31::list_forks_at(Path::new(<span class="s">"./data"</span>))?;           <span class="c">// lock-free, works on a live store</span>
+fluent31::restore_to(&amp;archive_path, &amp;dest, Some(<span class="s">"copy-name"</span>))?;</pre></div>
+        <p>Fork and pin names use <code>[A-Za-z0-9._-]</code>, at most 64 characters, with no leading dot. <code>restore_to</code> refuses an existing <code>dest</code> and an archive that has already been opened read-write (fork that live copy instead).</p>
+
+        <h2>Using a fork</h2>
+        <ul>
+          <li><strong>Open equals activate.</strong> <code>Db::open(fork.path, ..)</code> gives you a live, writable, copy-on-write clone. New writes land in its own files and its compactions unlink only its own links. The parent is untouched.</li>
+          <li><code>restore_to(archive, dest, new_name)</code> hard-links the archive into a fresh directory, or copies it when <code>dest</code> is on another filesystem, so the archived cut stays pristine. <code>new_name</code> is required for forks of a named store, since each copy mints its own identity.</li>
+          <li><code>delete_fork(name)</code> refuses while the fork is open as a database.</li>
+          <li><code>list_forks_at(dir)</code> reads <code>archive/*/fork.meta</code> without taking a lock, so it works on a store another process has open.</li>
+          <li>Under the server, every fork is an instance at <code>/graphql/&lt;instanceId&gt;</code> with the same full surface, including its own forks.</li>
+        </ul>
+        <div class="note"><p><span class="lbl">Expectations.</span>Forks branch; they do not follow. A fork contains exactly the history up to its cut and nothing the parent commits afterwards. They are priced for a handful of deliberate cuts — a pre-migration anchor, a staging clone, a rollback point — not for per-document versioning. Pins hold GC for the whole store.</p></div>
+
+        <h2>Rolling back the primary</h2>
+        <p>There is no in-place restore. A rollback swaps directories.</p>
+        <ol>
+          <li>Before the risky change, <code>fork("pre-migration")</code>, or <code>pin</code> now and <code>fork_at</code> later. Rehearse the change on the fork's own instance.</li>
+          <li>To roll back, stop the process. Then either open the fork directly as the new primary (its first read-write open fixes its identity under the fork's name), or keep the archive pristine with <code>restore_to(archive, "&lt;new-dir&gt;", Some("prod-2"))</code> and start on <code>&lt;new-dir&gt;</code>. Pass no <code>store_name</code> on later opens, since the name is persisted.</li>
+          <li>The rolled-back primary has a new instance id. Every replica notices on its next connection and re-attaches from scratch; nothing else needs telling. Any stored seqnos are meaningless across the swap.</li>
+          <li>Delete the abandoned directory when you are sure.</li>
+        </ol>
+        <p>The shell and GraphQL expose <code>fork</code> and <code>pin</code> but not restore. Step 2 is a filesystem operation or the Rust call.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="durability">
+        <h1>Durability &amp; recovery</h1>
+        <p class="lead">What an ack means, what survives a crash, and the journal for the day the store directory itself is lost.</p>
+
+        <h2>Sync modes</h2>
+        <p><code>Options::sync</code> decides when writes reach stable storage. The server flags spell these <code>always</code>, <code>periodic:&lt;ms&gt;</code> and <code>never</code>.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>SyncMode</th><th>An ack means</th><th>Crash loss</th></tr></thead>
+          <tbody>
+            <tr><td><code>Always</code> <span class="dim">(default)</span></td><td>fsynced. Concurrent writers share one fsync (group commit).</td><td>none of what was acked</td></tr>
+            <tr><td><code>Periodic { every }</code></td><td>in memory; a background timer fsyncs on that interval. <code>db.sync_wal()</code> is the on-demand barrier.</td><td>up to one interval</td></tr>
+            <tr><td><code>Never</code></td><td>in memory; the OS flushes when it likes.</td><td>the recent tail</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>What survives a crash</h2>
+        <p>Under <code>SyncMode::Always</code>, every acked write survives. A value-log payload is synced before the WAL record that points at it, so a durable pointer never precedes its data. Under <code>Periodic</code>, everything up to the last timer tick or <code>sync_wal</code> survives. Under <code>Never</code>, whatever the OS had flushed.</p>
+        <p>In every mode the store reopens consistent. The WAL's torn tail is truncated, tables are self-describing and synced before the manifest references them, and the manifest flips atomically. Corruption in a sealed file is a hard <code>Corruption</code> error, never silent.</p>
+        <p>The test suite proves this with a SIGKILLed child process (<code>crash_recovery</code>), a fault-injecting IO backend (<code>fault_injection</code>, which shows a failed fsync is never a false ack) and a byte-mutation sweep (<code>corruption_fuzz</code>, which shows no on-disk byte can panic the reader).</p>
+
+        <h2>Degraded state</h2>
+        <p>A hard IO failure in the write path or a background thread failure sets a store-wide error. After that, writes, <code>flush</code>, <code>sync_wal</code>, <code>pin</code> and subscriptions return <code>Error::Background</code>, while <code>get</code>, <code>iter</code> and snapshots keep serving what is there. Reopen the store; recovery brings it back to the last durable state.</p>
+
+        <h2>The journal</h2>
+        <p>The store's own WAL and manifest are its durability. The journal is for the day that is not enough: a bad disk block, a truncated file, a lost directory. It is off unless you attach it, and it never sits on the commit path.</p>
+        <p>At attach it writes a base snapshot of the user keyspace, then trails the change stream on a background thread, appending each mutation to <code>journal-*.log</code> segments that rotate at <code>rotate_bytes</code>. Once the delta bytes written since the last base exceed <code>compact_when_deltas_exceed</code> times that base's size, and also exceed <code>compact_min_bytes</code>, it writes a fresh base and prunes the superseded segments, so disk stays near the live set plus one window of recent deltas. If the consumer ever lags past <code>sub_queue_bytes</code>, it heals by writing a new base. The log header records the source instance id, and a different store's journal in the same directory is refused.</p>
+        <div class="codeblock"><pre><span class="k">use</span> fluent31::{Journal, JournalConfig, journal};
+
+<span class="k">let</span> db = Arc::new(Db::open(dir, opts)?);
+<span class="k">let</span> j = Journal::attach(db.clone(), <span class="s">"./journal"</span>)?;       <span class="c">// base snapshot now, deltas trail</span>
+<span class="k">let</span> j = Journal::attach_with_config(db.clone(), dir, JournalConfig {
+    rotate_bytes: 128 &lt;&lt; 20,
+    compact_when_deltas_exceed: Some(1.0),               <span class="c">// None = manual only</span>
+    compact_min_bytes: 64 &lt;&lt; 20,
+})?;
+j.stats();               <span class="c">// deltas_written, base_records_written, last_seqno,</span>
+                         <span class="c">// rebaselines, compactions, files_pruned, last_error</span>
+j.request_checkpoint();  <span class="c">// compact now</span>
+drop(j);                 <span class="c">// joins the drainer, final flush</span></pre></div>
+        <p>How to attach it on each surface:</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Surface</th><th>How</th></tr></thead>
+          <tbody>
+            <tr><td>Rust</td><td><code>Journal::attach(db, dir)</code> or <code>attach_with_config</code></td></tr>
+            <tr><td><code>fluent-graphql</code></td><td><code>--journal DIR</code> plus optional <code>--journal-rotate-bytes</code>, <code>--journal-compact-when-deltas-exceed</code>, <code>--journal-compact-min-bytes</code></td></tr>
+            <tr><td><code>fluent-server</code></td><td>a <code>[journal]</code> section in the TOML config, with <code>dir</code> required</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Rebuilding from the journal</h2>
+        <div class="codeblock"><pre>fluent-cli journal-rebuild &lt;journal-dir&gt; &lt;dest-dir&gt;
+<span class="c"># prints: source instance, base keys, deltas applied, last seqno</span></pre></div>
+        <p>Or <code>fluent31::journal::rebuild(journal_dir, dest, opts)</code>, where <code>opts</code> are the rebuilt store's <code>Options</code> (give it a <code>store_name</code> for a fresh root identity). <code>dest</code> must be a fresh directory. The rebuilt store holds all user data as of the journal's last durable record, as a new lineage: seqnos are renumbered, the instance id is fresh, and modules, triggers, pins and forks are not restored, so redeploy them. A missing middle segment is refused (<code>JournalGap</code>), never rebuilt around.</p>
+        <p>The tail is approximate in both directions. The journal's last few unsynced records can be lost. And under <code>Periodic</code> or <code>Never</code>, the journal, which is fed from the in-memory commit stream, can hold writes the crashed store lost, so a rebuild is slightly ahead of what the store would have recovered. Both are acceptable. You reach for the journal only when the store itself is gone, and the rebuild replaces it.</p>
+
+        <h2>Backups</h2>
+        <ul>
+          <li>For a consistent snapshot on the same filesystem, <code>fork(name)</code>. It is cheap, instant, consistent and hard-linked.</li>
+          <li>To copy elsewhere, copy <code>archive/&lt;name&gt;/</code>, which is a plain directory tree (the hard links copy as full files), or <code>restore_to</code> into a mount point.</li>
+          <li>For continuous off-box protection, ship the journal directory's segments. A reassembled journal is verified for contiguity at rebuild.</li>
+        </ul>
+        <div class="note"><p><span class="lbl">Never</span>delete <code>wal-*.log</code>, <code>MANIFEST-*</code>, <code>CURRENT</code> or <code>LOCK</code> by hand.</p></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="shell">
+        <h1>The shell</h1>
+        <p class="lead">An interactive prompt over one store, and the journal rebuild tool.</p>
+
+        <div class="codeblock"><pre>fluent-cli &lt;db-dir&gt; [<span class="w">--std</span>|<span class="w">--uring</span>] [<span class="w">--nosync</span>] [<span class="w">--sync-every</span> &lt;ms&gt;]
+fluent-cli journal-rebuild &lt;journal-dir&gt; &lt;dest-dir&gt;</pre></div>
+        <p><code>--std</code> and <code>--uring</code> force the IO backend. <code>--nosync</code> is <code>SyncMode::Never</code> and <code>--sync-every</code> is <code>Periodic</code>. Every command prints its wall-clock latency. Byte arguments are plain UTF-8 or <code>hex:DEADBEEF</code>. Output shows printable bytes quoted and everything else as <code>hex:</code>.</p>
+
+        <h2>Commands</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Group</th><th>Commands</th></tr></thead>
+          <tbody>
+            <tr><td>kv</td><td><code>get K</code>, <code>put K V</code>, <code>del K</code>, <code>scan [LO|-] [HI|-] [--rev] [--limit N]</code> (default limit 50), <code>count [LO] [HI]</code></td></tr>
+            <tr><td>txn</td><td><code>begin</code>, <code>tget K</code>, <code>tlock K</code> (get_for_update), <code>tput K V</code>, <code>tdel K</code>, <code>commit</code>, <code>abort</code>. The prompt shows <code>(txn)</code> while one is open.</td></tr>
+            <tr><td>snapshots</td><td><code>snap</code> (prints an id), <code>snaps</code>, <code>sget ID K</code>, <code>snapdrop ID</code></td></tr>
+            <tr><td>wasm</td><td><code>install NAME FILE.wasm</code>, <code>modules</code>, <code>uninstall NAME</code>, <code>query NAME [INPUT]</code>, <code>exec NAME [INPUT]</code>, <code>queryonce FILE.wasm [INPUT]</code>, <code>execonce FILE.wasm [INPUT]</code></td></tr>
+            <tr><td>triggers</td><td><code>mktrig NAME MODULE [LO|-] [HI|-]</code>, <code>deltrig NAME</code>, <code>triggers</code></td></tr>
+            <tr><td>forks</td><td><code>fork NAME [AT]</code>, <code>forks</code>, <code>delfork NAME</code></td></tr>
+            <tr><td>pins</td><td><code>pin NAME</code>, <code>pins</code>, <code>unpin NAME</code>, <code>seqno</code></td></tr>
+            <tr><td>admin</td><td><code>flush</code>, <code>compact</code>, <code>gc</code>, <code>stats</code>, <code>help</code>, <code>exit</code></td></tr>
+          </tbody>
+        </table></div>
+        <p><code>count</code> takes the same <code>-</code>, <code>--rev</code> and <code>--limit</code> syntax as <code>scan</code>, and <code>quit</code> is the same as <code>exit</code>. Values longer than 160 bytes print truncated with their length. A guest failure prints <code>guest exited with code N, output …</code>. A transaction conflict prints a <code>CONFLICT (first committer wins)</code> line; the transaction is rolled back.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="server">
+        <h1>Server mode</h1>
+        <p class="lead">One process, one <code>Db</code>, two planes.</p>
+
+        <div class="codeblock"><pre>fluent-server &lt;db-dir&gt; [<span class="w">--config</span> FILE] [<span class="w">--store-name</span> NAME]
+              [<span class="w">--graphql</span> ADDR:PORT] [<span class="w">--replication</span> ADDR:PORT]
+              [<span class="w">--sync</span> always|never|periodic:&lt;ms&gt;] [<span class="w">--max-body-bytes</span> N]</pre></div>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Plane</th><th>Default</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td>graphql</td><td><code>127.0.0.1:8317</code></td><td>typed and admin operations, GraphiQL at <code>/</code>, subscriptions over graphql-ws, fork instances at <code>/graphql/&lt;instanceId&gt;</code></td></tr>
+            <tr><td>replication</td><td><code>127.0.0.1:8428</code></td><td>the join point for replicas and edge caches; opens only on a named store</td></tr>
+          </tbody>
+        </table></div>
+        <p>The store directory is flocked, so the planes cannot be split across processes. Server mode is how they share one handle. <code>--store-name</code> is persisted in the store, so pass it once. Without a name, graphql serves and the join point stays closed; the startup banner says so.</p>
+        <p>On the first SIGINT or SIGTERM the server stops accepting and drains in-flight GraphQL requests, then the process exits and open replication connections drop (the WAL keeps the store consistent). A second signal exits immediately. If the engine degrades (<code>Error::Background</code>), GraphQL answers <code>BACKGROUND</code> and replication answers <code>ERR</code>; restart the process.</p>
+        <div class="note"><p><span class="lbl">Exposure.</span>Every plane defaults to loopback and speaks plain TCP or HTTP with no authentication. To expose one, bind it explicitly and put TLS and access control in front: a reverse proxy for GraphQL, a network boundary for replication.</p></div>
+
+        <h2>Config file</h2>
+        <p><code>--config server.toml</code>. The top-level keys, <code>[listen]</code> and <code>[graphql].max-body-bytes</code> mirror the flags, and an explicit flag wins. The rest is file-only. Unknown keys are an error. Every key, with its default:</p>
+        <div class="codeblock"><div class="bar">server.toml</div><pre>dir = <span class="s">"./data"</span>
+store-name = <span class="s">"prod"</span>
+sync = <span class="s">"always"</span>               <span class="c"># always | never | periodic:&lt;ms&gt;</span>
+
+[listen]
+graphql = <span class="s">"127.0.0.1:8317"</span>
+replication = <span class="s">"127.0.0.1:8428"</span>
+
+[graphql]
+max-body-bytes = 33554432     <span class="c"># 32 MiB request body cap</span>
+fork-max-open = 8             <span class="c"># open fork instances beyond the primary (LRU past this)</span>
+fork-idle-ttl-secs = 300      <span class="c"># idle instances close after this</span>
+
+[replication]
+max-frame-bytes = 1048576
+ping-every-ms = 2000
+
+[journal]                     <span class="c"># present = attached; absent = off</span>
+dir = <span class="s">"./journal"</span>             <span class="c"># required once the section exists</span>
+rotate-bytes = 134217728
+compact-when-deltas-exceed = 1.0
+compact-min-bytes = 67108864
+
+[engine]                      <span class="c"># every fluent31::Options tunable, kebab-case</span>
+create-if-missing = true
+wasm-enabled = true
+io-backend = <span class="s">"auto"</span>           <span class="c"># auto | uring | std</span>
+compression = <span class="s">"none"</span>          <span class="c"># none | lz4</span>
+memtable-size = 8388608
+<span class="c"># … every Options field from the Embedded API page, kebab-case</span></pre></div>
+
+        <h2>Standalone planes</h2>
+        <p>Each plane also runs on its own, with the same defaults:</p>
+        <div class="codeblock"><pre>fluent-graphql &lt;db-dir&gt; [<span class="w">--listen</span> ADDR:PORT] [<span class="w">--sync</span> ..] [<span class="w">--max-body-bytes</span> N] [<span class="w">--journal</span> DIR ...]
+fluent-graphql <span class="w">--print-schema</span>                 <span class="c"># the base SDL (built-ins only)</span>
+fluent-replication &lt;db-dir&gt; [<span class="w">--store-name</span> NAME] [<span class="w">--listen</span> ADDR:PORT]</pre></div>
+        <p>Only one of them can hold the store at a time. <code>fluent-graphql</code> refuses <code>--journal-*</code> tuning flags without <code>--journal DIR</code>.</p>
+
+        <h2>Embedding the server</h2>
+        <div class="codeblock"><pre><span class="k">use</span> fluent_server::{Server, ServerConfig};
+
+<span class="k">let</span> db = Arc::new(Db::open(&amp;dir, opts.clone())?);
+<span class="k">let</span> server = Server::start(db.clone(), &amp;dir, opts, ServerConfig::default()).<span class="k">await</span>?;
+server.graphql_addr; server.replication_addr;   <span class="c">// replication_addr: None when unnamed</span>
+server.db();
+server.shutdown().<span class="k">await</span>;</pre></div>
+        <p><code>ServerConfig</code> holds <code>graphql_addr</code>, <code>replication_addr</code>, <code>max_body_bytes</code>, <code>registry: RegistryConfig { max_open, idle_ttl }</code> and <code>replication: ReplServerConfig { max_frame, ping_every }</code>. Nothing is served unless every bind succeeds; failures come back as <code>StartError::{Engine, Bind}</code>. The TOML loader is public too (<code>FileConfig::load</code>, <code>overlay</code>, <code>server_config</code>, <code>engine_options</code>, <code>parse_sync</code>).</p>
+        <p>For the GraphQL plane alone: <code>SchemaManager::new(db)</code>, then <code>InstanceRegistry::new(..)</code>, then <code>fluent_graphql::router(registry, max_body)</code>, which is an <code>axum::Router</code>. Call <code>registry.evict_idle()</code> periodically; the binaries tick every 60 seconds. For replication: <code>ReplServer::new(db, cfg)?</code> fails with <code>InvalidArgument</code> on an unnamed store; then <code>.serve(listener)</code>.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="graphql">
+        <h1>GraphQL API</h1>
+        <p class="lead"><code>POST /graphql</code> for the primary, <code>POST /graphql/&lt;instanceId&gt;</code> for a fork. A <code>GET</code> serves GraphiQL; a WebSocket upgrade with the graphql-ws subprotocol serves subscriptions.</p>
+
+        <h2>Encoding</h2>
+        <p>Keys and values are raw bytes. Inputs take exactly one of <code>{text}</code>, <code>{base64}</code> or <code>{hex}</code> (<code>BytesInput</code>, a <code>@oneOf</code> input). Outputs expose <code>text</code> (null if not UTF-8), <code>base64</code>, <code>hex</code> and <code>len</code> (<code>Bytes</code>).</p>
+        <p><code>U64</code> is a string-encoded 64-bit unsigned scalar used for seqnos, timestamps and byte totals. Inputs also accept numbers. <code>Json</code> is opaque passthrough, used by typed modules only.</p>
+
+        <h2>Query</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Field</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>get(key: BytesInput!): Bytes</code></td><td>null when absent</td></tr>
+            <tr><td><code>scan(lo, hi, prefix, after, reverse, limit): ScanPage</code></td><td><code>[lo, hi)</code> or <code>prefix</code>; <code>limit</code> defaults to 100 and tops out at 10000; <code>ScanPage { pairs { key value } hasMore nextAfter }</code>; pass <code>nextAfter</code> back as <code>after</code></td></tr>
+            <tr><td><code>wasm(module: String!, input: BytesInput): Bytes</code></td><td>a generic query module call</td></tr>
+            <tr><td><code>wasmOnce(wasm: BytesInput!, input: BytesInput): Bytes</code></td><td>a one-shot query, binary or WAT</td></tr>
+            <tr><td><code>modules: [Module!]</code></td><td><code>{ name size typed schemaError }</code>, current state</td></tr>
+            <tr><td><code>stats: Stats</code></td><td>the <code>DbStats</code> fields in camelCase</td></tr>
+            <tr><td><code>forks: [Fork!]</code></td><td><code>{ name instanceId createdUnixMs lastSeqno path }</code></td></tr>
+            <tr><td><code>pins: [Pin!]</code></td><td><code>{ name seqno createdUnixMs }</code>, oldest first</td></tr>
+            <tr><td><code>triggers: [Trigger!]</code></td><td><code>{ name module lo hi mode pending lastError }</code></td></tr>
+            <tr><td><code>snapshotSeqno: U64</code></td><td>the seqno this operation reads at</td></tr>
+            <tr><td><code>seqno: U64!</code></td><td>the current visible seqno, not snapshot-bound; pass it to <code>fork(at:)</code> to cut "now" deterministically</td></tr>
+            <tr><td><code>&lt;module&gt;(...)</code></td><td>every installed typed <code>kind: "query"</code> module</td></tr>
+          </tbody>
+        </table></div>
+        <p>Every read field of one query operation runs at one pinned snapshot. <code>stats</code>, <code>modules</code>, <code>forks</code>, <code>pins</code>, <code>triggers</code> and <code>seqno</code> report current state.</p>
+
+        <h2>Mutation</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Field</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>put(key, value)</code>, <code>delete(key)</code></td><td></td></tr>
+            <tr><td><code>writeBatch(ops: [WriteOp!]!): Int</code></td><td><code>WriteOp</code> is <code>@oneOf { put: {key value} | delete: BytesInput }</code>; atomic; returns the number of ops applied</td></tr>
+            <tr><td><code>wasmExecute(module, input)</code>, <code>wasmExecuteOnce(wasm, input)</code></td><td>executor calls; the one-shot accepts WAT</td></tr>
+            <tr><td><code>installModule(name, wasm): Module</code></td><td>binary (<code>base64</code>) or WAT (<code>text</code>); hot-swaps the schema</td></tr>
+            <tr><td><code>uninstallModule(name)</code></td><td></td></tr>
+            <tr><td><code>createTrigger(name, module, lo, hi)</code>, <code>deleteTrigger(name)</code></td><td></td></tr>
+            <tr><td><code>reloadSchema</code></td><td>re-describes everything; the resync path after out-of-band installs</td></tr>
+            <tr><td><code>fork(name, at: U64): Fork</code></td><td>omit <code>at</code> for the head; returns the new <code>instanceId</code></td></tr>
+            <tr><td><code>deleteFork(name)</code></td><td>refused while in use</td></tr>
+            <tr><td><code>pin(name): Pin</code>, <code>unpin(name)</code></td><td></td></tr>
+            <tr><td><code>syncWal</code></td><td>a durability barrier, the companion to <code>--sync periodic</code></td></tr>
+            <tr><td><code>flush</code>, <code>compactAll</code>, <code>gcVlog</code></td><td></td></tr>
+            <tr><td><code>&lt;module&gt;(...)</code></td><td>every installed typed <code>kind: "execute"</code> module</td></tr>
+          </tbody>
+        </table></div>
+        <p>Mutation fields run serially in document order, each as an independent atomic write, and executor fields each run their own transaction. A document is never one transaction.</p>
+
+        <h2>Subscription</h2>
+        <div class="codeblock"><pre>subscription {                      <span class="c"># raw plane: no module needed</span>
+  changes(lo: {text: <span class="s">"orders/"</span>}, hi: {text: <span class="s">"orders0"</span>}) {
+    kind seqno commitSeqno key { text } value { text }
+    query { snapshotSeqno get(key: {text: <span class="s">"orders/count"</span>}) { text } }
+  }
+}
+subscription {                      <span class="c"># typed plane: a module with a `feed` descriptor</span>
+  orderFeed { kind seqno commitSeqno key { text } event { seqno op id record elided } }
+}</pre></div>
+        <ul>
+          <li><code>kind</code> is <code>ATTACHED</code>, <code>PUT</code> or <code>DELETE</code>. The stream opens with one <code>ATTACHED</code> marker with no key, value or event. Its <code>seqno</code> is the attach boundary: everything at or below it is readable through the marker's <code>query</code>, and everything above arrives on the stream. Gap-free, with no overlap.</li>
+          <li>Every item carries <code>query: Query!</code>, the full Query root pinned at the item's <code>commitSeqno</code>, which is the exact state in which the op became visible. The ops of one atomic commit share a <code>commitSeqno</code>.</li>
+          <li>Typed feeds deliver puts only, so feed GC deletes are invisible. <code>event</code> is the written value validated against the declared event type.</li>
+          <li>A consumer that falls behind <code>sub_queue_bytes</code> is cut off with a "lagged" error. Re-subscribe and re-scan from the new boundary. Items hold snapshots, so consume promptly. A server restart ends every subscription; nothing about them is persisted.</li>
+          <li>The idiom: history is a <code>scan</code> of the feed range, the latest value is a <code>get</code>, and live is a subscription. A disconnected client misses nothing durable as long as the module materializes its feed.</li>
+        </ul>
+
+        <h2>Errors</h2>
+        <p>Engine failures map to <code>errors[].extensions.code</code>: <code>IO</code>, <code>CORRUPTION</code>, <code>INVALID_ARGUMENT</code>, <code>CONFLICT</code> (retries exhausted), <code>CLOSED</code>, <code>BACKGROUND</code>, <code>WASM</code>, <code>GUEST_FAILED</code> (with <code>guestExitCode</code>, <code>guestOutputBase64</code>, and <code>guestOutputText</code> when the output is UTF-8), <code>PROVENANCE_MISMATCH</code>, <code>GONE</code>, <code>JOURNAL_GAP</code> and <code>OUTPUT_SCHEMA_VIOLATION</code> (a typed output mismatch, carrying <code>committed: true</code> for executors). Documents are capped at depth 32 and complexity 5000.</p>
+        <p>Root fields are always outer-nullable, so a failure yields <code>field: null</code> plus an <code>errors</code> entry rather than a spec-invalid response.</p>
+
+        <h2>Instances</h2>
+        <p><code>fork(name:) { instanceId }</code> returns the address of the new branch, and <code>/graphql/&lt;instanceId&gt;</code> serves it with the same full surface: its own modules, triggers, schema and forks. Instances open lazily on the first request and close when idle (<code>fork-idle-ttl-secs</code>) or when evicted past <code>fork-max-open</code>. Forks nest up to 8 deep under one primary. An unknown id is a 404. The id is routing, not authorization.</p>
+
+        <h2>Demo</h2>
+        <div class="codeblock"><pre>cargo run -p fluent-server -- ./data
+scripts/demo-orders.sh [endpoint]     <span class="c"># builds the guests, installs placeOrder + topCustomers, seeds, ranks</span></pre></div>
+        <div class="codeblock"><pre>mutation { placeOrder(customer: <span class="s">"you"</span>, amountCents: <span class="s">"4200"</span>) { id customerTotalCents } }
+query    { topCustomers(limit: 3) { customer orders totalCents avgCents } }</pre></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="replication">
+        <h1>Replication</h1>
+        <p class="lead">Read-only replicas that attach to a running master's join point and hold the slice of the tree overlapping their key scope.</p>
+
+        <p>The scope is unbounded for a full replica and narrow for an edge cache. The overlapping index fragments are copied locally, values are fetched lazily and cached, and committed in-scope writes stream in. The replica is a library component: the process that needs the scoped reads embeds an <code>EdgeReplica</code> and reads through its store (<code>get</code> and <code>scan</code>, clamped to the scope). <a href="https://github.com/orthory/fluent31/blob/master/REPLICATION.md">REPLICATION.md</a> is the spec.</p>
+        <div class="codeblock"><pre><span class="c"># master: fluent-server on a named store (join point :8428), or the plane alone</span>
+fluent-replication ./data <span class="w">--store-name</span> prod [<span class="w">--listen</span> 127.0.0.1:8428]</pre></div>
+
+        <h2>How it behaves</h2>
+        <ul>
+          <li><strong>Named master only.</strong> An unnamed store cannot open a join point: <code>fluent-server</code> leaves the port closed and <code>ReplServer::new</code> returns <code>InvalidArgument</code>.</li>
+          <li><strong>Provenance.</strong> Every connection compares the master's instance id. With the same id, every cached byte stays valid across disconnects and lag. With a different id (the master was restored, forked or replaced) the edge wipes and re-attaches from scratch. Stale history is never served.</li>
+          <li><strong>Gap-free attach.</strong> The edge subscribes first and then pulls the slice, so the union covers everything. Overlap is harmless because entries carry seqnos.</li>
+          <li><strong>Ephemeral.</strong> The edge directory is a cache, wiped on attach, and the master keeps no per-edge state beyond the subscription. A stale file reference answers <code>GONE</code> and the edge re-pulls. Only committed user-key data is readable: no modules, no triggers, no queries or executors.</li>
+          <li><strong>Lag.</strong> A slow edge is cut off (<code>LAGGED</code>) rather than stalling the master. It re-syncs and keeps its caches.</li>
+          <li><strong>Scope.</strong> An out-of-scope <code>get</code> is refused (<code>InvalidArgument</code>), scans clamp to the scope, and the reserved keyspace is never copied or streamed.</li>
+        </ul>
+        <p>The limits are deliberate: one contiguous scope per replica, read-only, embedded (a replica serves no network protocol of its own), a memory-only stream overlay (a restart re-attaches), and no WASM at the edge.</p>
+
+        <h2>Embedding a replica</h2>
+        <div class="codeblock"><pre><span class="k">let mut</span> cfg = EdgeReplicaConfig::new(<span class="s">"127.0.0.1:8428"</span>, <span class="s">"/tmp/edge"</span>,
+                                     <span class="s">b"user/"</span>.to_vec(), Some(<span class="s">b"user0"</span>.to_vec()));
+<span class="c">// fields: master_addr, dir, scope_lo, scope_hi, refresh_every (300 s; None = only on re-sync),</span>
+<span class="c">//         value_cache_bytes (256 MiB), block_cache_size (32 MiB)</span>
+cfg.refresh_every = Some(Duration::from_secs(60));
+<span class="k">let</span> replica = EdgeReplica::start(cfg)?;      <span class="c">// returns once a complete scoped view is available</span>
+replica.store().get(<span class="s">b"user/1"</span>)?;
+replica.store().stats();                     <span class="c">// EdgeStats</span>
+replica.master();                            <span class="c">// StoreIdentity</span></pre></div>
+        <p>The library surface is <code>fluent_replication::{ReplServer, ReplServerConfig, ReplClient, EdgeReplica, EdgeReplicaConfig, MasterInfo}</code> and, on the engine side, <code>fluent31::edge::{EdgeStore, EdgeConfig, EdgeStats, ValueFetcher}</code>. Lower level: <code>ReplClient::connect(addr)</code> gives <code>(client, MasterInfo { name, instance_id, visible_seqno })</code>, with <code>snapshot</code>, <code>fetch_table_chunk</code> and <code>fetch_value</code>.</p>
+
+        <h2>Store identity</h2>
+        <p>A store can carry an operator-chosen name. From the name the engine mints a deterministic 128-bit instance id, and forks and restores mint new ones. Replication verifies the id on every connection, so a replaced master invalidates every replica at once. Under the server, every fork is an instance addressed at <code>/graphql/&lt;instanceId&gt;</code>. The id is an address, not a credential.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="operations">
+        <h1>Operations</h1>
+        <p class="lead">The directory on disk, the knobs that matter, what to watch, and the hard limits.</p>
+
+        <h2>Directory layout</h2>
+        <div class="codeblock"><pre>&lt;dir&gt;/
+  LOCK               <span class="c">exclusive flock for the process lifetime</span>
+  CURRENT            <span class="c">names the live MANIFEST</span>
+  MANIFEST-&lt;gen&gt;     <span class="c">full metadata snapshot</span>
+  wal-&lt;id&gt;.log       <span class="c">write-ahead logs, one per memtable generation</span>
+  sst-&lt;id&gt;.tbl       <span class="c">immutable table fragments</span>
+  vlog-&lt;id&gt;.vlog     <span class="c">value-log files; one active head, the rest sealed</span>
+  archive/&lt;name&gt;/    <span class="c">forks, each a complete database directory</span></pre></div>
+        <p>One process per directory. Everything is CRC32C-checked. Don't hand-edit anything, and don't delete WALs or manifests.</p>
+
+        <h2>Sizing</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Knob</th><th>Raise it when</th><th>Lower it when</th></tr></thead>
+          <tbody>
+            <tr><td><code>memtable_size</code></td><td>write bursts stall on flush</td><td>memory is tight</td></tr>
+            <tr><td><code>block_cache_size</code></td><td>the workload is read-heavy and the working set fits</td><td>memory is tight</td></tr>
+            <tr><td><code>value_threshold</code></td><td>values are small and scans should stay inline</td><td>values are large and the index should stay small</td></tr>
+            <tr><td><code>compression = Lz4</code></td><td>you are disk-bound with compressible values</td><td>you are CPU-bound</td></tr>
+            <tr><td><code>vlog_gc_ratio</code></td><td>you want less GC churn</td><td>you want space back sooner</td></tr>
+            <tr><td><code>trigger_inline_value</code></td><td>changes-mode consumers need payloads without a read</td><td>values are large and write amplification matters</td></tr>
+            <tr><td><code>sub_queue_bytes</code></td><td>subscribers are bursty</td><td>memory is tight</td></tr>
+          </tbody>
+        </table></div>
+        <p>Writers stall rather than fail when frozen memtables exceed <code>max_immutable_memtables</code> or L0 exceeds <code>l0_stall_trigger</code>. Sustained stalls mean compaction cannot keep up.</p>
+
+        <h2>Monitoring</h2>
+        <ul>
+          <li><code>stats</code> (engine, shell, GraphQL) reports the seqno, the memtable and level shape, value-log live, retired and discardable bytes, the cache hit rate, and group commit amortization. An edge replica reports through <code>EdgeStats</code> instead.</li>
+          <li><code>triggers</code> reports <code>pending</code> (the backlog depth) and <code>lastError</code> per trigger.</li>
+          <li><code>Journal::stats()</code>: <code>last_seqno</code> against <code>db.seqno()</code> is the journal lag; <code>last_error</code> is the last failure.</li>
+          <li><code>FLUENT31_WASM_LOG=1</code> prints guest <code>log</code> calls to stderr.</li>
+        </ul>
+
+        <h2>Limits</h2>
+        <div class="tablewrap"><table>
+          <tbody>
+            <tr><td>key</td><td>non-empty, no leading <code>0x00</code>, at most 16 KiB</td></tr>
+            <tr><td>value</td><td>at most 256 MiB</td></tr>
+            <tr><td>transaction write set</td><td>at most 256 MiB</td></tr>
+            <tr><td>names (module, trigger, fork, pin, store)</td><td><code>[A-Za-z0-9._-]</code>, at most 64; fork, pin and store names also no leading dot</td></tr>
+            <tr><td>described module name</td><td>a valid GraphQL name that is not a built-in root field</td></tr>
+            <tr><td>descriptor</td><td>at most 64 KiB, 32 types, 64 fields per type, 16 args, one list level</td></tr>
+            <tr><td>GraphQL body</td><td>32 MiB by default; document depth 32, complexity 5000</td></tr>
+            <tr><td>GraphQL <code>scan</code> page</td><td>at most 10000</td></tr>
+            <tr><td>fork nesting under the server</td><td>8</td></tr>
+            <tr><td>engine calls in flight per plane</td><td>GraphQL 128 reads and 32 writes; replication 64</td></tr>
+            <tr><td>seqno</td><td>56-bit</td></tr>
+          </tbody>
+        </table></div>
+        <p>Known limits (v1, deliberate): no block compression by default (LZ4 is opt-in); value-log discard statistics lag, since dead pointers are only discovered when compaction reaches them; GC relocations bump seqnos, so a hot large-value key can cost a transaction a retry; a fixed level count; and bottom-level merges rewrite the whole bottom level.</p>
+
+        <h2>Compatibility</h2>
+        <p>Every <code>Options</code> field except <code>store_name</code> may change between opens of the same store, and <code>compression</code> affects only newly written tables. On-disk formats are versioned. An unnamed store stays on manifest format 1, a named one writes format 2, and pins bump it to 3; older binaries read only the formats they know. The replication protocol advertises its version in <code>HELLO</code>.</p>
+
+        <h2>Platform notes</h2>
+        <p><code>IoBackend::Auto</code> probes io_uring at open and falls back to portable IO; <code>stats.backend</code> tells you which one is active. Docker's default seccomp profile blocks io_uring, so use <code>--security-opt seccomp=unconfined</code> or <code>io-backend = "std"</code>. macOS uses portable IO throughout.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="testing">
+        <h1>Testing</h1>
+        <p class="lead">One workspace suite, plus fault injection, endurance and benches.</p>
+
+        <div class="codeblock"><pre>cargo test --workspace                              <span class="c"># engine model tests, group commit, wasm, graphql,</span>
+                                                    <span class="c"># server e2e, replication e2e, durability suites</span>
+cargo test -p fluent31 <span class="w">--features</span> fault-injection   <span class="c"># fsync failure / ENOSPC / read-fault paths</span>
+cargo test --test backup_and_soak -- --ignored      <span class="c"># endurance soak</span>
+cargo check -p fluent31 <span class="w">--no-default-features</span>       <span class="c"># the engine without the WASM layer</span>
+cargo run --release -p fluent31 --example bench     <span class="c"># throughput probe</span>
+cargo run --release -p fluent31 --example gc_bench -- [threads] [always|never] [ops-per-thread] [txn]</pre></div>
+
+        <h2>Suites worth knowing by name</h2>
+        <p><code>engine</code> (a randomized model test against a <code>BTreeMap</code> with interleaved flush, compaction, GC and reopen), <code>crash_recovery</code> (a SIGKILLed child), <code>fault_injection</code>, <code>corruption_fuzz</code>, <code>journal_rebuild</code>, <code>durability_modes</code>, <code>group_commit</code>, <code>fork_stress</code> (forks under concurrent writers, flush, compaction and GC), <code>trigger_changes</code>, <code>trigger_robustness</code>, <code>wasm</code> and <code>wasm_sandbox</code>. <code>fluent-graphql/tests/graphql.rs</code> has WAT fixtures for modules, including <code>describe</code>; <code>fluent-server/tests/server.rs</code> and <code>fluent-replication/tests/replication.rs</code> are the end-to-end suites.</p>
+        <p>To test your own modules, look at the GraphQL suite's WAT fixtures for minimal modules. For executors, spawn N concurrent calls and assert no lost updates. Restart the server and assert the typed field reappears.</p>
+
+        <h2>Under Docker</h2>
+        <div class="codeblock"><pre>docker run <span class="w">--security-opt</span> seccomp=unconfined -v $PWD:/src -w /src rust:1 \
+  sh -c <span class="s">"rustup target add wasm32-unknown-unknown &amp;&amp; cargo test --workspace"</span></pre></div>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="internals">
+        <h1>How it works</h1>
+        <p class="lead">Enough architecture to predict behavior. Each topic names its section in <a href="https://github.com/orthory/fluent31/blob/master/DESIGN.md">DESIGN.md</a>.</p>
+
+        <h2>Write path (§2, §13)</h2>
+        <p>A batch is placed first: values at or above <code>value_threshold</code> are appended to the value-log head and the tree entry becomes a pointer. Then it is logged to the WAL, inserted into the memtable, and published by advancing the visible seqno, so readers never see a partial batch. Under <code>SyncMode::Always</code> a dedicated commit thread drains everything queued each cycle and applies it in size-bounded chunks, each with one value-log fsync and one WAL fsync, so the steady-state group size approaches the number of concurrent writers. Transactions validate and apply inside the same critical section, revalidating against earlier batches in the same group.</p>
+
+        <h2>Storage shape (§3, §4, §8)</h2>
+        <p>Lazy leveling: tiered merges on the upper levels, where a full level merges into one run at the front of the next, and one leveled run at the bottom. Runs are split into key-bounded fragments of about <code>target_file_size</code>, each with its own bloom filter and index, small enough to pin in memory for the whole dataset. Key-value separation keeps the tree small because compaction moves pointers rather than payloads. The value log is reclaimed by its own GC: it relocates a file's live records through the normal write path, retires the file, and deletes it only once no snapshot can still reach the old versions and the relocations sit in fsynced tables. <code>vlog_retired</code> in <code>stats</code> counts files between those two steps.</p>
+
+        <h2>MVCC and the watermark (§6)</h2>
+        <p>The GC watermark is the oldest registered snapshot, and pins and subscriptions register too. Compaction keeps every version above the watermark plus the newest at or below it, and nothing else. That is the whole reason behind <a href="#consistency">the consistency contract</a>: holding any version holds every version of every key, a seqno is addressable only while it is above the watermark, and per-key retention does not exist.</p>
+        <p>Commit validation reads the newest committed version, tombstones included, of each <code>get_for_update</code> key and each written key, inside the same critical section every other writer uses. The transaction's own snapshot bounds the watermark, so that evidence cannot be compacted away mid-transaction.</p>
+
+        <h2>Recovery (§5)</h2>
+        <p>The manifest is a full metadata snapshot, rewritten per change and flipped by an atomic <code>CURRENT</code> rename. Tables are fsynced before any manifest references them. Recovery replays every WAL at or above the manifest's floor, validates value-log pointers against the scanned file prefix, truncates the newest WAL's torn tail, flushes the replayed memtable synchronously so that a crash during recovery only re-replays, and opens a fresh value-log head, because the engine never appends to a file that predates a crash. Orphaned files and crashed fork builds are swept.</p>
+
+        <h2>WASM layer (§9)</h2>
+        <p>wasmtime with fuel metering, memory limits, NaN canonicalization, deterministic SIMD and no WASI. Queries run against a registered snapshot pinned for the whole invocation. Executors run in a <code>Txn</code>, and a conflict discards the store and re-runs. Compiled modules are cached by content hash; one-shot bytes are compiled uncached. Module bytes live at <code>\x00wasm\x00&lt;name&gt;</code> as ordinary versioned keys, which is what lets <code>query_at</code> time-travel code together with data.</p>
+
+        <h2>Triggers (§9)</h2>
+        <p>Capture runs inside the commit critical section. Each committed batch's keys are matched against the trigger registry and the event records are appended to the same batch: one WAL record, one seqno range. Keys mode queues at <code>\x00trgq\x00&lt;trigger&gt;\x00&lt;key&gt;</code>, where the key is the queue entry, which is why re-touches coalesce. Changes mode queues at <code>\x00trgq\x00&lt;trigger&gt;\x00&lt;seqno&gt;</code> with the change as the value, which is why events stay ordered and never coalesce. A runner thread drains each backlog in chunks as a system transaction pre-seeded with deletes of the consumed entries. System transactions skip capture; that is the no-stacking rule. The consumed queue keys sit in the transaction's write set, so a re-touch that lands after the drain's snapshot conflicts the commit and the drain re-runs against fresh state. Ordinary OCC closes the race.</p>
+
+        <h2>Forks (§10)</h2>
+        <p>A head fork flushes, pins a cut under a brief manifest lock, hard-links every table and sealed value-log file, copies the head value-log file up to its synced length, writes a fresh manifest and <code>fork.meta</code>, fsyncs, and renames into place. A point cut rewrites the tables to the cut with one merge that keeps the newest version at or below the cut per key, while the values stay linked. Pins are manifest records that re-register a snapshot at every open before the background threads start.</p>
+
+        <h2>Change stream, subscriptions, journal (§14)</h2>
+        <p><code>Db::subscribe</code> taps the apply path right after the seqno is published, so delivery is ordered and gap-free from installation. Entries carry unresolved pointers, and the consumer resolves them off the write path under an advancing snapshot pin, so value-log GC cannot delete a file that is still in flight. A subscriber past <code>sub_queue_bytes</code> is dropped. GraphQL subscriptions, the journal and replication are all consumers of this one stream.</p>
+
+        <h2>Identity and replication (§14)</h2>
+        <p>The instance id is <code>H(name)</code> for a root store and <code>H(parent ‖ cut ‖ name)</code> for a fork. It is deterministic, so a crash between minting and persisting re-mints the same id. File ids and offsets are unique only within one lifetime, and the instance id is the outer qualifier every replica checks. The edge copies the overlapping fragments (with bounds and size cross-checked and blocks CRC-verified), applies the stream into an overlay memtable, resolves values inline first, then from a local cache, then by fetching from the master, and reads through the same merge and MVCC iterator stack as the engine.</p>
+
+        <h2>Threads and locks (§11)</h2>
+        <p>Per store there are the user writers, one flush thread, one compaction thread that also runs value-log GC, the commit thread and the trigger runner. An attached journal adds its own drainer thread, and the GraphQL plane adds one forwarder thread per active subscription. Background failures degrade the store (<code>Error::Background</code>) instead of hanging waiters. The lock order is strict: <code>write</code>, then <code>manifest</code>, then <code>state</code>, then <code>snapshots</code>.</p>
+      </article>
+
+      <!-- ============================================================ -->
+      <article data-page="glossary">
+        <h1>Glossary</h1>
+        <p class="lead">The words the docs lean on, in one place.</p>
+        <div class="tablewrap"><table>
+          <tbody>
+            <tr><td><strong>changes mode</strong></td><td>the trigger mode that delivers every committed op, in order, to <code>on_apply</code></td></tr>
+            <tr><td><strong>commit seqno</strong></td><td>the last seqno of an atomic commit; the state in which its ops became visible</td></tr>
+            <tr><td><strong>cut</strong></td><td>the seqno a fork captures</td></tr>
+            <tr><td><strong>edge cache</strong></td><td>a replica scoped to a key range</td></tr>
+            <tr><td><strong>elided</strong></td><td>a changes-mode event whose value exceeded <code>trigger_inline_value</code> and arrives key-only</td></tr>
+            <tr><td><strong>executor</strong></td><td>a module invoked through <code>execute</code>, inside a transaction</td></tr>
+            <tr><td><strong>feed</strong></td><td>a descriptor declaration that makes a changes-mode module's output range a typed subscription</td></tr>
+            <tr><td><strong>fork</strong></td><td>a named, hard-linked, complete copy of the database at a cut</td></tr>
+            <tr><td><strong>instance</strong></td><td>a database directory, primary or fork, as addressed by a server; identified by its instance id</td></tr>
+            <tr><td><strong>join point</strong></td><td>the replication listener that replicas attach to</td></tr>
+            <tr><td><strong>keys mode</strong></td><td>the trigger mode that delivers coalesced touched keys to <code>on_touch</code></td></tr>
+            <tr><td><strong>lineage</strong></td><td>a store and the forks and restores descending from it, linked by instance ids</td></tr>
+            <tr><td><strong>module</strong></td><td>a WASM binary installed in the database</td></tr>
+            <tr><td><strong>one-shot</strong></td><td>invoking module bytes without installing them</td></tr>
+            <tr><td><strong>pin</strong></td><td>a durable, named, store-wide GC hold at a seqno</td></tr>
+            <tr><td><strong>querier</strong></td><td>a module invoked through <code>query</code>, read-only at a snapshot</td></tr>
+            <tr><td><strong>reserved keyspace</strong></td><td>keys starting with <code>0x00</code>. Engine state, invisible to users</td></tr>
+            <tr><td><strong>seqno</strong></td><td>the sequence number of an op, and also the address of a state</td></tr>
+            <tr><td><strong>store name, identity</strong></td><td>an operator name that maps to a deterministic instance id; required for replication</td></tr>
+            <tr><td><strong>trigger</strong></td><td>a binding of a module to a key range, invoked after commits into the range</td></tr>
+            <tr><td><strong>value log, vlog</strong></td><td>append-only files holding values at or above <code>value_threshold</code>. The tree holds pointers</td></tr>
+            <tr><td><strong>WAT</strong></td><td>the WebAssembly text format, accepted wherever module bytes are</td></tr>
+            <tr><td><strong>watermark</strong></td><td>the oldest registered snapshot; the GC boundary</td></tr>
+          </tbody>
+        </table></div>
+      </article>
+
+
+      <div id="pagenav" class="pagenav"></div>
+    </div>
+  </main>
+
+  <aside class="toc-rail"><div id="toc"></div></aside>
+
+</div>
+</body>
+</html>
