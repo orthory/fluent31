@@ -167,6 +167,24 @@
   }
   .nav a:hover { color: var(--fg); text-decoration: none; }
   .nav a.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); font-weight: 500; }
+  /* numbered steps: the number lives in CSS so link text stays clean for search and prev/next */
+  .nav a[data-step] { display: grid; grid-template-columns: 17px 1fr; align-items: baseline; }
+  .nav a[data-step]::before {
+    content: attr(data-step);
+    font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 11.5px; font-variant-numeric: tabular-nums;
+    color: var(--gray-light);
+  }
+  .nav a[data-step].active::before { color: var(--accent); }
+
+  .content .eyebrow {
+    margin: 0 0 6px;
+    font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 11.5px; letter-spacing: .02em;
+    color: var(--gray);
+    text-transform: none;
+  }
+  .content .eyebrow .of { color: var(--gray-light); }
 
   /* main */
   .main { padding: 44px 48px 96px; min-width: 0; }
@@ -497,11 +515,13 @@ document.addEventListener('DOMContentLoaded', function () {
       <h5>Start here</h5>
       <a data-nav="introduction" href="#introduction">Introduction</a>
       <a data-nav="installation" href="#installation">Install</a>
-      <a data-nav="first-store" href="#first-store">Your first store</a>
-      <a data-nav="first-graphql" href="#first-graphql">Serve it over GraphQL</a>
-      <a data-nav="first-module" href="#first-module">Your first module</a>
-      <a data-nav="first-trigger" href="#first-trigger">Your first trigger</a>
-      <a data-nav="embed" href="#embed">Embed it in Rust</a>
+
+      <h5>Tutorial</h5>
+      <a data-nav="first-store" data-step="1" href="#first-store">Your first store</a>
+      <a data-nav="first-graphql" data-step="2" href="#first-graphql">Serve it over GraphQL</a>
+      <a data-nav="first-module" data-step="3" href="#first-module">Your first module</a>
+      <a data-nav="first-trigger" data-step="4" href="#first-trigger">Your first trigger</a>
+      <a data-nav="embed" data-step="5" href="#embed">Embed it in Rust</a>
 
       <h5>Concepts</h5>
       <a data-nav="concept-modules" href="#concept-modules">Code in the database</a>
@@ -649,6 +669,7 @@ cargo test --workspace</pre></div>
       </article>
       <!-- ============================================================ -->
       <article data-page="first-store">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 1 <span class="of">of 5</span></p>
         <h1>Your first store</h1>
         <p class="lead">One command, no code: a running database you can write to and read back.</p>
 
@@ -688,6 +709,7 @@ fluent31&gt; help</pre></div>
       </article>
       <!-- ============================================================ -->
       <article data-page="first-graphql">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 2 <span class="of">of 5</span></p>
         <h1>Serve it over GraphQL</h1>
         <p class="lead">The same store on a network surface, with a schema, an explorer and live subscriptions — no code yet.</p>
 
@@ -732,6 +754,7 @@ query {
       </article>
       <!-- ============================================================ -->
       <article data-page="first-module">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 3 <span class="of">of 5</span></p>
         <h1>Your first module</h1>
         <p class="lead">Install code into the database and call it by name. This is the feature the rest of the engine is arranged around.</p>
 
@@ -794,6 +817,7 @@ fluent31&gt; query count user/
       </article>
       <!-- ============================================================ -->
       <article data-page="first-trigger">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 4 <span class="of">of 5</span></p>
         <h1>Your first trigger</h1>
         <p class="lead">Bind a module to a key range and the engine invokes it after every committed write into that range. Derived data stops being the writer's problem.</p>
 
@@ -834,6 +858,7 @@ fluent31&gt; scan idx/ idx0
       </article>
       <!-- ============================================================ -->
       <article data-page="embed">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 5 <span class="of">of 5</span></p>
         <h1>Embed it in Rust</h1>
         <p class="lead">The shell and the server are wrappers around a library. This is the library.</p>
 
