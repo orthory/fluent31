@@ -507,15 +507,6 @@ document.addEventListener('DOMContentLoaded', function () {
       <a data-nav="transactions" href="#transactions">Transactions</a>
       <a data-nav="concept-forks" href="#concept-forks">Branching the database</a>
 
-      <h5>Examples</h5>
-      <a data-nav="choosing" href="#choosing">Choosing the shape</a>
-      <a data-nav="ex-queries" href="#ex-queries">Queries in the database</a>
-      <a data-nav="ex-executors" href="#ex-executors">Invariants &amp; procedures</a>
-      <a data-nav="ex-indexes" href="#ex-indexes">Secondary indexes</a>
-      <a data-nav="ex-views-feeds" href="#ex-views-feeds">Views, feeds, cascades</a>
-      <a data-nav="ex-oneshot" href="#ex-oneshot">Migrations &amp; one-shots</a>
-      <a data-nav="ex-forks" href="#ex-forks">Forks in practice</a>
-
       <h5>Guides</h5>
       <a data-nav="embedded-api" href="#embedded-api">Embedded API</a>
       <a data-nav="wasm-modules" href="#wasm-modules">WASM modules</a>
@@ -530,6 +521,15 @@ document.addEventListener('DOMContentLoaded', function () {
       <a data-nav="replication" href="#replication">Replication</a>
       <a data-nav="operations" href="#operations">Operations</a>
       <a data-nav="testing" href="#testing">Testing</a>
+
+      <h5>Examples</h5>
+      <a data-nav="choosing" href="#choosing">Choosing the shape</a>
+      <a data-nav="ex-queries" href="#ex-queries">Queries in the database</a>
+      <a data-nav="ex-executors" href="#ex-executors">Invariants &amp; procedures</a>
+      <a data-nav="ex-indexes" href="#ex-indexes">Secondary indexes</a>
+      <a data-nav="ex-views-feeds" href="#ex-views-feeds">Views, feeds, cascades</a>
+      <a data-nav="ex-oneshot" href="#ex-oneshot">Migrations &amp; one-shots</a>
+      <a data-nav="ex-forks" href="#ex-forks">Forks in practice</a>
 
       <h5>Coming from SQL</h5>
       <a data-nav="sql-mapping" href="#sql-mapping">Translation guide</a>
@@ -601,7 +601,6 @@ subscription { orderFeed { seqno event { id record } query { snapshotSeqno } } }
         <h2>What it is not</h2>
         <ul>
           <li><strong>Not a query language.</strong> There is no parser, no columns, no joins — key layout and module code take their place. <a href="#sql-mapping">Translation guide</a> covers the relational vocabulary if you want the comparison.</li>
-          <li><strong>Not a version store.</strong> MVCC is the engine's own consistency machinery, not per-record history. The contract is in <a href="#consistency">The consistency contract</a>.</li>
           <li><strong>Not point-in-time recovery.</strong> Forks are named cuts, not continuous log archiving.</li>
           <li><strong>Not a public-facing sandbox.</strong> The WASM limits protect reliability and integrity. Authentication and authorization are a layer you put in front.</li>
           <li><strong>Single-node today.</strong> A store is one directory, locked by one process. Replicas are read-only followers.</li>
@@ -2173,6 +2172,7 @@ cargo run --release -p fluent31 --example gc_bench -- [threads] [always|never] [
         <h2>Multi-version concurrency control</h2>
         <p>The garbage-collection watermark is the sequence number of the oldest registered snapshot; pins and stream subscriptions register in the same way. Compaction retains every version above the watermark, together with the newest version at or below it, and discards the remainder. Two consequences follow directly: a snapshot held for any key holds every version of every key, and a sequence number remains addressable only while it is above the watermark. Per-key retention policies therefore cannot exist.</p>
         <p>Commit validation reads the newest committed version of each key read under <code>get_for_update</code> and each key in the write set, tombstones included, within the same critical section used by every other writer. The transaction's own snapshot bounds the watermark for its duration, so the evidence validation depends upon cannot be compacted away mid-transaction.</p>
+        <p>The versions the engine retains exist to serve in-flight readers and to validate commits, and they are discarded as soon as neither purpose requires them. Superseded versions are therefore not a record's history: they are unaddressable once the watermark passes them, they are renumbered wholesale by a journal rebuild, and a fork or restore mints a new identity for them. A history that must survive those events is written as data — by a changes-mode trigger, under keys chosen for the purpose — and is then subject to the same retention rules as any other data.</p>
 
         <h2>Recovery</h2>
         <p>The manifest is a complete metadata snapshot, rewritten on each structural change and made current by an atomic rename of <code>CURRENT</code>. Table files are fsynced before any manifest references them, so a referenced file is always readable.</p>
