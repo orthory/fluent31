@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use fluent31::{Db, Options};
 use fluent_replication::{ReplServer, ReplServerConfig};
+use tracing::{error, info};
 
 const USAGE: &str = "\
 usage: fluent-replication <db-dir> [--store-name NAME] [--listen ADDR:PORT]
@@ -21,7 +22,21 @@ fn usage() -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// Diagnostics go to stderr as structured lines; `RUST_LOG` overrides the
+/// default level (`info`), per crate if wanted: `RUST_LOG=fluent31=debug`.
+fn init_logging() {
+    use std::io::IsTerminal;
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+}
+
 fn main() -> ExitCode {
+    init_logging();
     let mut dir: Option<String> = None;
     let mut listen = "127.0.0.1:8428".to_string();
     let mut store_name: Option<String> = None;
@@ -54,22 +69,17 @@ fn main() -> ExitCode {
     ) {
         Ok(d) => Arc::new(d),
         Err(e) => {
-            eprintln!("fluent-replication: cannot open {dir}: {e}");
+            error!(dir, error = %e, "cannot open store");
             return ExitCode::FAILURE;
         }
     };
     let srv = match ReplServer::new(db, ReplServerConfig::default()) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("fluent-replication: {e}");
+            error!(error = %e, "cannot serve replication");
             return ExitCode::FAILURE;
         }
     };
-    println!(
-        "fluent-replication: {} instance {} on {listen}",
-        srv.identity().name,
-        srv.identity().instance_hex()
-    );
     serve(srv, listen)
 }
 
@@ -78,20 +88,26 @@ async fn serve(srv: Arc<ReplServer>, listen: String) -> ExitCode {
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("fluent-replication: cannot listen on {listen}: {e}");
+            error!(listen, error = %e, "cannot listen");
             return ExitCode::FAILURE;
         }
     };
+    info!(
+        listen,
+        store = %srv.identity().name,
+        instance = %srv.identity().instance_hex(),
+        "serving replication"
+    );
     tokio::select! {
         r = srv.serve(listener) => match r {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("fluent-replication: {e}");
+                error!(error = %e, "replication plane failed");
                 ExitCode::FAILURE
             }
         },
         _ = tokio::signal::ctrl_c() => {
-            eprintln!("fluent-replication: shutting down");
+            info!("shutting down");
             ExitCode::SUCCESS
         }
     }

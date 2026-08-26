@@ -164,9 +164,13 @@ fluent31> help
 
 ```sh
 cargo run -p fluent-server -- ./data --store-name prod
-# graphql      http://127.0.0.1:8317/graphql   (GraphiQL at /)
-# replication  tcp 127.0.0.1:8428
+# INFO db{dir=./data store=prod instance=6065…}: fluent31::db: store opened backend="io_uring" seqno=0 …
+# INFO fluent_server: serving graphql: /graphql (GraphiQL at /, …) listen=127.0.0.1:8317
+# INFO fluent_server: serving replication: … listen=127.0.0.1:8428 store=prod instance=6065…
 ```
+
+The log is stderr; `RUST_LOG` sets the level
+([§14.3](#143-monitoring)).
 
 ```sh
 curl -s http://127.0.0.1:8317/graphql -H 'content-type: application/json' \
@@ -524,8 +528,11 @@ let s: DbStats = db.stats();
 bytes)>`, `vlog_files`, `vlog_retired` (retired files waiting on the
 deletion gates), `discard_bytes` (value-log bytes known to be dead),
 `cache_hits`, `cache_misses`, `commit_groups`, `commit_batches` (the
-difference from `commit_groups` is how many fsyncs group commit saved)
-and `wal_syncs`.
+difference from `commit_groups` is how many fsyncs group commit saved),
+`wal_syncs`, `subscriptions` (live stream subscriptions, each buffering
+up to `sub_queue_bytes`) and `snapshots` (registered snapshots —
+explicit, transactions, pins and subscription holds — every one a GC
+hold).
 
 Compaction and value-log GC run on their own on background threads. The
 manual calls exist for tests, benchmarks and "reclaim now".
@@ -754,7 +761,7 @@ already hold.
 ```rust
 fluent_guest::input() -> Vec<u8>                      // the input blob
 fluent_guest::output(&[u8])                           // append to the output
-fluent_guest::log(&str)                               // debug log (the host prints it when FLUENT31_WASM_LOG is set)
+fluent_guest::log(&str)                               // debug log (a `debug` event under target fluent31::wasm::guest)
 fluent_guest::get(&[u8]) -> Option<Vec<u8>>
 fluent_guest::get_for_update(&[u8]) -> Result<Option<Vec<u8>>, i32>   // Err = errno (EROFS in a query)
 fluent_guest::put(&[u8], &[u8]) -> Result<(), i32>
@@ -1282,13 +1289,16 @@ One process, one `Db`, two planes:
 The store directory is flocked, so the planes cannot be split across
 processes. Server mode is how they share one handle. `--store-name` is
 persisted in the store, so pass it once. Without a name, graphql serves
-and the join point stays closed; the startup banner says so.
+and the join point stays closed; the log says so.
 
 On the first SIGINT or SIGTERM the server stops accepting and drains
 in-flight GraphQL requests, then the process exits and open replication
 connections drop (the WAL keeps the store consistent). A second signal
-exits immediately. The banner prints each bound address and, for a named
-store, its name and instance id. If the engine degrades
+exits immediately. The log (stderr; `RUST_LOG` sets the level,
+[§14.3](#143-monitoring)) reports each bound address as it comes up
+and, for a named store, its name and instance id; every flush,
+compaction, fork and journal event follows at `info`, with a stats
+heartbeat every 60 s. If the engine degrades
 (`Error::Background`), GraphQL answers `BACKGROUND` and replication
 answers `ERR`; restart the process.
 
@@ -1327,6 +1337,9 @@ dir = "./journal"             # required once the section exists
 rotate-bytes = 134217728
 compact-when-deltas-exceed = 1.0
 compact-min-bytes = 67108864
+
+[log]
+stats-every-secs = 60         # stats heartbeat per open store (§14.3); 0 = off
 
 [engine]                      # every fluent31::Options tunable (§5.1), kebab-case
 create-if-missing = true
@@ -1367,7 +1380,7 @@ trigger-inline-value = 65536
 Each plane also runs on its own, with the same defaults:
 
 ```sh
-fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync ..] [--max-body-bytes N] [--journal DIR ...]
+fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync ..] [--max-body-bytes N] [--journal DIR ...] [--stats-every-secs N]
 fluent-graphql --print-schema                 # the base SDL (built-ins only)
 fluent-replication <db-dir> [--store-name NAME] [--listen ADDR:PORT]   # the name is needed once, then persisted
 ```
@@ -1388,10 +1401,11 @@ server.shutdown().await;
 ```
 
 `ServerConfig` holds `graphql_addr`, `replication_addr`,
-`max_body_bytes`, `registry: RegistryConfig { max_open, idle_ttl }` and
-`replication: ReplServerConfig { max_frame, ping_every }`. Nothing is
-served unless
-every bind succeeds; failures come back as `StartError::{Engine, Bind}`.
+`max_body_bytes`, `registry: RegistryConfig { max_open, idle_ttl }`,
+`replication: ReplServerConfig { max_frame, ping_every }` and
+`stats_every` (the heartbeat period; 60 s, zero = off). Nothing is
+served unless every bind succeeds; failures come back as
+`StartError::{Engine, Bind}`.
 The TOML loader is public too (`FileConfig::load`, `overlay`,
 `server_config`, `engine_options`, `parse_sync`).
 
@@ -1401,7 +1415,9 @@ RegistryConfig::default())`, then `fluent_graphql::router(registry,
 max_body)`, which is an `axum::Router`. Forks carry their own identity,
 so passing the primary's name to the registry makes every fork open
 fail. Call `registry.evict_idle()` periodically; the binaries tick every
-60 seconds. `SchemaManager::{execute, execute_stream, schema}` run
+60 seconds. The stats heartbeat is
+`fluent_graphql::stats_heartbeat(registry, every)`, a future to spawn.
+`SchemaManager::{execute, execute_stream, schema}` run
 operations in-process, and `base_sdl()` is the built-in schema text.
 
 For replication: `ReplServer::new(db, cfg)?` fails with
@@ -1613,6 +1629,11 @@ replica.master();                                      // StoreIdentity
 // client.snapshot(lo, hi), fetch_table_chunk(..), fetch_value(..); ReplClient implements edge::ValueFetcher
 ```
 
+A replica logs its attach, every slice pull and every re-sync at
+`info`; a lag cut, a broken stream and a changed master identity are
+`warn` ([§14.3](#143-monitoring)). The master logs each stream it
+serves and why it ended.
+
 ## 14. Operations
 
 ### 14.1 Directory layout
@@ -1645,20 +1666,57 @@ anything, and don't delete WALs or manifests.
 
 Writers stall rather than fail when frozen memtables exceed
 `max_immutable_memtables` or L0 exceeds `l0_stall_trigger`. Sustained
-stalls mean compaction cannot keep up.
+stalls mean compaction cannot keep up. Each stall episode is logged:
+`warn` as it begins, with its cause; `info` as it ends, with its
+duration ([§14.3](#143-monitoring)).
 
 ### 14.3 Monitoring
 
-- `stats` (engine, shell, GraphQL) reports the seqno, the
-  memtable and level shape, value-log live, retired and discardable
-  bytes, the cache hit rate, and group commit amortization. An edge
-  replica reports through `EdgeStats` instead: flushed and frontier
-  seqno, fragments, overlay and value-cache bytes.
+Two channels: pull state through `stats`, or read the log.
+
+- `stats` (engine, shell, GraphQL) reports the seqno, the memtable and
+  level shape, value-log live, retired and discardable bytes, the cache
+  hit rate, group commit amortization, and the live subscription and
+  snapshot counts (a subscription buffers up to `sub_queue_bytes`; a
+  snapshot holds GC). An edge replica reports through `EdgeStats`
+  instead: flushed and frontier seqno, fragments, overlay and
+  value-cache bytes.
 - `triggers` reports `pending` (the backlog depth) and `lastError` per
   trigger.
 - `Journal::stats()`: `last_seqno` against `db.seqno()` is the journal
   lag; `last_error` is the last failure.
-- `FLUENT31_WASM_LOG=1` prints guest `log` calls to stderr.
+
+#### Logging
+
+The engine emits [`tracing`](https://docs.rs/tracing) events. The
+binaries write them to stderr and read `RUST_LOG` for the level
+(default `info`; `fluent-cli` defaults to `warn` so the shell stays
+quiet). An embedding process installs its own subscriber; without one
+the events cost nothing. Every engine line names the store it is about
+(`db{dir=… store=… instance=…}`), so a server holding forks stays
+legible.
+
+| Level | What |
+|---|---|
+| `error` | a background failure degraded the store (every one is logged, not only the first); the journal stopped; a network plane died |
+| `warn` | a write stall began (and why), a subscriber cut for lag, a trigger run failing (with its backoff), a torn WAL tail at recovery, a WASM trap, a replica re-syncing, a file the store could not delete |
+| `info` | open (recovery summary) and close; every flush, compaction and value-log GC; forks created and deleted; modules, triggers and pins added and removed; journal base, rotate and compact; replication streams starting and ending; fork instances the server opens and closes; the stats heartbeat |
+| `debug` | each WASM invocation (fuel, memory, duration), trigger drains, subscriptions opening and closing, GC liveness sampling, execute retries |
+| `trace` | per batch: journal deltas, streamed batches |
+
+GraphQL requests are not logged.
+
+The **stats heartbeat** is the `stats` snapshot as one `info` line per
+open store (the primary and every fork the server holds open) plus the
+fork registry's occupancy, every 60 s by default — `[log]
+stats-every-secs` in the server config, `--stats-every-secs` on
+`fluent-graphql`, `0` turns it off; an embedder gets the same line from
+`Db::log_stats()`. When memory grows, the heartbeat says which it was:
+`imms` climbing (flush not keeping up — a stall follows), subscriptions,
+snapshots pinning history, or fork instances.
+
+Guest `log` output is a `debug` event under its own target, enabled
+alone with `RUST_LOG=fluent31::wasm::guest=debug`.
 
 ### 14.4 Limits
 

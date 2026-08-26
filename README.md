@@ -23,7 +23,9 @@ instead of SQL.
   lost.
 - Server: one process, one store, two planes. GraphQL for typed and
   admin operations with live subscriptions, and a replication join point
-  for full replicas and key-range edge caches.
+  for full replicas and key-range edge caches. Structured logs
+  (`tracing`) of every flush, compaction, fork, journal and replication
+  event, and a per-store stats heartbeat.
 
 ## Quick start
 

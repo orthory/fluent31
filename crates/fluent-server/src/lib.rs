@@ -29,10 +29,11 @@ use fluent_graphql::{InstanceRegistry, RegistryConfig, SchemaManager};
 use fluent_replication::{ReplServer, ReplServerConfig};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tracing::error;
 
 pub use config::{
     parse_sync, CompressionKey, ConfigError, EngineSection, FileConfig, GraphqlSection,
-    IoBackendKey, JournalSection, ListenSection, ReplicationSection,
+    IoBackendKey, JournalSection, ListenSection, LogSection, ReplicationSection,
 };
 
 /// Listen addresses plus each composed plane's tunables. Every plane is
@@ -48,6 +49,9 @@ pub struct ServerConfig {
     pub registry: RegistryConfig,
     /// Replication plane limits.
     pub replication: ReplServerConfig,
+    /// Period of the stats heartbeat (an INFO line per open store plus
+    /// the fork registry's occupancy); zero turns it off.
+    pub stats_every: std::time::Duration,
 }
 
 impl Default for ServerConfig {
@@ -58,6 +62,7 @@ impl Default for ServerConfig {
             max_body_bytes: 32 << 20,
             registry: RegistryConfig::default(),
             replication: ReplServerConfig::default(),
+            stats_every: std::time::Duration::from_secs(60),
         }
     }
 }
@@ -168,7 +173,7 @@ impl Server {
                 .with_graceful_shutdown(shutdown)
                 .await
             {
-                eprintln!("fluent-server: graphql plane failed: {e}");
+                error!(error = %e, "graphql plane failed");
             }
         });
 
@@ -183,11 +188,17 @@ impl Server {
                 }
             }
         }));
+        if !cfg.stats_every.is_zero() {
+            accept_tasks.push(tokio::spawn(fluent_graphql::stats_heartbeat(
+                registry.clone(),
+                cfg.stats_every,
+            )));
+        }
 
         if let (Some(repl), Some(listener)) = (repl, repl_listener) {
             accept_tasks.push(tokio::spawn(async move {
                 if let Err(e) = repl.serve(listener).await {
-                    eprintln!("fluent-server: replication plane failed: {e}");
+                    error!(error = %e, "replication plane failed");
                 }
             }));
         }

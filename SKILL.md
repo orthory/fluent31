@@ -68,6 +68,7 @@ cargo run -p fluent-cli -- journal-rebuild <journal-dir> <dest-dir>      # rebui
 - Disaster recovery: attach a journal (a `[journal]` section in the server TOML, or `--journal DIR` on the standalone `fluent-graphql`); rebuild with `fluent-cli journal-rebuild`. GUIDE §9.
 - Replica: a named master, then embed `fluent_replication::EdgeReplica` in the reading process. GUIDE §13.
 - Tune: every `Options` field with its default is in GUIDE §5.1. The server TOML `[engine]` section mirrors it, except that `sync` and `store-name` are top-level keys.
+- Diagnose: the binaries log to stderr (`RUST_LOG`; default `info`, `fluent-cli` `warn`). Store open/close, every flush, compaction and value-log GC, forks, modules, triggers, journal and replication lifecycle at `info`; stalls, lag cuts, trigger failures and WASM traps at `warn`; every background failure at `error`; a per-store stats heartbeat every 60 s (`[log] stats-every-secs`, `--stats-every-secs`). GraphQL requests are not logged. GUIDE §14.3.
 
 ## Traps
 
@@ -80,6 +81,7 @@ cargo run -p fluent-cli -- journal-rebuild <journal-dir> <dest-dir>      # rebui
 - Keys-mode events carry no old value. Keep a back-pointer so you can unindex.
 - Docker blocks io_uring by default: `--security-opt seccomp=unconfined`, or `io-backend = "std"`.
 - Two processes cannot open one store directory. Server mode shares the handle.
+- A process that keeps growing: read the stats heartbeat. `imms` climbing is flush falling behind (a stall follows); `subscriptions` and `snapshots` are GC holds; every open fork instance is a full engine with its own memtable and cache.
 
 ## Changing this repo
 

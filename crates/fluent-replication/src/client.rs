@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use fluent31::edge::{EdgeConfig, EdgeStore, ValueFetcher};
 use fluent31::{Error, InstanceId, Result, SliceManifest, StoreIdentity};
+use tracing::{debug, info, trace, warn};
 
 use crate::proto::*;
 
@@ -350,6 +351,14 @@ impl EdgeReplica {
     /// complete scoped view.
     pub fn start(cfg: EdgeReplicaConfig) -> Result<EdgeReplica> {
         let (client, info) = ReplClient::connect(&cfg.master_addr)?;
+        info!(
+            master = %cfg.master_addr,
+            store = %info.name,
+            instance = %fluent31::identity::hex(&info.instance_id),
+            master_seqno = info.visible_seqno,
+            dir = %cfg.dir.display(),
+            "edge replica attaching"
+        );
         let store = attach_store(&cfg, &info, client.clone())?;
 
         // subscribe FIRST: the slice pulled afterwards is guaranteed to
@@ -423,9 +432,14 @@ fn attach_store(
 /// the master compacted underneath us — the caller retries with a fresh
 /// snapshot.
 fn pull_slice(client: &ReplClient, store: &EdgeStore, cfg: &EdgeReplicaConfig) -> Result<()> {
+    let started = Instant::now();
     let slice = client.snapshot(&cfg.scope_lo, cfg.scope_hi.as_deref())?;
+    let mut fragments_total: usize = 0;
+    let mut fetched: usize = 0;
+    let mut fetched_bytes: u64 = 0;
     for run in slice.levels.iter().flatten() {
         for t in &run.tables {
+            fragments_total += 1;
             if store.has_fragment(t.id) {
                 continue;
             }
@@ -440,9 +454,19 @@ fn pull_slice(client: &ReplClient, store: &EdgeStore, cfg: &EdgeReplicaConfig) -
             // write then rename would be overkill: install_slice re-verifies
             // size + bounds + block CRCs before the fragment is referenced
             std::fs::write(store.fragment_path(t.id), &bytes)?;
+            fetched += 1;
+            fetched_bytes += t.size;
         }
     }
-    store.install_slice(&slice)
+    store.install_slice(&slice)?;
+    info!(
+        fragments = fragments_total,
+        fetched,
+        fetched_bytes,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "slice pulled and installed"
+    );
+    Ok(())
 }
 
 fn pull_slice_retrying(inner: &ReplicaInner, state: &ReplicaState) -> Result<()> {
@@ -461,14 +485,23 @@ fn pull_slice_with_retries(
     stop: impl Fn() -> bool,
 ) -> Result<()> {
     let mut last = None;
-    for _ in 0..20 {
+    for attempt in 1..=20 {
         if stop() {
             return Ok(());
         }
         match pull_slice(client, store, cfg) {
             Ok(()) => return Ok(()),
-            Err(Error::Gone(_)) => continue,
+            Err(Error::Gone(_)) => {
+                debug!(attempt, "slice pull raced a master compaction; taking a fresh snapshot");
+                continue;
+            }
             Err(e) => {
+                // the first failure is news; the retries are not
+                if attempt == 1 {
+                    warn!(error = %e, "slice pull failed; retrying");
+                } else {
+                    debug!(attempt, error = %e, "slice pull failed; retrying");
+                }
                 last = Some(e);
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -488,16 +521,26 @@ fn run_loop(inner: Arc<ReplicaInner>, mut stream: StreamConn) {
         }
         let event = stream.next();
         match event {
-            Ok(PushFrame::Batch(entries)) => {
-                if inner.state().store.apply_stream(&entries).is_err() {
+            Ok(PushFrame::Batch(entries)) => match inner.state().store.apply_stream(&entries) {
+                Ok(()) => trace!(entries = entries.len(), "stream batch applied"),
+                Err(e) => {
                     // a malformed batch is a broken stream: re-sync
+                    warn!(error = %e, "malformed stream batch; re-syncing");
                     if !resync(&inner, &mut stream) {
                         return;
                     }
                 }
-            }
+            },
             Ok(PushFrame::Ping) => {}
-            Ok(PushFrame::Lagged) | Err(_) => {
+            Ok(PushFrame::Lagged) => {
+                warn!("master cut the stream: this replica lagged past its buffer; re-syncing");
+                if !resync(&inner, &mut stream) {
+                    return;
+                }
+                next_refresh = inner.cfg.refresh_every.map(|d| Instant::now() + d);
+            }
+            Err(e) => {
+                warn!(error = %e, "stream broke; re-syncing");
                 if !resync(&inner, &mut stream) {
                     return;
                 }
@@ -507,7 +550,9 @@ fn run_loop(inner: Arc<ReplicaInner>, mut stream: StreamConn) {
         if next_refresh.is_some_and(|t| Instant::now() >= t) {
             // refresh failures are non-fatal: the stream keeps the replica
             // fresh, the overlay just stays bigger until the next attempt
-            let _ = pull_slice_retrying(&inner, &inner.state());
+            if let Err(e) = pull_slice_retrying(&inner, &inner.state()) {
+                warn!(error = %e, "periodic slice refresh failed; the stream keeps the replica current");
+            }
             next_refresh = inner.cfg.refresh_every.map(|d| Instant::now() + d);
         }
     }
@@ -517,10 +562,12 @@ fn run_loop(inner: Arc<ReplicaInner>, mut stream: StreamConn) {
 /// local cache; a re-minted instance forces a full re-attach (fresh client
 /// + wiped store, swapped in together). Returns false only on shutdown.
 fn resync(inner: &ReplicaInner, stream: &mut StreamConn) -> bool {
+    let mut attempts: u64 = 0;
     loop {
         if inner.shutdown.load(Ordering::Acquire) {
             return false;
         }
+        attempts += 1;
         let attempt = || -> Result<StreamConn> {
             let state = inner.state();
             let expect = state.store.master().instance_id;
@@ -534,9 +581,10 @@ fn resync(inner: &ReplicaInner, stream: &mut StreamConn) -> bool {
                     pull_slice_retrying(inner, &state)?;
                     Ok(s)
                 }
-                Err(Error::ProvenanceMismatch(_)) => {
+                Err(Error::ProvenanceMismatch(m)) => {
                     // the master was restored/forked: everything cached is
                     // dead. Re-attach from scratch and swap client + store.
+                    warn!(reason = %m, "master identity changed; discarding the cache and re-attaching");
                     let (client, info) = ReplClient::connect(&inner.cfg.master_addr)?;
                     let store = attach_store(&inner.cfg, &info, client.clone())?;
                     let (_start, s) = StreamConn::open(
@@ -556,9 +604,19 @@ fn resync(inner: &ReplicaInner, stream: &mut StreamConn) -> bool {
         match attempt() {
             Ok(s) => {
                 *stream = s;
+                info!(attempts, "re-synced with the master");
                 return true;
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(500)),
+            Err(e) => {
+                // the first failure is news; a master that stays down is
+                // not news twice a second
+                if attempts == 1 {
+                    warn!(error = %e, "re-sync failed; retrying until the master is back");
+                } else {
+                    debug!(attempts, error = %e, "re-sync failed; retrying");
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
         }
     }
 }

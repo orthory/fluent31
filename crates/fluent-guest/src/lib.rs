@@ -402,7 +402,9 @@ pub fn output(bytes: &[u8]) {
     }
 }
 
-/// Emit a log line (host-side, size limited).
+/// Emit a log line. The host records it as a `debug` event under the
+/// `fluent31::wasm::guest` target; capped at `max_wasm_log` bytes per
+/// invocation.
 pub fn log(msg: &str) {
     unsafe {
         sys::log(0, msg.as_ptr(), msg.len() as i32);

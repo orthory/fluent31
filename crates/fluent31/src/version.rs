@@ -45,9 +45,11 @@ impl TableHandle {
 
 impl Drop for TableHandle {
     fn drop(&mut self) {
-        if self.obsolete.load(Ordering::Acquire) {
-            let _ = std::fs::remove_file(&self.path);
+        if !self.obsolete.load(Ordering::Acquire) {
+            return;
         }
+        let Err(e) = std::fs::remove_file(&self.path) else { return };
+        tracing::warn!(path = %self.path.display(), error = %e, "could not delete obsolete table file");
     }
 }
 

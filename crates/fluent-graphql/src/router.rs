@@ -112,13 +112,16 @@ fn resolve_error(instance: &str, e: ResolveError) -> Response {
             })),
         )
             .into_response(),
-        ResolveError::Engine(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": format!("cannot open instance {instance:?}: {e}")
-            })),
-        )
-            .into_response(),
+        ResolveError::Engine(e) => {
+            tracing::warn!(instance, error = %e, "cannot open fork instance");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("cannot open instance {instance:?}: {e}")
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

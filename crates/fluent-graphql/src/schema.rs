@@ -495,6 +495,8 @@ fn stats_object() -> Object {
         .field(value_field("commitGroups", TypeRef::named_nn("U64")))
         .field(value_field("commitBatches", TypeRef::named_nn("U64")))
         .field(value_field("walSyncs", TypeRef::named_nn("U64")))
+        .field(value_field("subscriptions", TypeRef::named_nn(TypeRef::INT)))
+        .field(value_field("snapshots", TypeRef::named_nn(TypeRef::INT)))
 }
 
 fn put_op_input() -> InputObject {
