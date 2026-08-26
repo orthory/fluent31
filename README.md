@@ -110,11 +110,18 @@ cargo test --workspace                              # model tests, group commit,
                                                     # journal rebuild
 cargo test -p fluent31 --features fault-injection   # fsync-failure / ENOSPC / read-fault paths
 scripts/build-agent-docs.py --check                 # docs/p/ and docs/llms.txt match docs/index.html
+scripts/check-docs-api.py                           # the docs still describe the code
 ```
 
 `docs/p/*.md` and `docs/llms.txt` are generated from `docs/index.html`. Edit
 the site, then re-run `scripts/build-agent-docs.py`; `--check` fails if they
 have drifted.
+
+`check-docs-api.py` compares the usage docs against the crates: every call
+they make resolves, every public method is named somewhere, GraphQL fields
+and arguments exist, `Options` defaults still match `config.rs`, and the
+printed command lines are the ones the binaries accept. Run it after
+changing a public signature, a default, or a flag.
 
 Under Docker, io_uring is blocked by the default seccomp profile. Add
 `--security-opt seccomp=unconfined`.

@@ -363,3 +363,9 @@ The documentation site `docs/index.html` is the source for usage docs.
 `scripts/build-agent-docs.py` — edit the site, re-run the script, never
 hand-edit the generated files. `scripts/build-agent-docs.py --check` fails
 if they have drifted.
+
+`scripts/check-docs-api.py` fails when the docs stop describing the code: a
+call they make that no longer resolves, a public method named nowhere, a
+GraphQL field or argument that moved, an `Options` default that drifted, a
+command line the binary no longer accepts. Run it after changing any public
+signature, default or flag.
