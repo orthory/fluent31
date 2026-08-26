@@ -237,6 +237,18 @@ impl async_graphql::Executor for ManagerExecutor {
     }
 }
 
+/// The stats heartbeat: [`InstanceRegistry::log_stats`] every `every`,
+/// for as long as the task lives. The first line comes after one period,
+/// not at start (`Db::open` already reported the opening state).
+pub async fn stats_heartbeat(registry: Arc<InstanceRegistry>, every: std::time::Duration) {
+    let mut tick = tokio::time::interval(every);
+    tick.tick().await; // an interval's first tick is immediate
+    loop {
+        tick.tick().await;
+        registry.log_stats();
+    }
+}
+
 /// Schema SDL for the built-in surface (no database, no modules).
 pub fn base_sdl() -> String {
     schema::build(Weak::new(), &BTreeMap::new()).sdl()

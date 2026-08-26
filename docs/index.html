@@ -1362,7 +1362,7 @@ fluent_guest::scan_prefix(prefix: &amp;[u8]) -&gt; Result&lt;Scan, i32&gt;</pre>
         <h2>Input, output and logging</h2>
         <div class="codeblock"><pre>fluent_guest::input() -&gt; Vec&lt;u8&gt;    <span class="c">// the whole input blob</span>
 fluent_guest::output(&amp;[u8])         <span class="c">// APPENDS to the output; call repeatedly to stream</span>
-fluent_guest::log(&amp;str)             <span class="c">// stderr, only when FLUENT31_WASM_LOG is set</span></pre></div>
+fluent_guest::log(&amp;str)             <span class="c">// a debug event under target fluent31::wasm::guest</span></pre></div>
         <p>The entry macros call <code>input()</code> and <code>output()</code> for you; reach for them directly when the entry is written by hand or when the output is built in pieces. Logs are for debugging only — they are rate-capped and invisible unless the host asks for them, so results never travel that way.</p>
 
         <h2>Trigger input</h2>
@@ -1425,7 +1425,7 @@ input_read : (dst: i32, cap: i32, off: i32) -&gt; i32</pre></div>
         <div class="codeblock"><pre>output_write : (ptr: i32, len: i32) -&gt; i32</pre></div>
         <p><strong>Appends</strong> <code>len</code> bytes to the invocation's output. Returns <code>0</code>, or <code>ENOSPC</code> once the total would exceed <code>max_wasm_output</code>. Check the return value wherever truncated output would be a correctness bug rather than a cosmetic one.</p>
         <div class="codeblock"><pre>log : (level: i32, ptr: i32, len: i32) -&gt; i32</pre></div>
-        <p>Debug logging, capped at <code>max_wasm_log</code> total bytes and then <code>ENOSPC</code>. The host prints to stderr only when <code>FLUENT31_WASM_LOG</code> is set. Never use logs to communicate results.</p>
+        <p>Debug logging, capped at <code>max_wasm_log</code> total bytes and then <code>ENOSPC</code>. The host emits each line as a <code>debug</code> event under the <code>fluent31::wasm::guest</code> target (<code>RUST_LOG=fluent31::wasm::guest=debug</code> to see them). Never use logs to communicate results.</p>
 
         <h2>Point access</h2>
         <div class="codeblock"><pre>get            : (kptr, klen, off, vbuf, vcap: i32) -&gt; i64
@@ -1578,7 +1578,7 @@ scan_close      : (h: i32) -&gt; i32   <span class="c">// free the handle</span>
         <p>A trigger consumer's failure is not returned to anyone — the write that caused it has already committed. It surfaces as a stalled queue: <code>triggers</code> shows a growing <code>pending</code> and a <code>lastError</code>, and the runner keeps retrying with backoff until the module is fixed or replaced. <a href="#triggers">Triggers</a> covers the drain loop.</p>
 
         <h2>Seeing inside a module</h2>
-        <p>Set <code>FLUENT31_WASM_LOG</code> and the host prints <code>fluent_guest::log</code> output to stderr; leave it unset and the calls are cheap and silent. Logs are capped at <code>max_wasm_log</code> per invocation, so they are a debugging channel and never a results channel. Beyond that the tools are the ordinary ones: exercise the module against a <a href="#forks">fork</a> of real data, and pin the invariant with a test that runs the executor concurrently — <a href="#testing">Testing</a> has the harness.</p>
+        <p>Run with <code>RUST_LOG=fluent31::wasm::guest=debug</code> and the host emits <code>fluent_guest::log</code> output as log lines; otherwise the calls are cheap and silent. Logs are capped at <code>max_wasm_log</code> per invocation, so they are a debugging channel and never a results channel. Beyond that the tools are the ordinary ones: exercise the module against a <a href="#forks">fork</a> of real data, and pin the invariant with a test that runs the executor concurrently — <a href="#testing">Testing</a> has the harness.</p>
       </article>
       <!-- ============================================================ -->
       <article data-page="embedded-api">
@@ -2159,11 +2159,13 @@ replica.master();                            <span class="c">// StoreIdentity</s
 
         <h2>Monitoring</h2>
         <ul>
-          <li><code>stats</code> (engine, shell, GraphQL) reports the seqno, the memtable and level shape, value-log live, retired and discardable bytes, the cache hit rate, and group commit amortization. An edge replica reports through <code>EdgeStats</code> instead.</li>
+          <li><code>stats</code> (engine, shell, GraphQL) reports the seqno, the memtable and level shape, value-log live, retired and discardable bytes, the cache hit rate, group commit amortization, and the live subscription and snapshot counts. An edge replica reports through <code>EdgeStats</code> instead.</li>
           <li><code>triggers</code> reports <code>pending</code> (the backlog depth) and <code>lastError</code> per trigger.</li>
           <li><code>Journal::stats()</code>: <code>last_seqno</code> against <code>db.seqno()</code> is the journal lag; <code>last_error</code> is the last failure.</li>
-          <li><code>FLUENT31_WASM_LOG=1</code> prints guest <code>log</code> calls to stderr.</li>
         </ul>
+        <h3>Logging</h3>
+        <p>The engine emits <code>tracing</code> events; the binaries write them to stderr and read <code>RUST_LOG</code> for the level (default <code>info</code>; <code>fluent-cli</code> defaults to <code>warn</code>). Every engine line names its store (<code>db{dir=… store=… instance=…}</code>). Flushes, compactions, value-log GC, forks, modules, triggers, pins, journal and replication lifecycle are <code>info</code>; write stalls, lag cuts, trigger failures, torn WAL tails and WASM traps are <code>warn</code>; store degradation is <code>error</code>; per-invocation WASM cost and trigger drains are <code>debug</code>. GraphQL requests are not logged.</p>
+        <p>The stats heartbeat logs the <code>stats</code> snapshot per open store (primary and every open fork) every 60 s — <code>[log] stats-every-secs</code> in the server config, <code>--stats-every-secs</code> on <code>fluent-graphql</code>, <code>0</code> turns it off; embedders call <code>Db::log_stats()</code>. Guest <code>log</code> output: <code>RUST_LOG=fluent31::wasm::guest=debug</code>.</p>
 
         <h2>Limits</h2>
         <div class="tablewrap"><table>

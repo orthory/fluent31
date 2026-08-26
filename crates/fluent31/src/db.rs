@@ -13,9 +13,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex, RwLock};
+use tracing::{debug, error, info, warn, Span};
 
 use crate::batch::{decode_batch, encode_batch, BatchOp, EncEntry, WriteBatch};
 use crate::cache::BlockCache;
@@ -72,6 +73,11 @@ impl SnapshotList {
             }
         }
     }
+
+    fn len(&self) -> usize {
+        self.counts.values().sum()
+    }
+
     fn min(&self) -> Option<SeqNo> {
         self.counts.keys().next().copied()
     }
@@ -169,6 +175,30 @@ impl Drop for GroupPanicGuard<'_> {
     }
 }
 
+/// One write-stall episode: the writers currently parked and when the
+/// first of them arrived. Logged once per episode, not once per writer.
+#[derive(Default)]
+pub(crate) struct StallGauge {
+    writers: usize,
+    since: Option<Instant>,
+}
+
+/// A parked writer's membership in the stall episode; the last one out
+/// closes the episode with its duration.
+struct StallHold<'a>(&'a DbInner);
+
+impl Drop for StallHold<'_> {
+    fn drop(&mut self) {
+        let mut g = self.0.stall.lock();
+        g.writers -= 1;
+        if g.writers > 0 {
+            return;
+        }
+        let Some(since) = g.since.take() else { return };
+        info!(parent: &self.0.span, elapsed_ms = since.elapsed().as_millis() as u64, "write stall over");
+    }
+}
+
 pub(crate) struct DbInner {
     pub opts: Options,
     pub paths: DbPaths,
@@ -178,6 +208,11 @@ pub(crate) struct DbInner {
     /// Resolved at open (verified / adopted / fork-minted), immutable for
     /// the process lifetime; also persisted inside the manifest data.
     pub identity: Option<StoreIdentity>,
+    /// Diagnostic context every event this store emits is parented to
+    /// (`dir`, `store`, `instance`): one process may hold many stores
+    /// (forks), and a line must say which one it is about.
+    pub span: Span,
+    pub stall: Mutex<StallGauge>,
 
     pub state: RwLock<DbState>,
     pub write_mu: Mutex<WriteState>,
@@ -374,10 +409,16 @@ impl DbInner {
     /// Degrade the store: every subsequent write is refused until reopen.
     /// Used by background threads on flush/compaction failure and by the
     /// write path when a hard IO failure leaves WAL/vlog state unknown.
+    /// The slot keeps the FIRST failure (it is what every later call
+    /// reports); every failure is logged, so the history after the first
+    /// one is not lost.
     pub fn set_bg_error(&self, msg: impl Into<String>) {
+        let msg = msg.into();
         let mut g = self.bg_error.lock();
-        if g.is_none() {
-            *g = Some(msg.into());
+        let first = g.is_none();
+        error!(parent: &self.span, %msg, first, "background failure; store degraded");
+        if first {
+            *g = Some(msg);
         }
     }
 
@@ -438,6 +479,10 @@ impl DbInner {
     }
 
     pub(crate) fn wait_for_space(&self) -> Result<()> {
+        if !self.stalled() {
+            return Ok(());
+        }
+        let _parked = self.enter_stall();
         while self.stalled() {
             self.check_bg_error()?;
             self.flush_signal.notify();
@@ -445,6 +490,31 @@ impl DbInner {
             self.progress_signal.wait_timeout(Duration::from_millis(100));
         }
         Ok(())
+    }
+
+    /// First parked writer opens the episode and reports why; the returned
+    /// hold leaves the episode on every exit path.
+    fn enter_stall(&self) -> StallHold<'_> {
+        let mut g = self.stall.lock();
+        g.writers += 1;
+        let hold = StallHold(self);
+        if g.since.is_some() {
+            return hold;
+        }
+        g.since = Some(Instant::now());
+        let (imms, l0_runs) = {
+            let s = self.state.read();
+            (s.imms.len(), s.version.levels[0].len())
+        };
+        warn!(
+            parent: &self.span,
+            imms,
+            max_imms = self.opts.max_immutable_memtables,
+            l0_runs,
+            l0_stall = self.opts.l0_stall_trigger,
+            "write stall: flush/compaction not keeping up"
+        );
+        hold
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {
@@ -1000,13 +1070,15 @@ impl DbInner {
     /// files with id >= the manifest's head id (young files).
     fn rotate_vlog_locked(&self) -> Result<()> {
         let id = self.alloc_file_id();
-        let (_sealed, new_handle) = self.vlog.rotate(self.io.as_ref(), id, self.paths.vlog(id))?;
+        let (sealed, new_handle) = self.vlog.rotate(self.io.as_ref(), id, self.paths.vlog(id))?;
         io::sync_dir(&self.paths.dir)?;
         let mut s = self.state.write();
         let mut v = s.version.clone_shape();
         v.vlogs.insert(new_handle.id, new_handle.clone());
         v.vlog_head_id = new_handle.id;
+        let vlog_files = v.vlogs.len();
         s.version = Arc::new(v);
+        info!(parent: &self.span, sealed = sealed.id, head = new_handle.id, vlog_files, "rotated value log");
         Ok(())
     }
 
@@ -1042,6 +1114,8 @@ impl DbInner {
         let Some(imm) = self.state.read().imms.last().cloned() else {
             return Ok(false);
         };
+        let started = Instant::now();
+        let mem_bytes = imm.approximate_bytes();
 
         let run = if imm.is_empty() {
             None
@@ -1076,17 +1150,39 @@ impl DbInner {
 
             let mut s = self.state.write();
             let mut v = s.version.clone_shape();
-            if let Some((r, _)) = run {
+            // an empty memtable flushes to no run: those fields stay absent
+            let output = run.map(|(r, _)| {
+                let summary = (r.id, r.tables.len(), r.size());
                 v.levels[0].insert(0, r);
-            }
+                summary
+            });
+            let (run_id, tables, table_bytes) = (
+                output.map(|o| o.0),
+                output.map(|o| o.1),
+                output.map(|o| o.2),
+            );
+            let l0_runs = v.levels[0].len();
             s.version = Arc::new(v);
             let popped = s.imms.pop();
             debug_assert!(popped.is_some_and(|p| Arc::ptr_eq(&p, &imm)));
+            let imms_left = s.imms.len();
 
             // old WALs are now fully covered by tables
             let floor = m.data.wal_floor;
             drop(s);
             self.delete_old_wals(floor);
+            info!(
+                parent: &self.span,
+                run_id,
+                tables,
+                mem_bytes,
+                table_bytes,
+                flushed_seqno = m.data.last_flushed_seqno,
+                l0_runs,
+                imms_left,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "flushed memtable"
+            );
         }
         self.progress_signal.notify();
         self.compact_signal.notify();
@@ -1094,17 +1190,23 @@ impl DbInner {
     }
 
     fn delete_old_wals(&self, floor: u64) {
-        if let Ok(rd) = std::fs::read_dir(&self.paths.dir) {
-            for entry in rd.flatten() {
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else { continue };
-                if let Some(id) = parse_file_id(name, "wal-", ".log") {
-                    if id < floor {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
+        let Ok(rd) = std::fs::read_dir(&self.paths.dir) else { return };
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(id) = parse_file_id(name, "wal-", ".log") else { continue };
+            if id < floor {
+                self.remove_file("wal", entry.path());
             }
         }
+    }
+
+    /// Unlink a file the store no longer references. Failure is not an
+    /// error (the file is garbage either way) but must not be silent:
+    /// leaked files are how a directory quietly outgrows its data.
+    fn remove_file(&self, what: &'static str, path: std::path::PathBuf) {
+        let Err(e) = std::fs::remove_file(&path) else { return };
+        warn!(parent: &self.span, what, path = %path.display(), error = %e, "could not delete obsolete file");
     }
 
     /// Write one memtable out as a (possibly multi-fragment) run.
@@ -1228,6 +1330,11 @@ pub struct DbStats {
     pub commit_batches: u64,
     /// WAL fsyncs actually performed (SyncMode::Always only).
     pub wal_syncs: u64,
+    /// Live stream subscriptions; each buffers up to `sub_queue_bytes`.
+    pub subscriptions: usize,
+    /// Registered snapshots (explicit, transactions, pins, subscription
+    /// holds): every one is a GC hold on the versions at its seqno.
+    pub snapshots: usize,
 }
 
 impl Db {
@@ -1417,6 +1524,32 @@ impl Db {
         crate::compaction::gc_vlog(&self.inner)
     }
 
+    /// Emit [`Db::stats`] as one INFO event under the store's span — the
+    /// heartbeat line a serving process logs on a timer so memory and
+    /// backlog trends are reconstructible after the fact.
+    pub fn log_stats(&self) {
+        let s = self.stats();
+        info!(
+            parent: &self.inner.span,
+            seqno = s.visible_seqno,
+            memtable_bytes = s.memtable_bytes,
+            imms = s.immutable_memtables,
+            levels = %fmt_levels(&s.levels),
+            vlog_files = s.vlog_files,
+            vlog_retired = s.vlog_retired,
+            discard_bytes = s.discard_bytes,
+            cache_hits = s.cache_hits,
+            cache_misses = s.cache_misses,
+            commit_groups = s.commit_groups,
+            commit_batches = s.commit_batches,
+            wal_syncs = s.wal_syncs,
+            subscriptions = s.subscriptions,
+            snapshots = s.snapshots,
+            degraded = self.inner.bg_error.lock().is_some(),
+            "stats"
+        );
+    }
+
     pub fn stats(&self) -> DbStats {
         let inner = &self.inner;
         // lock order is manifest -> state everywhere; never hold the state
@@ -1462,6 +1595,8 @@ impl Db {
             commit_groups: inner.commit_groups.load(Ordering::Relaxed),
             commit_batches: inner.commit_batches.load(Ordering::Relaxed),
             wal_syncs: inner.wal_syncs.load(Ordering::Relaxed),
+            subscriptions: inner.live_subscriptions(),
+            snapshots: inner.snapshots.lock().len(),
         }
     }
 
@@ -1658,7 +1793,9 @@ impl Db {
     }
 
     pub fn delete_fork(&self, name: &str) -> Result<()> {
-        crate::fork::delete(&self.inner.paths, name)
+        crate::fork::delete(&self.inner.paths, name)?;
+        info!(parent: &self.inner.span, fork = name, "fork deleted");
+        Ok(())
     }
 
     /// Create a durable named pin at the current visible seqno: a GC hold
@@ -1714,6 +1851,7 @@ impl Db {
         m.gen = gen;
         m.data = data;
         hold.1 = None; // the pin owns the registration now
+        info!(parent: &self.inner.span, pin = name, seqno = seq, "pinned");
         Ok(info)
     }
 
@@ -1736,6 +1874,7 @@ impl Db {
         // release AFTER the removal is durable: a crash in between leaves a
         // conservative in-memory hold that the next open won't re-register
         self.inner.deregister_snapshot(seq);
+        info!(parent: &self.inner.span, pin = name, seqno = seq, "unpinned");
         Ok(())
     }
 
@@ -1757,6 +1896,12 @@ impl Drop for Db {
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
+        info!(
+            parent: &self.inner.span,
+            seqno = self.inner.visible_seqno.load(Ordering::Acquire),
+            degraded = self.inner.bg_error.lock().is_some(),
+            "store closed"
+        );
     }
 }
 
@@ -1976,6 +2121,7 @@ fn open_inner_with(
     opts: Options,
     io_override: Option<(Arc<dyn io::Io>, &'static str)>,
 ) -> Result<Arc<DbInner>> {
+    let started = Instant::now();
     let paths = DbPaths::new(dir);
     if !dir.exists() {
         if !opts.create_if_missing {
@@ -2030,20 +2176,24 @@ fn open_inner_with(
     // derivation makes a crash before that write harmless — the next open
     // re-mints the exact same id)
     resolve_identity(&mut mdata, opts.store_name.as_deref())?;
+    let span = store_span(dir, mdata.identity.as_ref());
 
     // remove orphaned manifests (older gens and pre-flip crashed newer gens)
     if let Ok(rd) = std::fs::read_dir(dir) {
         for entry in rd.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if let Some(g) = name
+            let Some(g) = name
                 .strip_prefix("MANIFEST-")
                 .and_then(|s| s.parse::<u64>().ok())
-            {
-                if g != gen {
-                    let _ = std::fs::remove_file(entry.path());
-                }
+            else {
+                continue;
+            };
+            if g == gen {
+                continue;
             }
+            let Err(e) = std::fs::remove_file(entry.path()) else { continue };
+            warn!(parent: &span, gen = g, error = %e, "could not delete orphaned manifest");
         }
     }
 
@@ -2158,6 +2308,7 @@ fn open_inner_with(
     // recovery SST — no window where reopen would re-replay and duplicate
     let recovered = Arc::new(Memtable::new(wal_ids.last().copied().unwrap_or(0)));
     let mut max_seq = mdata.last_flushed_seqno;
+    let mut replayed_records: u64 = 0;
     let mut truncate_torn: Option<(u64, u64)> = None; // (wal id, valid_len)
     'wals: for (wi, &wid) in wal_ids.iter().enumerate() {
         let file = io_backend.open_read(&paths.wal(wid))?;
@@ -2177,6 +2328,12 @@ fn open_inner_with(
                             if !ok {
                                 // payload never became durable: everything
                                 // from here on is torn-tail loss
+                                warn!(
+                                    parent: &span,
+                                    wal = wid,
+                                    vlog = p.file,
+                                    "wal record points at a value that never became durable; replay stops here"
+                                );
                                 break 'wals;
                             }
                         } else if !live.contains_key(&p.file)
@@ -2194,11 +2351,13 @@ fn open_inner_with(
                 let seq = base + i as u64;
                 max_seq = max_seq.max(seq);
                 recovered.insert(make_ikey(&e.key, seq, e.kind), e.repr);
+                replayed_records += 1;
             }
         }
         match tail {
             WalTail::Clean => {}
             WalTail::Torn { valid_len } if is_last => {
+                warn!(parent: &span, wal = wid, valid_len, "torn tail on the newest wal; truncating to the valid prefix");
                 truncate_torn = Some((wid, valid_len));
                 break;
             }
@@ -2247,6 +2406,8 @@ fn open_inner_with(
 
     let inner = Arc::new(DbInner {
         identity: mdata.identity.clone(),
+        span,
+        stall: Mutex::new(StallGauge::default()),
         opts,
         paths: paths.clone(),
         io: io_backend,
@@ -2360,8 +2521,12 @@ fn open_inner_with(
     if let Ok(rd) = std::fs::read_dir(inner.paths.archive_root()) {
         for entry in rd.flatten() {
             let name = entry.file_name();
-            if name.to_string_lossy().starts_with(".tmp-") {
-                let _ = std::fs::remove_dir_all(entry.path());
+            if !name.to_string_lossy().starts_with(".tmp-") {
+                continue;
+            }
+            match std::fs::remove_dir_all(entry.path()) {
+                Ok(()) => warn!(parent: &inner.span, dir = %entry.path().display(), "removed a fork build that crashed mid-creation"),
+                Err(e) => warn!(parent: &inner.span, dir = %entry.path().display(), error = %e, "could not remove a crashed fork build"),
             }
         }
     }
@@ -2373,7 +2538,62 @@ fn open_inner_with(
     #[cfg(feature = "wasm")]
     crate::trigger::load_registry(&inner)?;
 
+    // lock order is manifest -> state; each is taken and released alone
+    let pins = inner.manifest.lock().data.pins.len();
+    let (levels, tables, vlog_files) = {
+        let s = inner.state.read();
+        let occupied = s.version.levels.iter().filter(|l| !l.is_empty()).count();
+        let tables: usize = s
+            .version
+            .levels
+            .iter()
+            .flat_map(|l| l.iter().map(|r| r.tables.len()))
+            .sum();
+        (occupied, tables, s.version.vlogs.len())
+    };
+    info!(
+        parent: &inner.span,
+        backend = inner.backend_name,
+        seqno = max_seq,
+        wals_replayed = wal_ids.len(),
+        records_replayed = replayed_records,
+        levels,
+        tables,
+        vlog_files,
+        pins,
+        sync = ?inner.opts.sync,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "store opened"
+    );
     Ok(inner)
+}
+
+/// Level shape for a log field: `L<n>=runs/tables/bytes` per occupied
+/// level (`-` when the tree is empty).
+fn fmt_levels(levels: &[(usize, usize, u64)]) -> String {
+    let occupied: Vec<String> = levels
+        .iter()
+        .enumerate()
+        .filter(|(_, (runs, _, _))| *runs > 0)
+        .map(|(i, (runs, tables, bytes))| format!("L{i}={runs}/{tables}/{bytes}"))
+        .collect();
+    if occupied.is_empty() {
+        return "-".into();
+    }
+    occupied.join(" ")
+}
+
+/// The span every event of one store is parented to.
+fn store_span(dir: &Path, identity: Option<&StoreIdentity>) -> Span {
+    match identity {
+        Some(id) => tracing::info_span!(
+            "db",
+            dir = %dir.display(),
+            store = %id.name,
+            instance = %id.instance_hex()
+        ),
+        None => tracing::info_span!("db", dir = %dir.display()),
+    }
 }
 
 fn init_fresh(paths: &DbPaths, _io: &dyn Io) -> Result<()> {
@@ -2448,22 +2668,25 @@ fn startup_gc(inner: &Arc<DbInner>) -> Result<()> {
         .chain(data.vlog_retired.iter().map(|(id, _)| *id))
         .collect();
     let rd = std::fs::read_dir(&inner.paths.dir)?;
+    let mut swept: usize = 0;
     for entry in rd.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if let Some(id) = parse_file_id(name, "sst-", ".tbl") {
-            if !referenced_tables.contains(&id) {
-                let _ = std::fs::remove_file(entry.path());
-            }
+        let orphan = if let Some(id) = parse_file_id(name, "sst-", ".tbl") {
+            (!referenced_tables.contains(&id)).then_some("table")
         } else if let Some(id) = parse_file_id(name, "vlog-", ".vlog") {
-            if !live_vlogs.contains(&id) {
-                let _ = std::fs::remove_file(entry.path());
-            }
+            (!live_vlogs.contains(&id)).then_some("vlog")
         } else if let Some(id) = parse_file_id(name, "wal-", ".log") {
-            if id < data.wal_floor {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+            (id < data.wal_floor).then_some("wal")
+        } else {
+            None
+        };
+        let Some(what) = orphan else { continue };
+        inner.remove_file(what, entry.path());
+        swept += 1;
+    }
+    if swept > 0 {
+        info!(parent: &inner.span, files = swept, "swept unreferenced files left by an interrupted flush/compaction/gc");
     }
     Ok(())
 }
@@ -2514,6 +2737,9 @@ pub(crate) struct SubShared {
     lo: Vec<u8>,
     hi: Option<Vec<u8>>,
     max_bytes: usize,
+    /// The owning store's span: `offer` runs under `write_mu` with no
+    /// other handle to it in reach.
+    span: Span,
     queue: Mutex<SubQueue>,
     signal: Signal,
     /// Set on queue overflow (subscriber lagged) or consumer drop; the
@@ -2551,9 +2777,18 @@ impl SubShared {
         if q.bytes > self.max_bytes {
             // lag policy: cut the subscriber loose, never stall the writer —
             // a gapped stream is useless, so drop everything buffered too
+            let (buffered_bytes, buffered_entries) = (q.bytes, q.entries.len());
             q.entries.clear();
             q.bytes = 0;
             self.dropped.store(true, Ordering::Release);
+            warn!(
+                parent: &self.span,
+                lo = %hex_prefix(&self.lo),
+                buffered_bytes,
+                buffered_entries,
+                max_bytes = self.max_bytes,
+                "subscriber lagged past its buffer; stream cut"
+            );
         }
         drop(q);
         if pushed {
@@ -2562,7 +2797,23 @@ impl SubShared {
     }
 }
 
+/// A key's leading bytes as hex, for identifying a range in a log line
+/// without dumping the whole key.
+fn hex_prefix(key: &[u8]) -> String {
+    key.iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
 impl DbInner {
+    /// Subscriptions still attached (a cut one stays registered until the
+    /// publisher's next pass prunes it).
+    pub(crate) fn live_subscriptions(&self) -> usize {
+        self.subs
+            .lock()
+            .iter()
+            .filter(|s| !s.dropped.load(Ordering::Acquire))
+            .count()
+    }
+
     /// Fan a committed batch out to stream subscribers. Called under
     /// `write_mu` in both apply paths, immediately after `visible_seqno`
     /// publication — subscribers therefore observe batches in seqno order
@@ -2689,6 +2940,7 @@ impl Drop for Subscription {
         let mut subs = self.db.subs.lock();
         subs.retain(|s| !Arc::ptr_eq(s, &self.shared));
         self.db.subs_active.store(!subs.is_empty(), Ordering::Release);
+        debug!(parent: &self.db.span, lo = %hex_prefix(&self.shared.lo), active = subs.len(), "subscription closed");
         drop(subs);
         self.db.deregister_snapshot(self.pinned);
     }
@@ -2745,6 +2997,7 @@ impl Db {
             lo,
             hi: hi.map(|h| h.to_vec()),
             max_bytes: inner.opts.sub_queue_bytes,
+            span: inner.span.clone(),
             queue: Mutex::new(SubQueue {
                 entries: std::collections::VecDeque::new(),
                 bytes: 0,
@@ -2761,6 +3014,7 @@ impl Db {
             let mut subs = inner.subs.lock();
             subs.push(shared.clone());
             inner.subs_active.store(true, Ordering::Release);
+            debug!(parent: &inner.span, lo = %hex_prefix(&shared.lo), start = v0, active = subs.len(), "subscription opened");
             v0
         };
         Ok(Subscription {

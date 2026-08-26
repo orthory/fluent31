@@ -754,7 +754,7 @@ already hold.
 ```rust
 fluent_guest::input() -> Vec<u8>                      // the input blob
 fluent_guest::output(&[u8])                           // append to the output
-fluent_guest::log(&str)                               // debug log (the host prints it when FLUENT31_WASM_LOG is set)
+fluent_guest::log(&str)                               // debug log (a `debug` event under target fluent31::wasm::guest)
 fluent_guest::get(&[u8]) -> Option<Vec<u8>>
 fluent_guest::get_for_update(&[u8]) -> Result<Option<Vec<u8>>, i32>   // Err = errno (EROFS in a query)
 fluent_guest::put(&[u8], &[u8]) -> Result<(), i32>
@@ -1649,16 +1649,51 @@ stalls mean compaction cannot keep up.
 
 ### 14.3 Monitoring
 
-- `stats` (engine, shell, GraphQL) reports the seqno, the
-  memtable and level shape, value-log live, retired and discardable
-  bytes, the cache hit rate, and group commit amortization. An edge
-  replica reports through `EdgeStats` instead: flushed and frontier
-  seqno, fragments, overlay and value-cache bytes.
+Two channels: pull state through `stats`, or read the log.
+
+- `stats` (engine, shell, GraphQL) reports the seqno, the memtable and
+  level shape, value-log live, retired and discardable bytes, the cache
+  hit rate, group commit amortization, and the live subscription and
+  snapshot counts (a subscription buffers up to `sub_queue_bytes`; a
+  snapshot holds GC). An edge replica reports through `EdgeStats`
+  instead: flushed and frontier seqno, fragments, overlay and
+  value-cache bytes.
 - `triggers` reports `pending` (the backlog depth) and `lastError` per
   trigger.
 - `Journal::stats()`: `last_seqno` against `db.seqno()` is the journal
   lag; `last_error` is the last failure.
-- `FLUENT31_WASM_LOG=1` prints guest `log` calls to stderr.
+
+#### Logging
+
+The engine emits [`tracing`](https://docs.rs/tracing) events. The
+binaries write them to stderr and read `RUST_LOG` for the level
+(default `info`; `fluent-cli` defaults to `warn` so the shell stays
+quiet). An embedding process installs its own subscriber; without one
+the events cost nothing. Every engine line names the store it is about
+(`db{dir=… store=… instance=…}`), so a server holding forks stays
+legible.
+
+| Level | What |
+|---|---|
+| `error` | a background failure degraded the store (every one is logged, not only the first); the journal stopped; a network plane died |
+| `warn` | a write stall began (and why), a subscriber cut for lag, a trigger run failing (with its backoff), a torn WAL tail at recovery, a WASM trap, a replica re-syncing, a file the store could not delete |
+| `info` | open (recovery summary) and close; every flush, compaction and value-log GC; forks created and deleted; modules, triggers and pins added and removed; journal base, rotate and compact; replication streams starting and ending; fork instances the server opens and closes; the stats heartbeat |
+| `debug` | each WASM invocation (fuel, memory, duration), trigger drains, subscriptions opening and closing, GC liveness sampling, execute retries |
+| `trace` | per batch: journal deltas, streamed batches |
+
+GraphQL requests are not logged.
+
+The **stats heartbeat** is the `stats` snapshot as one `info` line per
+open store (the primary and every fork the server holds open) plus the
+fork registry's occupancy, every 60 s by default — `[log]
+stats-every-secs` in the server config, `--stats-every-secs` on
+`fluent-graphql`, `0` turns it off; an embedder gets the same line from
+`Db::log_stats()`. When memory grows, the heartbeat says which it was:
+`imms` climbing (flush not keeping up — a stall follows), subscriptions,
+snapshots pinning history, or fork instances.
+
+Guest `log` output is a `debug` event under its own target, enabled
+alone with `RUST_LOG=fluent31::wasm::guest=debug`.
 
 ### 14.4 Limits
 

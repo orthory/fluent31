@@ -18,6 +18,20 @@ const USAGE: &str = "\
 usage: fluent-cli <db-dir> [--std|--uring] [--nosync] [--sync-every <ms>]
        fluent-cli journal-rebuild <journal-dir> <dest-dir>";
 
+/// Engine diagnostics go to stderr; the shell is interactive, so only
+/// warnings and worse show unless asked for. `RUST_LOG` overrides the
+/// default level (`warn`), per crate if wanted: `RUST_LOG=fluent31=debug`.
+fn init_logging() {
+    use std::io::IsTerminal;
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+}
+
 fn parse_bytes(tok: &str) -> Result<Vec<u8>, String> {
     if let Some(hex) = tok.strip_prefix("hex:") {
         if hex.len() % 2 != 0 {
@@ -464,8 +478,12 @@ impl Shell {
                     s.cache_hits, s.cache_misses
                 ));
                 out.push_str(&format!(
-                    "group commit   {} batches in {} groups, {} wal syncs",
+                    "group commit   {} batches in {} groups, {} wal syncs\n",
                     s.commit_batches, s.commit_groups, s.wal_syncs
+                ));
+                out.push_str(&format!(
+                    "holds          {} subscriptions, {} snapshots",
+                    s.subscriptions, s.snapshots
                 ));
                 Ok(out)
             }
@@ -501,6 +519,7 @@ fn journal_rebuild(jrn: &str, dest: &str) -> ! {
 }
 
 fn main() {
+    init_logging();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "journal-rebuild") {
         let [jrn, dest] = &args[1..] else {

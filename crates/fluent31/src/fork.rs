@@ -16,7 +16,9 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use tracing::info;
 
 use crate::config::DbPaths;
 use crate::db::{Db, DbInner};
@@ -112,6 +114,7 @@ impl Drop for TmpDirGuard {
 
 pub(crate) fn create(db: &Db, name: &str, at: Option<SeqNo>) -> Result<ForkInfo> {
     validate_name("fork", name)?;
+    let started = Instant::now();
     let inner = &db.inner;
     let final_dir = inner.paths.archive(name);
     if final_dir.exists() {
@@ -289,6 +292,15 @@ pub(crate) fn create(db: &Db, name: &str, at: Option<SeqNo>) -> Result<ForkInfo>
     tmp_guard.disarm();
     io::sync_dir(&root)?;
 
+    info!(
+        parent: &inner.span,
+        fork = name,
+        instance = %instance_id,
+        cut,
+        point_cut = cut < head,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "fork created"
+    );
     Ok(ForkInfo {
         name: name.to_string(),
         instance_id,
@@ -504,5 +516,6 @@ pub fn restore_to(archive: &Path, dest: &Path, new_name: Option<&str>) -> Result
     }
     manifest::save(&DbPaths::new(dest), 1, &mdata)?;
     io::sync_dir(dest)?;
+    info!(archive = %archive.display(), dest = %dest.display(), name = new_name, "archive restored");
     Ok(())
 }
