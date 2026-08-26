@@ -747,12 +747,12 @@ subscription { orderFeed { seqno event { id record } query { snapshotSeqno } } }
         </ul>
 
         <h2>The documents</h2>
-        <p>This site is the usage documentation, built from the repository's <code>GUIDE.md</code>. The specs behind it live in the repo — when a detail matters, they win, and when the docs and the code disagree, the code wins.</p>
+        <p>This site is the usage documentation and its source. The same pages are generated as one markdown file each, under <code>docs/p/</code>, indexed by <a href="https://orthory.github.io/fluent31/llms.txt">llms.txt</a> — that is the copy to point an agent at, because a fetcher cannot address a page here. The specs below go beneath what this site describes; when a detail matters they win, and when the docs and the code disagree, the code wins.</p>
         <div class="tablewrap"><table>
           <thead><tr><th>Document</th><th>Covers</th></tr></thead>
           <tbody>
-            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/GUIDE.md">GUIDE.md</a></td><td>The usage document this site is built from.</td></tr>
-            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/SKILL.md">SKILL.md</a></td><td>The short entry point for agents: the model in twelve lines, commands, traps.</td></tr>
+            <tr><td><a href="https://orthory.github.io/fluent31/llms.txt">llms.txt</a></td><td>Every page here as one fetchable markdown file, in reading order. The index an agent should start from.</td></tr>
+            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/SKILL.md">SKILL.md</a></td><td>The primer for agents: the model in twelve lines, exact signatures, the traps, and the assumptions carried in from other databases that are wrong here.</td></tr>
             <tr><td><a href="https://github.com/orthory/fluent31/blob/master/WASM.md">WASM.md</a></td><td>The module authoring manual and ABI spec.</td></tr>
             <tr><td><a href="https://github.com/orthory/fluent31/blob/master/DESIGN.md">DESIGN.md</a></td><td>The architecture as implemented, section by section.</td></tr>
             <tr><td><a href="https://github.com/orthory/fluent31/blob/master/REPLICATION.md">REPLICATION.md</a></td><td>The replica protocol spec.</td></tr>

@@ -66,15 +66,41 @@ db.query("count", b"user/")?;                            // b"1"
 
 ## Documentation
 
-Hosted at [orthory.github.io/fluent31](https://orthory.github.io/fluent31/).
-
 | | |
 |---|---|
-| [GUIDE.md](GUIDE.md) | Start here. Everything about using fluent31: concepts, the embedded API, modules, triggers, forks, durability, the shell, server mode, GraphQL, replication, operations, and an "advanced" section on how it works. |
-| [SKILL.md](SKILL.md) | The short entry point for agents: the model in twelve lines, commands, traps, and where to read more. |
+| [orthory.github.io/fluent31](https://orthory.github.io/fluent31/) | Start here. Everything about using fluent31: a tutorial, the concepts, extending it with WASM, the full reference, worked recipes, and a translation guide if you are coming from SQL. |
+| [SKILL.md](SKILL.md) | The primer for agents: the model in twelve lines, exact signatures, the traps, and the assumptions carried in from other databases that are wrong here. |
+| [docs/llms.txt](docs/llms.txt) | The same documentation as one markdown file per page, for agents and scripts. Generated from the site. |
 | [WASM.md](WASM.md) | The module authoring manual and ABI spec. |
 | [DESIGN.md](DESIGN.md) | The architecture as implemented, section by section. |
 | [REPLICATION.md](REPLICATION.md) | The replica protocol spec. |
+
+### Working on it with an agent
+
+fluent31 is newer than the training data of every current model, so an agent
+asked to use it will not recall an API — it will infer one from RocksDB or
+SQL, confidently and wrongly. Give it the real one first.
+
+Point it at the index, which links every documentation page as its own
+fetchable file:
+
+```
+https://orthory.github.io/fluent31/llms.txt
+```
+
+Or install the primer where your agent looks for skills, so it loads without
+being asked. For Claude Code, in the repo that uses fluent31:
+
+```sh
+mkdir -p .claude/skills/fluent31
+curl -fsSL -o .claude/skills/fluent31/SKILL.md \
+  https://raw.githubusercontent.com/orthory/fluent31/master/SKILL.md
+```
+
+`SKILL.md` opens with the assumptions that do not transfer from other
+databases — `get_for_update` takes no lock, triggers cannot veto a write,
+registering a trigger does not backfill, a guest has no clock. Those are the
+mistakes an agent makes first.
 
 ## Testing
 
@@ -83,7 +109,12 @@ cargo test --workspace                              # model tests, group commit,
                                                     # replication e2e, hard-crash recovery, corruption fuzz,
                                                     # journal rebuild
 cargo test -p fluent31 --features fault-injection   # fsync-failure / ENOSPC / read-fault paths
+scripts/build-agent-docs.py --check                 # docs/p/ and docs/llms.txt match docs/index.html
 ```
+
+`docs/p/*.md` and `docs/llms.txt` are generated from `docs/index.html`. Edit
+the site, then re-run `scripts/build-agent-docs.py`; `--check` fails if they
+have drifted.
 
 Under Docker, io_uring is blocked by the default seccomp profile. Add
 `--security-opt seccomp=unconfined`.
