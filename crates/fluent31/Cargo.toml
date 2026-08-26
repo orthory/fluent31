@@ -39,6 +39,10 @@ required-features = ["wasm"]
 name = "live_stats"
 required-features = ["wasm"]
 
+[[example]]
+name = "walkthrough"
+required-features = ["wasm"]
+
 [features]
 default = ["wasm"]
 # In-database WASM execution (queries/executors). Disable for a pure

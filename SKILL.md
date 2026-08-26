@@ -312,6 +312,7 @@ cargo test --workspace                                                    # veri
 cargo build --manifest-path guests/Cargo.toml --target wasm32-unknown-unknown --release   # modules
 cargo run -p fluent-cli -- ./data                                         # shell (`help`)
 cargo run -p fluent-server -- ./data --store-name prod                    # :8317 graphql, :8428 replication
+cargo run -p fluent31 --example walkthrough                               # install -> trigger -> drain -> retry -> fork, asserted
 cargo run -p fluent31 --example {dynamic_index,live_stats,cascade_delete,claim}   # self-asserting walkthroughs
 scripts/demo-orders.sh                                                    # typed-module demo against a running server
 cargo run -p fluent-cli -- journal-rebuild <journal-dir> <dest-dir>        # rebuild from a journal
