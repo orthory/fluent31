@@ -76,6 +76,8 @@ b.len(); b.is_empty(); b.byte_size();
 db.write(b)?;                  // atomic, one contiguous seqno range
 ```
 
+Point writes and batches carry no read set. `put`, `delete` and `write` are never conflict-checked and can never return `Error::Conflict` — a batch is atomic, not isolated. If what you write depends on what you read, that is a [transaction](transactions.md), not a batch.
+
 ## Scans
 
 ```
@@ -144,6 +146,9 @@ let out: Vec<u8> = db.query("name", input)?;     // requires the `query` export
 let out: Vec<u8> = db.execute("name", input)?;   // requires `execute`; OCC-retried
 db.query_wasm(&wasm, input)?;              // one-shot: bytes never installed
 db.execute_wasm(&wasm, input)?;
+
+db.describe_module("name")?;                // Option<Vec<u8>>: the `describe` output, None if not exported
+db.describe_wasm(&wasm)?;                  // the same, on bytes you have not installed
 
 db.create_trigger("name", "module", Some(b"orders/"), Some(b"orders0"))?;
 db.delete_trigger("name")?;

@@ -25,7 +25,7 @@ fluent_guest::fluent_describe!(r#"{
 }"#);
 ```
 
-It is a static string, evaluated by running the export with an empty input, so it cannot depend on the data.
+It is a static string, evaluated by running the export with an empty input, so it cannot depend on the data. Read one back with `db.describe_module("name")`, or with `db.describe_wasm(&bytes)` to inspect a module before installing it; both return `None` when the module does not export `describe`.
 
 ## The type grammar
 

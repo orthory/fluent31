@@ -86,6 +86,14 @@ count. There is no "rows affected" anywhere in the API.
 no `ON CONFLICT` — conditional writes are an executor that reads under
 `get_for_update` and decides.
 
+**A batch is atomic, not isolated.** `db.write(batch)` lands every key or
+none, in one contiguous seqno range. What it does not have is a read set:
+`put`, `delete` and `write` are never conflict-checked and can never return
+`Error::Conflict`. A batch assembled from values you just read has nothing
+protecting those values from another writer in between, and retry logic
+wrapped around it is dead code. Read-modify-write is `db.begin()` plus
+`get_for_update`, every time.
+
 **A GraphQL document is not a transaction.** Mutation fields run serially,
 each as its own atomic write. Anything that must land together belongs in
 one `execute` module.
