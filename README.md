@@ -66,6 +66,8 @@ db.query("count", b"user/")?;                            // b"1"
 
 ## Documentation
 
+Hosted at [orthory.github.io/fluent31](https://orthory.github.io/fluent31/).
+
 | | |
 |---|---|
 | [GUIDE.md](GUIDE.md) | Start here. Everything about using fluent31: concepts, the embedded API, modules, triggers, forks, durability, the shell, server mode, GraphQL, replication, operations, and an "advanced" section on how it works. |
