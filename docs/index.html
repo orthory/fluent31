@@ -167,6 +167,24 @@
   }
   .nav a:hover { color: var(--fg); text-decoration: none; }
   .nav a.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); font-weight: 500; }
+  /* numbered steps: the number lives in CSS so link text stays clean for search and prev/next */
+  .nav a[data-step] { display: grid; grid-template-columns: 17px 1fr; align-items: baseline; }
+  .nav a[data-step]::before {
+    content: attr(data-step);
+    font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 11.5px; font-variant-numeric: tabular-nums;
+    color: var(--gray-light);
+  }
+  .nav a[data-step].active::before { color: var(--accent); }
+
+  .content .eyebrow {
+    margin: 0 0 6px;
+    font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 11.5px; letter-spacing: .02em;
+    color: var(--gray);
+    text-transform: none;
+  }
+  .content .eyebrow .of { color: var(--gray-light); }
 
   /* main */
   .main { padding: 44px 48px 96px; min-width: 0; }
@@ -497,23 +515,32 @@ document.addEventListener('DOMContentLoaded', function () {
       <h5>Start here</h5>
       <a data-nav="introduction" href="#introduction">Introduction</a>
       <a data-nav="installation" href="#installation">Install</a>
-      <a data-nav="first-store" href="#first-store">Your first store</a>
-      <a data-nav="first-graphql" href="#first-graphql">Serve it over GraphQL</a>
-      <a data-nav="first-module" href="#first-module">Your first module</a>
-      <a data-nav="first-trigger" href="#first-trigger">Your first trigger</a>
-      <a data-nav="embed" href="#embed">Embed it in Rust</a>
+
+      <h5>Tutorial</h5>
+      <a data-nav="first-store" data-step="1" href="#first-store">Your first store</a>
+      <a data-nav="first-graphql" data-step="2" href="#first-graphql">Serve it over GraphQL</a>
+      <a data-nav="first-module" data-step="3" href="#first-module">Your first module</a>
+      <a data-nav="first-trigger" data-step="4" href="#first-trigger">Your first trigger</a>
+      <a data-nav="embed" data-step="5" href="#embed">Embed it in Rust</a>
 
       <h5>Concepts</h5>
-      <a data-nav="concept-modules" href="#concept-modules">Code in the database</a>
-      <a data-nav="concept-triggers" href="#concept-triggers">Reactive derived state</a>
       <a data-nav="snapshots" href="#snapshots">Snapshots and seqnos</a>
       <a data-nav="consistency" href="#consistency">The consistency contract</a>
       <a data-nav="transactions" href="#transactions">Transactions</a>
       <a data-nav="concept-forks" href="#concept-forks">Branching the database</a>
+      <a data-nav="concept-triggers" href="#concept-triggers">Reactive derived state</a>
+
+      <h5>Extending with WASM</h5>
+      <a data-nav="wasm-overview" href="#wasm-overview">Code in the database</a>
+      <a data-nav="wasm-roles" href="#wasm-roles">Roles and lifecycles</a>
+      <a data-nav="wasm-uses" href="#wasm-uses">What to build with it</a>
+      <a data-nav="wasm-sdk" href="#wasm-sdk">The guest SDK</a>
+      <a data-nav="wasm-abi" href="#wasm-abi">The host ABI</a>
+      <a data-nav="wasm-typed" href="#wasm-typed">Typed GraphQL fields</a>
+      <a data-nav="wasm-invoking" href="#wasm-invoking">Invoking and debugging</a>
 
       <h5>Reference</h5>
       <a data-nav="embedded-api" href="#embedded-api">Embedded API</a>
-      <a data-nav="wasm-modules" href="#wasm-modules">WASM modules</a>
       <a data-nav="triggers" href="#triggers">Triggers</a>
       <a data-nav="forks" href="#forks">Forks, pins, clones</a>
       <a data-nav="durability" href="#durability">Durability &amp; recovery</a>
@@ -555,7 +582,7 @@ document.addEventListener('DOMContentLoaded', function () {
           <li><strong>A descriptor</strong> turns the module into API. Export <code>describe</code> and installing it adds a typed, documented GraphQL field to the running server's schema.</li>
         </ul>
         <p>Because module bytes are stored as ordinary versioned keys, your code is durable with the data, recovered with it, copied into every fork of it, and time-travelled alongside it — <code>query_at</code> runs the code as it was at a past sequence number against the data as it was then. And because the same bytes can run without being installed, a migration is a one-shot executor: one atomic transaction, no deployment, no trace but its writes.</p>
-        <p>Modules are sandboxed: fuel-metered, memory-capped, no WASI, no clock, no randomness, no imports but the host's own. What that buys is bounded, deterministic execution — the engine stays predictable no matter what the module does.</p>
+        <p>Modules are sandboxed: fuel-metered, memory-capped, no WASI, no clock, no randomness, no imports but the host's own. What that buys is bounded, deterministic execution — the engine stays predictable no matter what the module does. <a href="#wasm-overview">Extending with WASM</a> is the section on all of it: the roles, the two API surfaces, and what to build with them.</p>
 
         <h2>Built to move as few bytes as possible</h2>
         <p>The storage engine is an LSM tree with WiscKey-style key-value separation: values at or above <code>value_threshold</code> live in an append-only log and the tree holds pointers. Compaction therefore relocates pointers rather than payloads, so write amplification is governed by key volume, not value volume, and the index stays small enough to keep resident — every fragment's bloom filter and index in memory, for the whole dataset.</p>
@@ -649,6 +676,7 @@ cargo test --workspace</pre></div>
       </article>
       <!-- ============================================================ -->
       <article data-page="first-store">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 1 <span class="of">of 5</span></p>
         <h1>Your first store</h1>
         <p class="lead">One command, no code: a running database you can write to and read back.</p>
 
@@ -688,6 +716,7 @@ fluent31&gt; help</pre></div>
       </article>
       <!-- ============================================================ -->
       <article data-page="first-graphql">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 2 <span class="of">of 5</span></p>
         <h1>Serve it over GraphQL</h1>
         <p class="lead">The same store on a network surface, with a schema, an explorer and live subscriptions — no code yet.</p>
 
@@ -732,6 +761,7 @@ query {
       </article>
       <!-- ============================================================ -->
       <article data-page="first-module">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 3 <span class="of">of 5</span></p>
         <h1>Your first module</h1>
         <p class="lead">Install code into the database and call it by name. This is the feature the rest of the engine is arranged around.</p>
 
@@ -794,6 +824,7 @@ fluent31&gt; query count user/
       </article>
       <!-- ============================================================ -->
       <article data-page="first-trigger">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 4 <span class="of">of 5</span></p>
         <h1>Your first trigger</h1>
         <p class="lead">Bind a module to a key range and the engine invokes it after every committed write into that range. Derived data stops being the writer's problem.</p>
 
@@ -834,6 +865,7 @@ fluent31&gt; scan idx/ idx0
       </article>
       <!-- ============================================================ -->
       <article data-page="embed">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 5 <span class="of">of 5</span></p>
         <h1>Embed it in Rust</h1>
         <p class="lead">The shell and the server are wrappers around a library. This is the library.</p>
 
@@ -889,57 +921,6 @@ cargo run -p fluent31 --example dynamic_index    <span class="c"># indexes creat
 cargo run -p fluent31 --example cascade_delete
 cargo run -p fluent31 --example claim            <span class="c"># N concurrent claimers, exactly one winner</span>
 scripts/demo-orders.sh                           <span class="c"># typed modules against a running server</span></pre></div>
-      </article>
-      <!-- ============================================================ -->
-      <article data-page="concept-modules">
-        <h1>Code in the database</h1>
-        <p class="lead">The query surface is WebAssembly. You install modules into the database and call them by name — as reads, as transactions, or as the consumers behind a trigger.</p>
-
-        <p>A module is a WASM binary stored in the database like any other value. Its exports are its roles, and one binary may carry several:</p>
-        <div class="tablewrap"><table>
-          <thead><tr><th>Export</th><th>Role</th><th>Runs as</th></tr></thead>
-          <tbody>
-            <tr><td><code>query</code></td><td>read-only query</td><td>one pinned snapshot; writes return <code>EROFS</code></td></tr>
-            <tr><td><code>execute</code></td><td>executor</td><td>a fresh transaction; exit 0 commits, non-zero aborts; conflicts re-run it</td></tr>
-            <tr><td><code>on_touch</code> / <code>on_apply</code></td><td>trigger consumer</td><td>an executor the engine invokes after commits into a range</td></tr>
-            <tr><td><code>describe</code></td><td>the typed GraphQL surface</td><td>read-only at install and schema build</td></tr>
-          </tbody>
-        </table></div>
-
-        <h2>Why code lives here</h2>
-        <ul>
-          <li><strong>The computation runs next to the data.</strong> A report over a million keys returns its five numbers, not a million values, and it runs at one pinned snapshot, so the answer is internally consistent.</li>
-          <li><strong>The invariant belongs to the database, not to a client.</strong> An installed executor is the same logic on every surface — Rust, the shell, GraphQL — so a rule like "stock never goes negative" holds wherever the write came from.</li>
-          <li><strong>A module that describes itself becomes API.</strong> Export <code>describe</code> and installing the module adds its own typed field to the GraphQL schema, hot-swapped at install time.</li>
-          <li><strong>Module bytes are data.</strong> They live in the engine's own keyspace as ordinary versioned keys, so they are recovered with the store, copied into forks, and time-travelled by <code>query_at</code> — the store can answer "what code ran here".</li>
-        </ul>
-
-        <h2>What a module may do</h2>
-        <p>Modules are sandboxed. They are fuel-metered and memory-capped, have no WASI, no clock and no randomness, and can import only the <code>fluent</code> host functions: <code>get</code>, <code>get_for_update</code>, <code>put</code>, <code>delete</code>, batched scans, output and log. Entropy and time are inputs, never ambient. The limits protect the engine's reliability and integrity; authentication and authorization are a layer you put in front.</p>
-        <p>One consequence shapes everything you write: an executor may run several times per call, because a commit conflict discards the attempt and re-runs it. A module has to be a pure function of its input and the database state — no side channels, no "did I already run" flag outside the data.</p>
-
-        <div class="note"><p><span class="lbl">Next</span><a href="#wasm-modules">WASM modules</a> is the authoring reference — the SDK, the entry points, the limits and the descriptor grammar. <a href="#choosing">Choosing the shape</a> covers when a module earns its place over plain API calls.</p></div>
-      </article>
-      <!-- ============================================================ -->
-      <article data-page="concept-triggers">
-        <h1>Reactive derived state</h1>
-        <p class="lead">Bind a module to a key range and the engine invokes it after every committed write into that range. Derived data maintains itself, whoever did the writing.</p>
-
-        <p>Indexes, materialized views, running aggregates, changefeeds, referential cleanup: all of them are the same shape — data derived from other data, which goes stale the moment someone writes without updating it. A trigger removes that "without". Plain puts, batches, transactions, executors and every network surface all fire it; no writer has to know the derived state exists.</p>
-        <p>What the trigger writes is ordinary keys under a prefix you choose, so derived data is scannable, replicable and subscribable exactly like everything else. There is no separate index structure to learn.</p>
-
-        <h2>Two contracts</h2>
-        <p>The mode is chosen by which export the module carries, and it decides what your derived state is a function of.</p>
-        <ul>
-          <li><strong>Keys mode reconciles.</strong> An event means "this key was touched — reconcile it", and re-touches of one key coalesce while a backlog exists. Right when the derived state is a function of <em>current</em> state, as an index is: read the key, upsert or remove the entry, converge.</li>
-          <li><strong>Changes mode folds.</strong> Every committed op arrives once, in commit order, carrying its kind and its value. Right when you need op kinds, ordering, or per-op deltas — feeds, exact aggregates, cascades — where coalescing would destroy information.</li>
-        </ul>
-
-        <h2>Why the derived state can be trusted</h2>
-        <p>Derived data is only worth maintaining if it cannot silently diverge from what it is derived from, and that is a property of where the work happens rather than of how carefully the module is written. An event is captured inside the commit that caused it, so a write that survives a crash has an event waiting for it afterwards and a write that does not leaves nothing behind. Consuming that event happens inside the module's own transaction, together with whatever the module writes, so the two cannot come apart: an aggregate folded this way is exact rather than approximately right, however many times the attempt is retried.</p>
-        <p>Two consequences follow. Writes made by a trigger generate no events of their own, so no chain of triggers can loop or amplify — a cascade runs once. And the price of all of it is that the work is asynchronous: derived state trails the base data by whatever is queued, and nothing waits for it. A failure holds the queue rather than dropping it, which makes a broken module a visible backlog rather than a silent hole.</p>
-
-        <div class="note"><p><span class="lbl">Next</span><a href="#triggers">Triggers</a> is the reference — registration, both modes in detail, the delivery guarantees and the drain loop. <a href="#ex-indexes">Secondary indexes</a> and <a href="#ex-views-feeds">Views, feeds, cascades</a> are the worked shapes.</p></div>
       </article>
       <!-- ============================================================ -->
       <article data-page="snapshots">
@@ -1000,7 +981,7 @@ history/doc/42/&lt;seqno&gt;     <span class="c">one entry per write (what the t
 
         <p>Under <code>SyncMode::Always</code>, concurrent commits share fsyncs with plain writers through group commit. Validation and application happen as one atomic step against every other writer, including plain <code>db.put</code>.</p>
 
-        <div class="note"><p><span class="lbl">Executors too.</span>A WASM <a href="#wasm-modules">executor</a> runs inside exactly this kind of transaction, and the engine drives the retry loop for you — up to <code>execute_retries</code> attempts (3), after which <code>Conflict</code> reaches the caller and the loop above becomes the caller's job again. That is why an executor must be a pure function of its input and the database state.</p></div>
+        <div class="note"><p><span class="lbl">Executors too.</span>A WASM <a href="#wasm-roles">executor</a> runs inside exactly this kind of transaction, and the engine drives the retry loop for you — up to <code>execute_retries</code> attempts (3), after which <code>Conflict</code> reaches the caller and the loop above becomes the caller's job again. That is why an executor must be a pure function of its input and the database state.</p></div>
       </article>
       <!-- ============================================================ -->
       <article data-page="concept-forks">
@@ -1024,6 +1005,465 @@ history/doc/42/&lt;seqno&gt;     <span class="c">one entry per write (what the t
         <p>A fork contains exactly the history up to its cut and nothing the parent commits afterwards; forks branch, they do not follow. Each copy mints its own instance identity, which is how a replica notices that its master was replaced and re-attaches from scratch. And because a fork is a whole database, it is priced for a handful of deliberate cuts — not for per-record versioning, which is <a href="#consistency">something you make out of data</a>.</p>
 
         <div class="note"><p><span class="lbl">Next</span><a href="#forks">Forks, pins, clones</a> is the reference — cutting, restoring, rolling back the primary. <a href="#ex-forks">Forks in practice</a> is the playbook set.</p></div>
+      </article>
+      <!-- ============================================================ -->
+      <article data-page="concept-triggers">
+        <h1>Reactive derived state</h1>
+        <p class="lead">Bind a module to a key range and the engine invokes it after every committed write into that range. Derived data maintains itself, whoever did the writing.</p>
+
+        <p>Indexes, materialized views, running aggregates, changefeeds, referential cleanup: all of them are the same shape — data derived from other data, which goes stale the moment someone writes without updating it. A trigger removes that "without". Plain puts, batches, transactions, executors and every network surface all fire it; no writer has to know the derived state exists.</p>
+        <p>What the trigger writes is ordinary keys under a prefix you choose, so derived data is scannable, replicable and subscribable exactly like everything else. There is no separate index structure to learn.</p>
+
+        <h2>Two contracts</h2>
+        <p>The mode is chosen by which export the module carries, and it decides what your derived state is a function of.</p>
+        <ul>
+          <li><strong>Keys mode reconciles.</strong> An event means "this key was touched — reconcile it", and re-touches of one key coalesce while a backlog exists. Right when the derived state is a function of <em>current</em> state, as an index is: read the key, upsert or remove the entry, converge.</li>
+          <li><strong>Changes mode folds.</strong> Every committed op arrives once, in commit order, carrying its kind and its value. Right when you need op kinds, ordering, or per-op deltas — feeds, exact aggregates, cascades — where coalescing would destroy information.</li>
+        </ul>
+
+        <h2>Why the derived state can be trusted</h2>
+        <p>Derived data is only worth maintaining if it cannot silently diverge from what it is derived from, and that is a property of where the work happens rather than of how carefully the module is written. An event is captured inside the commit that caused it, so a write that survives a crash has an event waiting for it afterwards and a write that does not leaves nothing behind. Consuming that event happens inside the module's own transaction, together with whatever the module writes, so the two cannot come apart: an aggregate folded this way is exact rather than approximately right, however many times the attempt is retried.</p>
+        <p>Two consequences follow. Writes made by a trigger generate no events of their own, so no chain of triggers can loop or amplify — a cascade runs once. And the price of all of it is that the work is asynchronous: derived state trails the base data by whatever is queued, and nothing waits for it. A failure holds the queue rather than dropping it, which makes a broken module a visible backlog rather than a silent hole.</p>
+
+        <div class="note"><p><span class="lbl">Next</span><a href="#triggers">Triggers</a> is the reference — registration, both modes in detail, the delivery guarantees and the drain loop. <a href="#ex-indexes">Secondary indexes</a> and <a href="#ex-views-feeds">Views, feeds, cascades</a> are the worked shapes.</p></div>
+      </article>
+      <!-- ============================================================ -->
+      <article data-page="wasm-overview">
+        <h1>Code in the database</h1>
+        <p class="lead">The query surface is WebAssembly. You install modules into the database and call them by name — as reads, as transactions, or as the consumers behind a trigger.</p>
+
+        <p>A module is a WASM binary stored in the database like any other value. Its exports are its roles — a read-only <code>query</code>, a transactional <code>execute</code>, an <code>on_touch</code> or <code>on_apply</code> trigger consumer, and an optional <code>describe</code> that turns the module into API — and one binary may carry several of them at once.</p>
+
+        <h2>Why code lives here</h2>
+        <ul>
+          <li><strong>The computation runs next to the data.</strong> A report over a million keys returns its five numbers, not a million values, and it runs at one pinned snapshot, so the answer is internally consistent.</li>
+          <li><strong>The invariant belongs to the database, not to a client.</strong> An installed executor is the same logic on every surface — Rust, the shell, GraphQL — so a rule like "stock never goes negative" holds wherever the write came from.</li>
+          <li><strong>A module that describes itself becomes API.</strong> Export <code>describe</code> and installing the module adds its own typed field to the GraphQL schema, hot-swapped at install time.</li>
+          <li><strong>Module bytes are data.</strong> They live in the engine's own keyspace as ordinary versioned keys, so they are recovered with the store, copied into forks, and time-travelled by <code>query_at</code> — the store can answer "what code ran here".</li>
+        </ul>
+
+        <h2>The bargain</h2>
+        <p>Modules are sandboxed. Fuel-metered and memory-capped, with no WASI, no clock and no randomness, they can import only the <code>fluent</code> host functions: <code>get</code>, <code>get_for_update</code>, <code>put</code>, <code>delete</code>, batched scans, output and log. Entropy and time are inputs, never ambient. That is the price of letting arbitrary code run in the write path, and it is what keeps the engine's own guarantees independent of any module. The limits protect reliability and integrity; authentication and authorization are a layer you put in front.</p>
+
+        <div class="note"><p><span class="lbl">This section</span><a href="#wasm-roles">Roles and lifecycles</a> is what each export means and when the engine calls it. <a href="#wasm-uses">What to build with it</a> is the catalogue of shapes a module takes, and the honest list of what one cannot do. <a href="#wasm-sdk">The guest SDK</a> and <a href="#wasm-abi">The host ABI</a> are the two API surfaces — the Rust one you will write against, and the raw one underneath it. <a href="#wasm-typed">Typed GraphQL fields</a> turns a module into API, and <a href="#wasm-invoking">Invoking and debugging</a> covers calling, managing and diagnosing them.</p></div>
+      </article>
+      <!-- ============================================================ -->
+      <article data-page="wasm-roles">
+        <h1>Roles and lifecycles</h1>
+        <p class="lead">A module's exports decide what it is. Each role has its own input, its own execution context, and its own rules about what happens when it fails.</p>
+
+        <h2>Required exports</h2>
+        <div class="codeblock"><pre><span class="s">"memory"</span>     the guest's linear memory                  <span class="c">// required</span>
+<span class="s">"query"</span>      () -&gt; i32   read-only entry
+<span class="s">"execute"</span>    () -&gt; i32   transactional entry
+<span class="s">"on_touch"</span>   () -&gt; i32   keys-mode trigger consumer
+<span class="s">"on_apply"</span>   () -&gt; i32   changes-mode trigger consumer
+<span class="s">"describe"</span>   () -&gt; i32   typed GraphQL descriptor    <span class="c">// optional</span></pre></div>
+        <p>Install is rejected unless the module exports <code>memory</code> and at least one role entry. Entries take no parameters and return an <code>i32</code> exit code; everything they receive and everything they return travels through the host calls. One binary may carry any combination — a module that maintains an index and also answers questions about it is one artifact, not two.</p>
+
+        <h2>The five roles</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Export</th><th>Input it receives</th><th>Context it runs in</th><th>Failure</th></tr></thead>
+          <tbody>
+            <tr><td><code>query</code></td><td>the caller's bytes</td><td>one snapshot pinned for the whole invocation; writes return <code>EROFS</code></td><td>non-zero exit &rarr; <code>GuestFailed</code>; nothing to roll back</td></tr>
+            <tr><td><code>execute</code></td><td>the caller's bytes</td><td>a fresh transaction per attempt; reads see its snapshot plus the transaction's own buffered writes</td><td>exit 0 commits; anything else aborts the transaction &rarr; <code>GuestFailed</code></td></tr>
+            <tr><td><code>on_touch</code></td><td>the touched keys, coalesced, unordered, no values, up to <code>trigger_batch</code></td><td>an executor the engine invokes; its writes and the events' consumption commit together</td><td>the batch stays queued and the runner backs off; visible as <code>lastError</code></td></tr>
+            <tr><td><code>on_apply</code></td><td>the ordered change list — one entry per committed op, with kind, key, seqno and the value inline up to <code>trigger_inline_value</code></td><td>the same</td><td>the same</td></tr>
+            <tr><td><code>describe</code></td><td>empty</td><td>read-only, run by the GraphQL server at install and at every schema build</td><td>a descriptor that does not hold up rejects the install</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>The query lifecycle</h2>
+        <p>One snapshot is registered before the entry runs and released after it returns, so every read inside the invocation — however many scans and lookups it makes — sees one state. That is what lets a computed report be internally consistent without the caller coordinating anything. A query never writes: <code>put</code>, <code>delete</code> and <code>get_for_update</code> all return <code>EROFS</code>.</p>
+        <p><code>query_at</code> pins a snapshot you choose instead of the current one. Because module bytes are themselves versioned keys, that travels the code as well as the data: a query run at an old sequence number is the module as it existed then.</p>
+
+        <h2>The executor lifecycle</h2>
+        <p>This is the role with real rules, because the engine may run the entry more than once per call.</p>
+        <ul>
+          <li>Each attempt begins a fresh transaction and gets fresh linear memory, fresh fuel and a fresh output buffer. Nothing survives a previous attempt except what is in the database.</li>
+          <li>Exit 0 commits the transaction. Any other exit aborts it and surfaces as <code>Error::GuestFailed { code, output }</code>, with nothing written.</li>
+          <li>A commit conflict discards the attempt and re-runs it against a fresh snapshot, up to <code>execute_retries</code> attempts (3 by default, the first included). When they are spent the call returns <code>Conflict</code> and re-running becomes the caller's job.</li>
+          <li>So the entry has to be a pure function of its input and the database state: no side channels, no "have I already run" flag anywhere but the data, and no assumption that an earlier attempt's writes happened.</li>
+          <li>Call <code>get_for_update</code> on every key a write depends on. That is what puts the key in the conflict set, and it is what makes the invariant hold under concurrency.</li>
+          <li>Use checked arithmetic, and treat present-but-malformed state as corruption: fail loudly with a distinct code rather than defaulting. An executor that silently defaults or overflows corrupts durable state.</li>
+          <li><code>EIO</code> from any host call means the engine itself failed. The invocation fails host-side even if the guest swallows the errno and exits 0.</li>
+        </ul>
+
+        <h2>The trigger lifecycles</h2>
+        <p>Both trigger roles run as executors, with the engine supplying the input and owning the transaction. What differs is what arrives and what it means.</p>
+        <p><strong><code>on_touch</code> is asked to reconcile.</strong> The input is a set of keys that were written, with repeated touches of one key coalesced into one entry while a backlog exists — no values, no op kinds, no order. The contract is to read each key's current state and make the derived state match: present means upsert, absent means remove. Written that way the module converges however the events were batched or replayed. Because the event carries no previous value, anything that needs to undo earlier work keeps its own back-pointer.</p>
+        <p><strong><code>on_apply</code> is told what happened.</strong> The input is every committed op in commit order, each with its kind, key, sequence number and — up to <code>trigger_inline_value</code> — its value. Nothing is coalesced: a key written three times produces three entries. Values above the inline limit arrive elided, and the module reads the key instead, knowing that read is current state and may be newer than the change it is holding. Derive output keys from the sequence number and a replay overwrites instead of duplicating.</p>
+        <p>A trigger's own writes generate no events, for any trigger, so consumers cannot chain or loop. Registration is by key range and is covered in <a href="#triggers">Triggers</a>.</p>
+
+        <h2>Exit codes</h2>
+        <p>Zero means success. The convention for everything else is one distinct non-zero code per failure class, with a human-readable message written to the output buffer. Callers see both — over GraphQL as <code>guestExitCode</code> and <code>guestOutputText</code> — so a client can tell "insufficient funds" from "malformed input" from "corrupt record" without parsing prose. The modules in <code>guests/</code> use 2 through 7.</p>
+      </article>
+      <!-- ============================================================ -->
+      <article data-page="wasm-uses">
+        <h1>What to build with it</h1>
+        <p class="lead">The shapes a module takes, grouped by the role that carries them — and an honest account of what a module cannot do.</p>
+
+        <h2>Reads that belong next to the data</h2>
+        <p>Anything whose inputs are much larger than its answer. The range never leaves the process, and the whole computation happens at one snapshot.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Shape</th><th>What the module earns</th></tr></thead>
+          <tbody>
+            <tr><td>aggregates over a range — count, sum, min, max, averages</td><td>a million keys in, a handful of bytes out</td></tr>
+            <tr><td>ranked top-N with a floor or a filter</td><td>ranking needs the whole range but returns a page of it</td></tr>
+            <tr><td>projections — three fields of a large record</td><td>values are opaque to the engine, so only a module can narrow them</td></tr>
+            <tr><td>lookups that combine two ranges</td><td>both sides are read at one snapshot, so the result cannot tear</td></tr>
+            <tr><td>graph and adjacency walks</td><td>each hop is a <code>get</code> at the same snapshot; a client pays a round trip per hop</td></tr>
+            <tr><td>index-backed search — tags, terms, a prefix of a secondary key</td><td>scan the index range and resolve the hits in one invocation</td></tr>
+            <tr><td>existence, integrity and drift checks over a range</td><td>a full scan in, a verdict out</td></tr>
+            <tr><td>rendered summaries and server-computed page cursors</td><td>the computation is the point; shipping its inputs is the waste</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Writes that have to hold an invariant</h2>
+        <p>Anything where reading and writing must be one indivisible step, or where several keys have to move together.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Shape</th><th>What makes it need an executor</th></tr></thead>
+          <tbody>
+            <tr><td>claiming a name — usernames, slugs, seat reservations</td><td>read-then-write; <code>get_for_update</code> makes exactly one concurrent claimant win</td></tr>
+            <tr><td>transfers and ledger entries</td><td>two balances must move together or not at all, and neither may go negative</td></tr>
+            <tr><td>dense id allocation</td><td>a counter read under <code>get_for_update</code>; retries keep the ids gap-free</td></tr>
+            <tr><td>conditional writes — only if absent, only if unchanged</td><td>the condition is evaluated inside the transaction that commits it</td></tr>
+            <tr><td>state machine transitions</td><td>the legal-transition check and the write are one atomic step</td></tr>
+            <tr><td>validation gateways</td><td>the executor becomes the write path for a range, so the constraint holds for every caller that uses it</td></tr>
+            <tr><td>denormalization on write — a record plus its stats plus its index entry</td><td>coordinated multi-key writes, committed together or not at all</td></tr>
+            <tr><td>idempotent submits</td><td>the marker and the effect share one commit, which is what makes a retry provably safe</td></tr>
+            <tr><td>outbox writes for downstream delivery</td><td>the record and its outbox entry cannot come apart</td></tr>
+            <tr><td>bulk edits over a range</td><td>one transaction: invisible until it commits, serialized by conflict detection</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Derived data that maintains itself</h2>
+        <p>Bound to a key range, a module stops being something callers invoke and becomes something the engine invokes for them. The mode picks itself from what the derived state is a function of.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Shape</th><th>Mode</th><th>Why that mode</th></tr></thead>
+          <tbody>
+            <tr><td>secondary indexes</td><td><code>on_touch</code></td><td>the index is a function of current state, so coalescing is free correctness</td></tr>
+            <tr><td>reverse lookups and mirrors under another key layout</td><td><code>on_touch</code></td><td>the same reconcile shape, different output keys</td></tr>
+            <tr><td>invariant checkers and repair sweeps</td><td><code>on_touch</code></td><td>re-reading current state is exactly what a checker wants</td></tr>
+            <tr><td>changefeeds, audit trails, event logs</td><td><code>on_apply</code></td><td>every op matters, in order, with its value; coalescing would lose entries</td></tr>
+            <tr><td>live per-group aggregates</td><td><code>on_apply</code></td><td>each change contributes its delta exactly once, so totals cannot drift</td></tr>
+            <tr><td>per-record history</td><td><code>on_apply</code></td><td>one entry per write, keyed by sequence number</td></tr>
+            <tr><td>cascading deletes and reference cleanup</td><td><code>on_apply</code></td><td>the op kind is the condition, and trigger writes never re-fire</td></tr>
+            <tr><td>indexes defined at runtime by writing a spec key</td><td><code>on_apply</code></td><td>one module, two ranges: specs backfill and tear down, data folds</td></tr>
+            <tr><td>fan-out projections — one write, several read-shaped copies</td><td><code>on_apply</code></td><td>the projection trails the write without the writer knowing it exists</td></tr>
+            <tr><td>expiry sweeps</td><td><code>on_apply</code></td><td>workable, but the deadline has to be a value the writer stored — see the limits below</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Work that runs once and is never installed</h2>
+        <p>The same executor contract, invoked on bytes that are stored nowhere: format migrations, backfills after a shape change, data repair, bulk re-encoding, and one-off reports. Nothing is listed, cached or replicated, and the committed writes are the only trace — so the script in your repository is the audit trail. Triggers still fire on those writes, which is what keeps indexes and feeds correct straight through a migration. <a href="#ex-oneshot">Migrations &amp; one-shots</a> works the shape end to end.</p>
+
+        <h2>What a module cannot do</h2>
+        <ul>
+          <li><strong>No clock.</strong> There is no time source at all. Anything time-shaped — timestamps on records, deadlines, rate limits, scheduled expiry — takes the instant from the caller and stores it as data.</li>
+          <li><strong>No randomness.</strong> Ids, tokens and nonces are either derived from data the module can read, or passed in.</li>
+          <li><strong>No network, files or environment.</strong> There is no WASI: the only imports are the host's own database calls. A module cannot call out, and nothing can call in except the engine.</li>
+          <li><strong>No state between invocations.</strong> Linear memory is fresh every time, and an executor's memory is fresh on every retry. The database is the only memory a module has.</li>
+          <li><strong>No vetoing a write.</strong> Triggers run after the commit, so a trigger can compensate but cannot reject. Validation that must refuse belongs in an executor that owns the write path.</li>
+          <li><strong>No reaching outside its store.</strong> A module sees the store it runs in, and inside it only the user keyspace — keys starting with <code>0x00</code> are the engine's own.</li>
+          <li><strong>No unbounded work.</strong> Fuel, memory, input, output, log volume and open scan handles are all capped per invocation, and a transaction's write set is capped too.</li>
+        </ul>
+        <p>Within that, it is ordinary Rust. Any crate that compiles for <code>wasm32-unknown-unknown</code> without operating-system access works, which covers serialization, parsing, compression and arithmetic; the reference modules use <code>serde_json</code>. The limits exist to protect the engine's reliability and integrity — authentication and authorization are a layer you put in front.</p>
+
+        <h2>The modules in the repository</h2>
+        <p>Ten working modules under <code>guests/</code>, one per shape, each with a demo script that exercises it.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Module</th><th>Role</th><th>Shows</th></tr></thead>
+          <tbody>
+            <tr><td><code>agg</code></td><td>query</td><td>prefix count/sum/min/max over u64 LE values; raw bytes in and out</td></tr>
+            <tr><td><code>top_customers</code></td><td>query, typed</td><td>typed list output, <code>scan_prefix</code> aggregation at a snapshot, limit clamping</td></tr>
+            <tr><td><code>transfer</code></td><td>execute</td><td>a balance transfer with <code>get_for_update</code>, conflict retries, an exit code per failure</td></tr>
+            <tr><td><code>claim</code></td><td>execute</td><td>a uniqueness invariant: exactly one winner under concurrency, idempotent re-claim, attributable failures</td></tr>
+            <tr><td><code>place_order</code></td><td>execute, typed</td><td>id allocation, a record and a stats fold in one transaction; input validation, corruption checks that fail loudly</td></tr>
+            <tr><td><code>customer_index</code></td><td><code>on_touch</code></td><td>a secondary index reconciled against current state, with the back-pointer pattern for updates and deletes</td></tr>
+            <tr><td><code>order_feed</code></td><td><code>on_apply</code> + feed</td><td>an ordered changefeed materialized as keys and subscribable live, with an <code>elided</code> flag for oversized values</td></tr>
+            <tr><td><code>live_stats</code></td><td><code>on_apply</code></td><td>an always-fresh per-group aggregate folded exactly once per change; the demo checks it against a full recount</td></tr>
+            <tr><td><code>dynamic_index</code></td><td><code>on_apply</code></td><td>index specs stored as keys, scan-backfill on spec write, teardown on delete; one module, two triggers</td></tr>
+            <tr><td><code>cascade_delete</code></td><td><code>on_apply</code></td><td>a parent delete sweeping its subtree; the no-stacking rule doing the loop prevention</td></tr>
+          </tbody>
+        </table></div>
+        <p><a href="#choosing">Choosing the shape</a> works the same ground from the other direction — starting at the kind of database work rather than the role — and the recipes from <a href="#ex-queries">Queries in the database</a> onward carry the code.</p>
+      </article>
+      <!-- ============================================================ -->
+      <article data-page="wasm-sdk">
+        <h1>The guest SDK</h1>
+        <p class="lead"><code>fluent-guest</code> is the Rust crate you write modules against. It wraps the host ABI in safe functions, and its macros generate the exports.</p>
+
+        <h2>Crate setup</h2>
+        <div class="codeblock"><div class="bar">guests/&lt;name&gt;/Cargo.toml — add the crate to guests/Cargo.toml members</div><pre>[package]
+name = <span class="s">"my_module"</span>
+version = <span class="s">"0.1.0"</span>
+edition = <span class="s">"2021"</span>
+
+[lib]
+crate-type = [<span class="s">"cdylib"</span>]
+
+[dependencies]
+fluent-guest = { path = <span class="s">"../../crates/fluent-guest"</span> }
+serde_json = <span class="s">"1"</span>      <span class="c"># optional; works on wasm32-unknown-unknown</span></pre></div>
+        <div class="codeblock"><pre>cargo build <span class="w">--release</span> <span class="w">--target</span> wasm32-unknown-unknown
+<span class="c"># → target/wasm32-unknown-unknown/release/my_module.wasm</span></pre></div>
+        <p>There is no WASI, so nothing that needs an operating system links: no <code>std::time</code>, no <code>std::env</code>, no <code>rand</code>, no sockets or files. Entropy and time are inputs.</p>
+
+        <h2>Entry points</h2>
+        <p>Put one attribute per role on a function of the shape <code>fn(T: FromInput) -&gt; Result&lt;O: IntoOutput, Fail&gt;</code>. The macro generates the export, decodes the input and encodes the result: <code>Ok</code> becomes exit 0 with the encoded output, and <code>Err(Fail { code, message })</code> becomes a non-zero exit with the message in the output buffer.</p>
+        <div class="codeblock"><pre><span class="k">use</span> fluent_guest::{Change, Fail};
+
+<span class="w">#[fluent_guest::query]</span>     <span class="k">fn</span> view(input: Vec&lt;u8&gt;)        -&gt; Result&lt;String, Fail&gt; { .. }
+<span class="w">#[fluent_guest::execute]</span>   <span class="k">fn</span> write(input: String)        -&gt; Result&lt;Vec&lt;u8&gt;, Fail&gt; { .. }
+<span class="w">#[fluent_guest::on_touch]</span>  <span class="k">fn</span> index(keys: Vec&lt;Vec&lt;u8&gt;&gt;)   -&gt; Result&lt;(), Fail&gt;     { .. }
+<span class="w">#[fluent_guest::on_apply]</span>  <span class="k">fn</span> feed(changes: Vec&lt;Change&gt;)  -&gt; Result&lt;(), Fail&gt;     { .. }
+fluent_guest::fluent_describe!(<span class="s">r#"{ ... }"#</span>);   <span class="c">// optional typed surface</span></pre></div>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Parameter type</th><th>Decoded from</th><th>Use with</th></tr></thead>
+          <tbody>
+            <tr><td><code>Vec&lt;u8&gt;</code></td><td>the input blob, verbatim</td><td><code>query</code>, <code>execute</code></td></tr>
+            <tr><td><code>String</code></td><td>the input as UTF-8; invalid input fails with code 3</td><td><code>query</code>, <code>execute</code></td></tr>
+            <tr><td><code>Vec&lt;Vec&lt;u8&gt;&gt;</code></td><td>the keys-mode trigger input</td><td><code>on_touch</code></td></tr>
+            <tr><td><code>Vec&lt;Change&gt;</code></td><td>the changes-mode trigger input</td><td><code>on_apply</code></td></tr>
+          </tbody>
+        </table></div>
+        <p><code>IntoOutput</code> is implemented for <code>Vec&lt;u8&gt;</code>, <code>String</code> and <code>()</code>. <code>Fail</code> converts from <code>String</code> and <code>&amp;str</code> with code 1, so <code>?</code> works on string errors, and <code>Fail::new(code, message)</code> sets the code deliberately. The annotated function must not be named after the export it generates — a <code>#[query]</code> function called <code>query</code> is a duplicate definition.</p>
+        <p>The <code>fluent_query!</code>, <code>fluent_execute!</code>, <code>fluent_on_touch!</code> and <code>fluent_on_apply!</code> macros are the declarative form of the same thing, for a module that would rather export a block than annotate a function. <code>fluent_describe!</code> has no attribute form: the descriptor is a static string.</p>
+
+        <h2>Data access</h2>
+        <div class="codeblock"><pre>fluent_guest::get(&amp;[u8]) -&gt; Option&lt;Vec&lt;u8&gt;&gt;
+fluent_guest::get_for_update(&amp;[u8]) -&gt; Result&lt;Option&lt;Vec&lt;u8&gt;&gt;, i32&gt;   <span class="c">// Err = errno</span>
+fluent_guest::put(&amp;[u8], &amp;[u8]) -&gt; Result&lt;(), i32&gt;
+fluent_guest::delete(&amp;[u8]) -&gt; Result&lt;(), i32&gt;
+
+fluent_guest::scan(lo: Option&lt;&amp;[u8]&gt;, hi: Option&lt;&amp;[u8]&gt;) -&gt; Result&lt;Scan, i32&gt;
+fluent_guest::scan_rev(lo: Option&lt;&amp;[u8]&gt;, hi: Option&lt;&amp;[u8]&gt;) -&gt; Result&lt;Scan, i32&gt;
+fluent_guest::scan_prefix(prefix: &amp;[u8]) -&gt; Result&lt;Scan, i32&gt;</pre></div>
+        <p>Reads see the invocation's snapshot, and in an executor the transaction's own buffered writes overlaid on top. <code>None</code> bounds are unbounded; the range is half-open, <code>[lo, hi)</code>. <code>get</code> fetches whole values — to read a value larger than guest memory, drop to <a href="#wasm-abi">the raw ABI</a>, where <code>get</code> returns the full length and copies from an offset.</p>
+        <p><code>Scan</code> is an <code>Iterator&lt;Item = (Vec&lt;u8&gt;, Vec&lt;u8&gt;)&gt;</code> that batches under the hood. One entry per iteration; a scan that hits an entry too large for its buffer stops, and <code>scan.skip_pending() -&gt; bool</code> drops that entry so iteration can continue.</p>
+
+        <h2>Input, output and logging</h2>
+        <div class="codeblock"><pre>fluent_guest::input() -&gt; Vec&lt;u8&gt;    <span class="c">// the whole input blob</span>
+fluent_guest::output(&amp;[u8])         <span class="c">// APPENDS to the output; call repeatedly to stream</span>
+fluent_guest::log(&amp;str)             <span class="c">// stderr, only when FLUENT31_WASM_LOG is set</span></pre></div>
+        <p>The entry macros call <code>input()</code> and <code>output()</code> for you; reach for them directly when the entry is written by hand or when the output is built in pieces. Logs are for debugging only — they are rate-capped and invisible unless the host asks for them, so results never travel that way.</p>
+
+        <h2>Trigger input</h2>
+        <div class="codeblock"><pre><span class="k">enum</span> Change {
+    Put    { seqno: u64, key: Vec&lt;u8&gt;, value: Option&lt;Vec&lt;u8&gt;&gt; },   <span class="c">// None = elided</span>
+    Delete { seqno: u64, key: Vec&lt;u8&gt; },
+}
+<span class="k">impl</span> Change { <span class="k">fn</span> seqno(&amp;self) -&gt; u64;  <span class="k">fn</span> key(&amp;self) -&gt; &amp;[u8]; }
+
+fluent_guest::trigger_keys() -&gt; Option&lt;Vec&lt;Vec&lt;u8&gt;&gt;&gt;   <span class="c">// keys mode, from input()</span>
+fluent_guest::changes()     -&gt; Option&lt;Vec&lt;Change&gt;&gt;     <span class="c">// changes mode, from input()</span>
+fluent_guest::parse_trigger_keys(&amp;[u8]) -&gt; Option&lt;Vec&lt;Vec&lt;u8&gt;&gt;&gt;
+fluent_guest::parse_changes(&amp;[u8])      -&gt; Option&lt;Vec&lt;Change&gt;&gt;</pre></div>
+        <p><code>value: None</code> means the value was above <code>trigger_inline_value</code> and was elided, not that it was empty — read the key if you need it, remembering that the read is current state and may be newer than the change in hand. <code>None</code> from the parsers means the input was not that shape, which is a programming error: the entry is bound to the wrong mode.</p>
+
+        <h2>Errnos</h2>
+        <p>Every fallible host call returns one of these as a negative integer. <code>fluent_guest::errno</code> exports them as constants.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Constant</th><th>Value</th><th>Means</th></tr></thead>
+          <tbody>
+            <tr><td><code>NOT_FOUND</code></td><td>-1</td><td>the key is absent</td></tr>
+            <tr><td><code>EROFS</code></td><td>-2</td><td>a write, or <code>get_for_update</code>, inside a read-only query</td></tr>
+            <tr><td><code>EINVAL</code></td><td>-3</td><td>a reserved, empty or oversized key, an oversized value, or bad scan flags</td></tr>
+            <tr><td><code>ENOSPC</code></td><td>-4</td><td>an output, log or transaction write-set limit was reached</td></tr>
+            <tr><td><code>EBADF</code></td><td>-5</td><td>a scan handle that is not open</td></tr>
+            <tr><td><code>ELIMIT</code></td><td>-6</td><td>too many scan handles open at once</td></tr>
+            <tr><td><code>EIO</code></td><td>-8</td><td>the engine failed; the invocation fails host-side regardless of the exit code</td></tr>
+          </tbody>
+        </table></div>
+
+        <h2>Authoring checklist</h2>
+        <ol>
+          <li>Pick the role or roles, and export the matching entries.</li>
+          <li>Define the keyspace. Validate anything from the input that becomes a key segment: non-empty, bounded length, no separator character.</li>
+          <li><code>get_for_update</code> on every read-modify-write key.</li>
+          <li>Distinct exit codes per failure class, with the message in the output. Malformed state fails loudly.</li>
+          <li>Checked arithmetic everywhere a number is stored.</li>
+          <li>A static descriptor with prefixed type names, if the module should be API.</li>
+          <li>Build with <code>--release</code>, install, and confirm <code>typed: true, schemaError: null</code>.</li>
+          <li>Test the happy path, each failure exit, concurrency for executors, and a restart — the typed field must come back.</li>
+        </ol>
+      </article>
+      <!-- ============================================================ -->
+      <article data-page="wasm-abi">
+        <h1>The host ABI</h1>
+        <p class="lead">The raw interface between the engine and a guest: thirteen imported functions and a handful of exports. <a href="#wasm-sdk">The guest SDK</a> wraps all of it — this page is what you need to write a module in another language, to hand-write WAT, or to reason about a limit precisely.</p>
+
+        <h2>Conventions</h2>
+        <ul>
+          <li>All pointers and lengths are <code>u32</code> passed as wasm <code>i32</code>. Out-of-range memory access <strong>traps</strong>, and the invocation fails with <code>Error::Wasm</code>; semantic misuse returns an errno instead.</li>
+          <li>Errnos are negative return values, in <code>i32</code> or <code>i64</code>: <code>NOT_FOUND -1</code>, <code>EROFS -2</code>, <code>EINVAL -3</code>, <code>ENOSPC -4</code>, <code>EBADF -5</code>, <code>ELIMIT -6</code>, <code>EIO -8</code>.</li>
+          <li>Keys beginning with byte <code>0x00</code> are the engine's reserved keyspace. Reads and writes there return <code>EINVAL</code>; scans are silently clamped to the user keyspace. Empty keys are <code>EINVAL</code>.</li>
+          <li>Entries take no parameters and return an <code>i32</code> exit code. The guest must export <code>memory</code> so the host can read and write the buffers it is given.</li>
+        </ul>
+
+        <h2>Input and output</h2>
+        <div class="codeblock"><pre>input_len  : () -&gt; i32
+input_read : (dst: i32, cap: i32, off: i32) -&gt; i32</pre></div>
+        <p>The invocation's input blob. <code>input_read</code> copies up to <code>cap</code> bytes starting at input offset <code>off</code> into guest memory at <code>dst</code>, and returns the number of bytes copied. Large inputs are read in as many passes as the guest has room for.</p>
+        <div class="codeblock"><pre>output_write : (ptr: i32, len: i32) -&gt; i32</pre></div>
+        <p><strong>Appends</strong> <code>len</code> bytes to the invocation's output. Returns <code>0</code>, or <code>ENOSPC</code> once the total would exceed <code>max_wasm_output</code>. Check the return value wherever truncated output would be a correctness bug rather than a cosmetic one.</p>
+        <div class="codeblock"><pre>log : (level: i32, ptr: i32, len: i32) -&gt; i32</pre></div>
+        <p>Debug logging, capped at <code>max_wasm_log</code> total bytes and then <code>ENOSPC</code>. The host prints to stderr only when <code>FLUENT31_WASM_LOG</code> is set. Never use logs to communicate results.</p>
+
+        <h2>Point access</h2>
+        <div class="codeblock"><pre>get            : (kptr, klen, off, vbuf, vcap: i32) -&gt; i64
+get_for_update : (kptr, klen, off, vbuf, vcap: i32) -&gt; i64</pre></div>
+        <p>A point lookup at this invocation's snapshot, with an executor's own buffered writes overlaid. Both return the <strong>full</strong> value length as a non-negative <code>i64</code> and copy <code>min(vcap, len - off)</code> bytes from value offset <code>off</code> into <code>vbuf</code> — so a value larger than guest memory is read by calling again with a larger buffer or an advancing <code>off</code>. <code>NOT_FOUND</code> if the key is absent.</p>
+        <p><code>get_for_update</code> additionally adds the key to the transaction's read set, which is what makes first-committer-wins apply to it; use it for every read-modify-write. In a read-only query it returns <code>EROFS</code>.</p>
+        <div class="codeblock"><pre>put    : (kptr, klen, vptr, vlen: i32) -&gt; i32
+delete : (kptr, klen: i32) -&gt; i32</pre></div>
+        <p>Buffer a write in the transaction. <code>EROFS</code> in query mode. <code>EINVAL</code> for a reserved, empty or oversized key (<code>max_key_size</code>, 16 KiB) or an oversized value (<code>max_value_size</code>, 256 MiB). <code>ENOSPC</code> once the transaction's write set would exceed <code>max_txn_write_bytes</code>. Deleting an absent key succeeds.</p>
+
+        <h2>Scans</h2>
+        <div class="codeblock"><pre>scan_open : (lo_ptr, lo_len, hi_ptr, hi_len, flags: i32) -&gt; i32</pre></div>
+        <p>Opens an iterator over <code>[lo, hi)</code> at the snapshot. A zero-length <code>lo</code> or <code>hi</code> means unbounded on that side. <code>flags</code> bit 0 selects reverse order; every other bit is <code>EINVAL</code>. Returns a handle (&ge; 0), or <code>ELIMIT</code> past <code>max_wasm_scans</code> concurrently open handles. Handles are per-invocation and never survive the entry returning.</p>
+        <div class="codeblock"><pre>scan_next : (h: i32, buf: i32, cap: i32) -&gt; i32</pre></div>
+        <p>Fills <code>buf</code> with as many whole entries as fit in <code>cap</code>, subject to a host-side batch ceiling of 16 MiB. Each entry is packed as:</p>
+        <div class="codeblock"><pre>[klen uvarint][vlen uvarint][key bytes][value bytes]</pre></div>
+        <p>Returns the number of bytes written; <code>0</code> means the range is exhausted. <code>ENOSPC</code> means the <em>next single entry</em> does not fit in <code>cap</code> — grow the buffer, or ask how big it is and decide:</p>
+        <div class="codeblock"><pre>scan_entry_hint : (h: i32) -&gt; i64   <span class="c">// packed size of the next entry; 0 at the end</span>
+scan_skip       : (h: i32) -&gt; i32   <span class="c">// drop the next entry; 1 if skipped, 0 at the end</span>
+scan_close      : (h: i32) -&gt; i32   <span class="c">// free the handle</span></pre></div>
+        <p><code>EBADF</code> is a handle that is not open; <code>EIO</code> is an engine error. The SDK's <code>Scan</code> iterator is exactly this loop, with <code>skip_pending()</code> exposing <code>scan_skip</code>.</p>
+
+        <h2>Per-invocation limits</h2>
+        <p>Every one of these is an engine <code>Options</code> field, so they are the operator's to set — the defaults are what an unconfigured store uses.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Option</th><th>Default</th><th>On breach</th></tr></thead>
+          <tbody>
+            <tr><td><code>wasm_fuel</code></td><td>1,000,000,000</td><td>trap &rarr; <code>Error::Wasm</code>; this is what bounds an infinite loop</td></tr>
+            <tr><td><code>wasm_memory_limit</code></td><td>64 MiB</td><td><code>memory.grow</code> fails</td></tr>
+            <tr><td><code>max_wasm_input</code></td><td>64 MiB</td><td><code>InvalidArgument</code>, before the module runs</td></tr>
+            <tr><td><code>max_wasm_output</code></td><td>32 MiB</td><td><code>output_write</code> returns <code>ENOSPC</code></td></tr>
+            <tr><td><code>max_wasm_log</code></td><td>1 MiB</td><td><code>log</code> returns <code>ENOSPC</code></td></tr>
+            <tr><td><code>max_wasm_scans</code></td><td>64 open handles</td><td><code>scan_open</code> returns <code>ELIMIT</code></td></tr>
+            <tr><td><code>max_key_size</code></td><td>16 KiB</td><td><code>put</code> returns <code>EINVAL</code></td></tr>
+            <tr><td><code>max_value_size</code></td><td>256 MiB</td><td><code>put</code> returns <code>EINVAL</code></td></tr>
+            <tr><td><code>max_txn_write_bytes</code></td><td>256 MiB</td><td><code>put</code> returns <code>ENOSPC</code></td></tr>
+          </tbody>
+        </table></div>
+        <div class="note"><p><span class="lbl">Spec.</span><a href="https://github.com/orthory/fluent31/blob/master/WASM.md">WASM.md</a> in the repository is the normative version of this page.</p></div>
+      </article>
+      <!-- ============================================================ -->
+      <article data-page="wasm-typed">
+        <h1>Typed GraphQL fields</h1>
+        <p class="lead">A module that exports <code>describe</code> becomes its own root field the moment it is installed. No schema file, no resolver, no server restart.</p>
+
+        <p><code>kind: "query"</code> lands the field on <code>Query</code>, <code>kind: "execute"</code> on <code>Mutation</code>, and a <code>feed</code> declaration on <code>Subscription</code>. The schema is rebuilt and hot-swapped on every install and uninstall, at server start, and on <code>mutation { reloadSchema }</code> — so the API changes with the code that backs it.</p>
+
+        <h2>The descriptor</h2>
+        <div class="codeblock"><pre>fluent_guest::fluent_describe!(<span class="s">r#"{
+  "kind": "execute",
+  "description": "docs for the root field",
+  "args": [{"name": "customer", "type": "String!"},
+           {"name": "amountCents", "type": "U64!"},
+           {"name": "note", "type": "String"}],
+  "types": [{"name": "PlacedOrder", "fields": [
+    {"name": "id", "type": "U64!"},
+    {"name": "customerTotalCents", "type": "U64!"}]}],
+  "output": "PlacedOrder!",
+  "feed": {"prefix": "feed/", "event": "OrderFeedEntry!"}
+}"#</span>);</pre></div>
+        <p>It is a static string, evaluated by running the export with an empty input, so it cannot depend on the data.</p>
+
+        <h2>The type grammar</h2>
+        <ul>
+          <li>Scalars are <code>String</code>, <code>Int</code> (32-bit), <code>Float</code>, <code>Boolean</code>, <code>U64</code> (a string on the wire, with numbers accepted on input) and <code>Json</code> (opaque). At most one list level.</li>
+          <li><code>args</code> reference scalars only. <code>output</code> and the fields of <code>types</code> may also reference types declared in the same descriptor.</li>
+          <li><code>!</code> marks non-null, on args, on fields and on the output.</li>
+          <li>Limits: 32 types, 64 fields per type, 16 args, and a 64&nbsp;KiB descriptor.</li>
+        </ul>
+
+        <h2>Shape rules</h2>
+        <ul>
+          <li>At least one of <code>kind</code> and <code>feed</code> must be present.</li>
+          <li><code>output</code> is required with <code>kind</code> and rejected without it; <code>args</code> require <code>kind</code>.</li>
+          <li>A trigger-only module declares just <code>feed</code> plus <code>types</code> — no <code>kind</code>, no <code>output</code>.</li>
+          <li>The feed's <code>event</code> type must be one of the declared <code>types</code>.</li>
+          <li>Every declaration must be backed by its export: <code>"query"</code> by <code>query</code>, <code>"execute"</code> by <code>execute</code>, <code>feed</code> by <code>on_apply</code>. Otherwise the install is rejected.</li>
+        </ul>
+
+        <h2>How arguments reach the module</h2>
+        <p>With <code>args</code>, the entry receives one JSON object holding every declared argument, with omitted optional ones as <code>null</code> and <code>U64</code> as a number. Without <code>args</code>, the field takes an optional <code>input: BytesInput</code> and the entry receives raw bytes.</p>
+        <p>Only the GraphQL layer builds that object. Through the shell or <code>db.execute</code>, a typed module receives whatever bytes you hand it — so call it with the same JSON object yourself:</p>
+        <div class="codeblock"><pre>exec placeOrder {<span class="s">"customer"</span>:<span class="s">"acme"</span>,<span class="s">"amountCents"</span>:1250,<span class="s">"note"</span>:null}</pre></div>
+
+        <h2>How output is validated</h2>
+        <p>The output is parsed as JSON and checked against <code>output</code>. Undeclared keys are dropped. Missing declared fields become <code>null</code>, which is an error if the field is <code>!</code>. A violation surfaces as <code>OUTPUT_SCHEMA_VIOLATION</code>, and for an executor it carries <code>committed: true</code> — the transaction has already committed and only the response failed to typecheck. Never blind-retry that one.</p>
+
+        <h2>Naming</h2>
+        <p><strong>The field is named exactly what you install the module as</strong>; the crate name is irrelevant. The reference modules are installed under camelCase names — <code>scripts/demo-orders.sh</code> installs <code>place_order.wasm</code> as <code>placeOrder</code> and <code>top_customers.wasm</code> as <code>topCustomers</code>, and those are the field names.</p>
+        <p>The name must be a valid GraphQL name and must not shadow a built-in root field. Type names must not be reserved and must not collide with another module's, so prefix yours: <code>PlacedOrder</code>, not <code>Order</code>.</p>
+
+        <h2>Install and confirm</h2>
+        <div class="codeblock"><pre><span class="k">mutation</span>($w: BytesInput!) {
+  installModule(name: <span class="s">"placeOrder"</span>, wasm: $w) { name typed schemaError }
+}</pre></div>
+        <p>The server's <code>installModule</code> runs <code>describe</code> and rejects a descriptor that does not hold up. The engine's <code>install_module</code> — Rust and the shell — checks only the exports, so a module installed that way with a bad descriptor ends up degraded: still callable through the generic byte fields, but with no typed field. <code>modules { name typed schemaError }</code> says why, and <code>reloadSchema</code> is the resync after an out-of-band install.</p>
+      </article>
+      <!-- ============================================================ -->
+      <article data-page="wasm-invoking">
+        <h1>Invoking and debugging</h1>
+        <p class="lead">Every surface reaches the same modules, installed or not, with the same limits and the same failures.</p>
+
+        <h2>Installed modules</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Surface</th><th>Query</th><th>Execute</th></tr></thead>
+          <tbody>
+            <tr><td>Rust</td><td><code>db.query(name, input)</code>, <code>db.query_at(name, input, &amp;snap)</code></td><td><code>db.execute(name, input)</code></td></tr>
+            <tr><td>Shell</td><td><code>query NAME [INPUT]</code></td><td><code>exec NAME [INPUT]</code></td></tr>
+            <tr><td>GraphQL, generic</td><td><code>wasm(module:, input:)</code></td><td><code>wasmExecute(module:, input:)</code></td></tr>
+            <tr><td>GraphQL, typed</td><td><code>&lt;module&gt;(args)</code> on <code>Query</code></td><td><code>&lt;module&gt;(args)</code> on <code>Mutation</code></td></tr>
+          </tbody>
+        </table></div>
+        <p>Both return the guest's output bytes. A trigger consumer is never invoked directly — it is bound to a range and the engine calls it.</p>
+
+        <h2>Managing them</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Operation</th><th>Rust</th><th>Shell</th><th>GraphQL</th></tr></thead>
+          <tbody>
+            <tr><td>install</td><td><code>install_module(name, wasm)</code></td><td><code>install NAME FILE.wasm</code></td><td><code>installModule(name, wasm)</code></td></tr>
+            <tr><td>uninstall</td><td><code>uninstall_module(name)</code></td><td><code>uninstall NAME</code></td><td><code>uninstallModule(name)</code></td></tr>
+            <tr><td>list</td><td><code>list_modules()</code></td><td><code>modules</code></td><td><code>modules { name typed schemaError }</code></td></tr>
+            <tr><td>inspect exports</td><td><code>module_entries(name)</code>, <code>wasm_entries(wasm)</code></td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table></div>
+        <p><code>list_modules</code> returns a <code>ModuleInfo</code> per module: its name, its size in bytes, and a content fingerprint that lets a caller skip re-processing bytes it has already seen. <code>module_entries</code> and <code>wasm_entries</code> return the role exports the engine found, which is how you check what a binary actually is before or after installing it. GraphQL's <code>installModule</code> also accepts WAT text (<code>wasm: {text: "(module ...)"}</code>).</p>
+        <p>Installing over an existing name replaces the bytes. Invocations already running finish on the bytes they started with. Module bytes are ordinary versioned keys in the engine's own keyspace, so they recover with the store, copy into forks, and are visible to <code>query_at</code> at an old sequence number — the store can answer "what code ran here".</p>
+
+        <h2>Running bytes that are never installed</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Surface</th><th>Query</th><th>Execute</th></tr></thead>
+          <tbody>
+            <tr><td>Rust</td><td><code>db.query_wasm(wasm, input)</code>, <code>query_wasm_at(.., &amp;snap)</code></td><td><code>db.execute_wasm(wasm, input)</code></td></tr>
+            <tr><td>Shell</td><td><code>queryonce FILE.wasm [INPUT]</code></td><td><code>execonce FILE.wasm [INPUT]</code></td></tr>
+            <tr><td>GraphQL</td><td><code>wasmOnce(wasm:, input:)</code></td><td><code>wasmExecuteOnce(wasm:, input:)</code></td></tr>
+          </tbody>
+        </table></div>
+        <p>Same ABI, SDK, limits and retry loop, except that the code is pinned across all attempts. Nothing is listed, cached or replicated; an executor's committed writes are the only trace. Triggers still fire on those writes. <code>describe</code> is ignored, so there is no typed field, and a trigger can only ever bind to an installed module.</p>
+
+        <h2>What failure looks like</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Error</th><th>Cause</th><th>What to do</th></tr></thead>
+          <tbody>
+            <tr><td><code>GuestFailed { code, output }</code></td><td>the entry exited non-zero; an executor's transaction was aborted, so nothing was written</td><td>read the code and the message — this is the module's own verdict, not a fault</td></tr>
+            <tr><td><code>Conflict</code></td><td>an executor exhausted <code>execute_retries</code> against concurrent writers</td><td>re-run the call; the retry loop is now the caller's</td></tr>
+            <tr><td><code>Error::Wasm</code></td><td>a trap: out-of-bounds memory, fuel exhausted, an unreachable instruction</td><td>a bug or a runaway loop in the module; fuel bounds it, it does not fix it</td></tr>
+            <tr><td><code>InvalidArgument</code></td><td>an input above <code>max_wasm_input</code>, or a module with no usable exports</td><td>checked before the module runs</td></tr>
+            <tr><td><code>OUTPUT_SCHEMA_VIOLATION</code></td><td>the output did not match the descriptor; <code>committed: true</code> on executors</td><td>fix the module — and never blind-retry a committed one</td></tr>
+          </tbody>
+        </table></div>
+        <p>Over GraphQL the guest's own failures arrive as <code>guestExitCode</code> and <code>guestOutputText</code> rather than as transport errors, so a client can branch on the code. In the shell a guest failure prints <code>guest exited with code N, output …</code>, and a conflict prints <code>CONFLICT (first committer wins)</code>.</p>
+        <p>A trigger consumer's failure is not returned to anyone — the write that caused it has already committed. It surfaces as a stalled queue: <code>triggers</code> shows a growing <code>pending</code> and a <code>lastError</code>, and the runner keeps retrying with backoff until the module is fixed or replaced. <a href="#triggers">Triggers</a> covers the drain loop.</p>
+
+        <h2>Seeing inside a module</h2>
+        <p>Set <code>FLUENT31_WASM_LOG</code> and the host prints <code>fluent_guest::log</code> output to stderr; leave it unset and the calls are cheap and silent. Logs are capped at <code>max_wasm_log</code> per invocation, so they are a debugging channel and never a results channel. Beyond that the tools are the ordinary ones: exercise the module against a <a href="#forks">fork</a> of real data, and pin the invariant with a test that runs the executor concurrently — <a href="#testing">Testing</a> has the harness.</p>
       </article>
       <!-- ============================================================ -->
       <article data-page="embedded-api">
@@ -1147,7 +1587,7 @@ db.delete_trigger(<span class="s">"name"</span>)?;
 db.list_triggers()?;                       <span class="c">// Vec&lt;TriggerInfo&gt; { name: String, module: String,</span>
                                            <span class="c">//   lo: Vec&lt;u8&gt;, hi: Vec&lt;u8&gt; (empty = open), mode: TriggerMode::{Keys, Changes},</span>
                                            <span class="c">//   pending: u64, last_error: Option&lt;String&gt; }</span></pre></div>
-        <p>The full contracts are on <a href="#wasm-modules">WASM modules</a> and <a href="#triggers">Triggers</a>.</p>
+        <p>The full contracts are on <a href="#wasm-roles">Roles and lifecycles</a> and <a href="#triggers">Triggers</a>.</p>
 
         <h2>Change stream</h2>
         <div class="codeblock"><pre><span class="k">let mut</span> sub: Subscription = db.subscribe(<span class="s">b"orders/"</span>, Some(<span class="s">b"orders0"</span>))?;
@@ -1186,169 +1626,6 @@ sub.start_seqno();                                   <span class="c">// everythi
             <tr><td><code>JournalGap(msg)</code></td><td>a middle journal segment is missing</td><td>restore the segment and rebuild again</td></tr>
           </tbody>
         </table></div>
-      </article>
-      <!-- ============================================================ -->
-      <article data-page="wasm-modules">
-        <h1>WASM modules</h1>
-        <p class="lead">A module is a WASM binary stored in the database. Its exports are its roles.</p>
-
-        <div class="tablewrap"><table>
-          <thead><tr><th>Export</th><th>Role</th><th>Runs as</th></tr></thead>
-          <tbody>
-            <tr><td><code>query</code></td><td>read-only query</td><td>one pinned snapshot; writes return <code>EROFS</code></td></tr>
-            <tr><td><code>execute</code></td><td>executor</td><td>a fresh transaction; exit 0 commits, non-zero aborts; conflicts re-run it</td></tr>
-            <tr><td><code>on_touch</code></td><td>keys-mode trigger consumer</td><td>an executor, invoked by the engine with touched keys</td></tr>
-            <tr><td><code>on_apply</code></td><td>changes-mode trigger consumer</td><td>an executor, invoked by the engine with the ordered change list</td></tr>
-            <tr><td><code>describe</code></td><td>optional, the typed GraphQL surface</td><td>read-only at install and schema build</td></tr>
-          </tbody>
-        </table></div>
-        <p>Modules are sandboxed. They are fuel-metered and memory-capped, have no WASI, no clock and no randomness, and can import only the <code>fluent</code> host functions. An executor may run several times per call because of conflict retries, so it has to be a pure function of its input and the database state.</p>
-        <div class="note"><p><span class="lbl">Spec.</span><a href="https://github.com/orthory/fluent31/blob/master/WASM.md">WASM.md</a> is the complete authoring manual and ABI spec; this page is the working summary.</p></div>
-
-        <h2>Crate setup</h2>
-        <div class="codeblock"><div class="bar">guests/&lt;name&gt;/Cargo.toml — add the crate to guests/Cargo.toml members</div><pre>[package]
-name = <span class="s">"my_module"</span>
-version = <span class="s">"0.1.0"</span>
-edition = <span class="s">"2021"</span>
-
-[lib]
-crate-type = [<span class="s">"cdylib"</span>]
-
-[dependencies]
-fluent-guest = { path = <span class="s">"../../crates/fluent-guest"</span> }
-serde_json = <span class="s">"1"</span>      <span class="c"># optional; works on wasm32-unknown-unknown</span></pre></div>
-        <p>There is no WASI, so don't use <code>std::time</code>, <code>std::env</code>, <code>rand</code> or anything else that needs an operating system. Take entropy and time as input.</p>
-
-        <h2>Entry points</h2>
-        <p>Put one attribute per role on a function of the shape <code>fn(T: FromInput) -&gt; Result&lt;O: IntoOutput, Fail&gt;</code>. The macro exports the entry point. <code>Ok</code> becomes exit 0 with the encoded output, and <code>Err(Fail { code, message })</code> becomes a non-zero exit with the message in the output buffer.</p>
-        <div class="codeblock"><pre><span class="k">use</span> fluent_guest::{Change, Fail};
-
-<span class="w">#[fluent_guest::query]</span>     <span class="k">fn</span> view(input: Vec&lt;u8&gt;)        -&gt; Result&lt;String, Fail&gt; { .. }
-<span class="w">#[fluent_guest::execute]</span>   <span class="k">fn</span> write(input: String)        -&gt; Result&lt;Vec&lt;u8&gt;, Fail&gt; { .. }
-<span class="w">#[fluent_guest::on_touch]</span>  <span class="k">fn</span> index(keys: Vec&lt;Vec&lt;u8&gt;&gt;)   -&gt; Result&lt;(), Fail&gt;     { .. }
-<span class="w">#[fluent_guest::on_apply]</span>  <span class="k">fn</span> feed(changes: Vec&lt;Change&gt;)  -&gt; Result&lt;(), Fail&gt;     { .. }
-fluent_guest::fluent_describe!(<span class="s">r#"{ ... }"#</span>);   <span class="c">// optional typed surface</span></pre></div>
-        <p><code>FromInput</code> is implemented for <code>Vec&lt;u8&gt;</code> (raw bytes), <code>String</code> (UTF-8, with invalid input failing with code 3), <code>Vec&lt;Vec&lt;u8&gt;&gt;</code> (the keys-mode input) and <code>Vec&lt;Change&gt;</code> (the changes-mode input). <code>IntoOutput</code> covers <code>Vec&lt;u8&gt;</code>, <code>String</code> and <code>()</code>. The annotated function must not carry the name of the export it generates: a <code>#[query]</code> function named <code>query</code> is a duplicate definition. A module may export any combination of roles. <code>Fail</code> also converts from <code>String</code> and <code>&amp;str</code> with code 1, so <code>?</code> works on string errors.</p>
-
-        <h2>SDK functions</h2>
-        <div class="codeblock"><pre>fluent_guest::input() -&gt; Vec&lt;u8&gt;         <span class="c">// the input blob</span>
-fluent_guest::output(&amp;[u8])              <span class="c">// append to the output</span>
-fluent_guest::log(&amp;str)                  <span class="c">// debug log (printed when FLUENT31_WASM_LOG is set)</span>
-fluent_guest::get(&amp;[u8]) -&gt; Option&lt;Vec&lt;u8&gt;&gt;
-fluent_guest::get_for_update(&amp;[u8]) -&gt; Result&lt;Option&lt;Vec&lt;u8&gt;&gt;, i32&gt;   <span class="c">// Err = errno</span>
-fluent_guest::put(&amp;[u8], &amp;[u8]) -&gt; Result&lt;(), i32&gt;
-fluent_guest::delete(&amp;[u8]) -&gt; Result&lt;(), i32&gt;
-fluent_guest::scan(lo: Option&lt;&amp;[u8]&gt;, hi: Option&lt;&amp;[u8]&gt;) -&gt; Result&lt;Scan, i32&gt;
-fluent_guest::scan_rev(lo: Option&lt;&amp;[u8]&gt;, hi: Option&lt;&amp;[u8]&gt;) -&gt; Result&lt;Scan, i32&gt;
-fluent_guest::scan_prefix(&amp;[u8]) -&gt; Result&lt;Scan, i32&gt;
-<span class="c">// Scan: Iterator&lt;Item = (Vec&lt;u8&gt;, Vec&lt;u8&gt;)&gt;; .skip_pending() skips an oversized entry</span>
-
-<span class="k">enum</span> Change { Put { seqno: u64, key: Vec&lt;u8&gt;, value: Option&lt;Vec&lt;u8&gt;&gt; },   <span class="c">// None = elided</span>
-              Delete { seqno: u64, key: Vec&lt;u8&gt; } }</pre></div>
-        <p>Reads see the invocation's snapshot, plus the transaction's own buffered writes in an executor. Big values can be read in chunks through the raw ABI, where <code>get</code> returns the full length and copies from an offset. The SDK's <code>get</code> fetches whole values.</p>
-
-        <h2>Executor semantics</h2>
-        <ul>
-          <li>Each attempt is a fresh transaction. Exit 0 commits. Any other exit aborts and surfaces as <code>GuestFailed { code: i32, output: Vec&lt;u8&gt; }</code>.</li>
-          <li>On a commit conflict the whole attempt is discarded and re-run against a fresh snapshot, with fresh memory, fuel and output, until <code>execute_retries</code> attempts (3, first run included) are spent. Then the call returns <code>Conflict</code>. Your code may run several times per call, so no side channels and no "did I already run" state anywhere but the data.</li>
-          <li>Use <code>get_for_update</code> on every key you base a write on.</li>
-          <li>Use distinct non-zero exit codes per failure class and put the message in the output. Present-but-malformed state is corruption: fail loudly, never default.</li>
-          <li>Use checked arithmetic. An executor that overflows corrupts durable state.</li>
-          <li><code>EIO</code> from any host call means the engine failed. The invocation fails on the host side even if you exit 0.</li>
-        </ul>
-
-        <h2>Limits and errnos</h2>
-        <div class="tablewrap"><table>
-          <thead><tr><th>Limit (Options)</th><th>Default</th><th>On breach</th></tr></thead>
-          <tbody>
-            <tr><td><code>wasm_fuel</code></td><td>1e9</td><td>trap, <code>Error::Wasm</code></td></tr>
-            <tr><td><code>wasm_memory_limit</code></td><td>64 MiB</td><td><code>memory.grow</code> fails</td></tr>
-            <tr><td><code>max_wasm_input</code></td><td>64 MiB</td><td><code>InvalidArgument</code> before execution</td></tr>
-            <tr><td><code>max_wasm_output</code></td><td>32 MiB</td><td><code>output_write</code> returns <code>ENOSPC</code></td></tr>
-            <tr><td><code>max_wasm_log</code></td><td>1 MiB</td><td><code>log</code> returns <code>ENOSPC</code></td></tr>
-            <tr><td><code>max_wasm_scans</code></td><td>64</td><td><code>scan_open</code> returns <code>ELIMIT</code></td></tr>
-            <tr><td><code>max_txn_write_bytes</code></td><td>256 MiB</td><td><code>put</code> returns <code>ENOSPC</code></td></tr>
-          </tbody>
-        </table></div>
-        <p>The errnos are <code>NOT_FOUND -1</code>, <code>EROFS -2</code> (a write in a query), <code>EINVAL -3</code> (a reserved, empty or oversized key, an oversized value, bad flags), <code>ENOSPC -4</code>, <code>EBADF -5</code> (a bad scan handle), <code>ELIMIT -6</code> and <code>EIO -8</code>. Memory-safety violations trap. On reserved keys, <code>get</code>, <code>get_for_update</code>, <code>put</code> and <code>delete</code> return <code>EINVAL</code>, and scans clamp to the user keyspace.</p>
-
-        <h2>Typed GraphQL surface</h2>
-        <p>A module that exports <code>describe</code> becomes its own typed root field as soon as it is installed on a server. <code>kind: "query"</code> lands on <code>Query</code>, <code>kind: "execute"</code> on <code>Mutation</code>, and a <code>feed</code> declaration on <code>Subscription</code>. The schema is rebuilt and hot-swapped on every install and uninstall, at server start, and on <code>mutation { reloadSchema }</code>.</p>
-        <div class="codeblock"><pre>fluent_guest::fluent_describe!(<span class="s">r#"{
-  "kind": "execute",
-  "description": "docs for the root field",
-  "args": [{"name": "customer", "type": "String!"},
-           {"name": "amountCents", "type": "U64!"},
-           {"name": "note", "type": "String"}],
-  "types": [{"name": "PlacedOrder", "fields": [
-    {"name": "id", "type": "U64!"},
-    {"name": "customerTotalCents", "type": "U64!"}]}],
-  "output": "PlacedOrder!",
-  "feed": {"prefix": "feed/", "event": "OrderFeedEntry!"}
-}"#</span>);</pre></div>
-        <ul>
-          <li>Scalars are <code>String</code>, <code>Int</code> (32-bit), <code>Float</code>, <code>Boolean</code>, <code>U64</code> (a string on the wire, with numbers accepted on input) and <code>Json</code> (opaque). At most one list level. <code>args</code> reference scalars only; <code>output</code> and <code>types</code> may reference declared types.</li>
-          <li>Shape: at least one of <code>kind</code> and <code>feed</code>. A trigger-only module declares just <code>feed</code> plus <code>types</code> — no <code>kind</code>, no <code>output</code>. <code>output</code> is required with <code>kind</code> and rejected without it; <code>args</code> require <code>kind</code>; the feed's <code>event</code> type must be one of the declared <code>types</code>.</li>
-          <li>Every declaration must be backed by its export (<code>"query"</code> by <code>query</code>, <code>"execute"</code> by <code>execute</code>, <code>feed</code> by <code>on_apply</code>) or the install is rejected.</li>
-          <li>With <code>args</code>, the entry receives one JSON object holding every declared arg, with omitted optional args as <code>null</code> and <code>U64</code> as a number. Without <code>args</code>, the field takes an optional <code>input: BytesInput</code> and the entry receives raw bytes. Only the GraphQL layer builds that object: through the shell or <code>db.execute</code> a typed module receives whatever bytes you pass, so send the same JSON object yourself.</li>
-          <li>Output is parsed as JSON and validated against <code>output</code>. Undeclared keys are dropped. Missing declared fields become <code>null</code>, which is an error if the field is <code>!</code>. A violation is <code>OUTPUT_SCHEMA_VIOLATION</code>, and for executors it carries <code>committed: true</code> because the transaction has already committed. Don't blind-retry those.</li>
-          <li><strong>The field is named exactly what you install the module as</strong> — the crate name is irrelevant. The reference guests are installed under camelCase names: <code>scripts/demo-orders.sh</code> installs <code>place_order.wasm</code> as <code>placeOrder</code> and <code>top_customers.wasm</code> as <code>topCustomers</code>, and those are the field names. The name must be a valid GraphQL name that doesn't shadow a built-in root field, and type names must not be reserved or collide with another module's — so prefix yours (<code>PlacedOrder</code>, not <code>Order</code>). The limits are 32 types, 64 fields per type, 16 args, and a 64&nbsp;KiB descriptor.</li>
-          <li>The server's <code>installModule</code> runs <code>describe</code> and rejects a bad descriptor. The engine's <code>install_module</code> (Rust and shell) checks only the exports, so a module installed that way with a bad descriptor ends up degraded: callable through the generic byte fields, no typed field, and <code>modules { typed schemaError }</code> says why.</li>
-        </ul>
-
-        <h2>Invoking</h2>
-        <div class="tablewrap"><table>
-          <thead><tr><th>Surface</th><th>Query</th><th>Execute</th></tr></thead>
-          <tbody>
-            <tr><td>Engine</td><td><code>db.query(name, input)</code></td><td><code>db.execute(name, input)</code></td></tr>
-            <tr><td>Shell</td><td><code>query NAME [INPUT]</code></td><td><code>exec NAME [INPUT]</code></td></tr>
-            <tr><td>GraphQL (generic)</td><td><code>wasm(module:, input:)</code></td><td><code>wasmExecute(module:, input:)</code></td></tr>
-            <tr><td>GraphQL (typed)</td><td><code>&lt;module&gt;(args)</code> on <code>Query</code></td><td><code>&lt;module&gt;(args)</code> on <code>Mutation</code></td></tr>
-          </tbody>
-        </table></div>
-        <p><code>installModule</code> also accepts WAT text (<code>wasm: {text: "(module ...)"}</code>).</p>
-
-        <h2>One-shot: migrations without install</h2>
-        <p>You can run module bytes that are never stored:</p>
-        <div class="tablewrap"><table>
-          <thead><tr><th>Surface</th><th>Query</th><th>Execute</th></tr></thead>
-          <tbody>
-            <tr><td>Engine</td><td><code>db.query_wasm(wasm, input)</code>, <code>query_wasm_at(.., &amp;snap)</code></td><td><code>db.execute_wasm(wasm, input)</code></td></tr>
-            <tr><td>Shell</td><td><code>queryonce FILE.wasm [INPUT]</code></td><td><code>execonce FILE.wasm [INPUT]</code></td></tr>
-            <tr><td>GraphQL</td><td><code>wasmOnce(wasm:, input:)</code></td><td><code>wasmExecuteOnce(wasm:, input:)</code></td></tr>
-          </tbody>
-        </table></div>
-        <p>Same ABI, SDK, limits and retry loop, except that the code is pinned for all attempts. Nothing is listed, cached or replicated; an executor's committed writes are the only trace. Triggers still fire on those writes. <code>describe</code> is ignored, so there is no typed field, and a trigger can only bind to an installed module.</p>
-        <p>The migration shape is to walk a prefix, skip already-migrated records and rewrite the rest, all in one transaction: atomic, invisible until commit, serialized by OCC. It has to fit <code>max_txn_write_bytes</code> and <code>wasm_fuel</code>. Past that, shard by cursor (start key in, next start key out) and drive the loop from the caller. Rehearse on a fork first, and keep the script in your repo, because that is the audit trail.</p>
-
-        <h2>Reference modules</h2>
-        <div class="tablewrap"><table>
-          <thead><tr><th>Module</th><th>Role</th><th>Shows</th></tr></thead>
-          <tbody>
-            <tr><td><code>agg</code></td><td>query (untyped)</td><td>prefix count/sum/min/max over u64 LE values; raw bytes in and out</td></tr>
-            <tr><td><code>transfer</code></td><td>execute (untyped)</td><td>a balance transfer with <code>get_for_update</code>, OCC retries, an exit code per failure</td></tr>
-            <tr><td><code>place_order</code></td><td>execute (typed)</td><td>id allocation, a record and a stats fold in one transaction; input validation</td></tr>
-            <tr><td><code>top_customers</code></td><td>query (typed)</td><td>typed list output, snapshot aggregation, limit clamping</td></tr>
-            <tr><td><code>claim</code></td><td>execute</td><td>a uniqueness invariant: exactly one winner under concurrency, idempotent re-claim</td></tr>
-            <tr><td><code>customer_index</code></td><td>keys-mode trigger</td><td>a secondary index that reconciles against current state, with a back-pointer for updates and deletes</td></tr>
-            <tr><td><code>order_feed</code></td><td>changes-mode trigger + feed</td><td>an ordered changefeed materialized as keys, subscribable live, with an <code>elided</code> flag for oversized values</td></tr>
-            <tr><td><code>dynamic_index</code></td><td>changes-mode trigger</td><td>index specs stored as keys, backfill on spec write, teardown on delete; one module, two triggers</td></tr>
-            <tr><td><code>live_stats</code></td><td>changes-mode trigger</td><td>an always-fresh per-group aggregate folded exactly once per change; the demo checks it against a full recount</td></tr>
-            <tr><td><code>cascade_delete</code></td><td>changes-mode trigger</td><td>a parent delete sweeps its subtree; no-stacking stops loops</td></tr>
-          </tbody>
-        </table></div>
-
-        <h2>Authoring checklist</h2>
-        <ol>
-          <li>Pick the role or roles and export the matching entries.</li>
-          <li>Define the keyspace. Validate any input that becomes a key segment: no <code>/</code>, non-empty, bounded length.</li>
-          <li><code>get_for_update</code> on every read-modify-write key.</li>
-          <li>Distinct exit codes with the message in the output. Malformed state fails loudly.</li>
-          <li>Checked arithmetic.</li>
-          <li>A static descriptor with prefixed type names.</li>
-          <li>Build with <code>--release</code>, install, and confirm <code>typed: true, schemaError: null</code>.</li>
-          <li>Test the happy path, each failure exit, concurrency for executors, and a restart (the typed field must reappear).</li>
-        </ol>
       </article>
       <!-- ============================================================ -->
       <article data-page="triggers">
