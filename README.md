@@ -41,7 +41,7 @@ for kv in db.iter(Some(b"user/"), Some(b"user0"), false)? {
 let mut txn = db.begin();
 let bal = txn.get_for_update(b"acct")?;
 txn.put("acct", "90")?;
-txn.commit()?;                       // Err(Error::Conflict) if someone else wrote acct
+txn.commit()?;                       // Err(Error::Conflict) if acct moved: re-run the whole block
 ```
 
 ```sh

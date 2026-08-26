@@ -2511,7 +2511,7 @@ mktrig orderFeed order_feed orders/ orders0      <span class="c"># mode auto-det
         <p>Walk a prefix, skip already-migrated records, rewrite the rest:</p>
         <div class="codeblock"><div class="bar">user_v2.rs (a one-shot migration)</div><pre><span class="w">#[fluent_guest::execute]</span>
 <span class="k">fn</span> user_v2(_input: Vec&lt;u8&gt;) -&gt; Result&lt;String, Fail&gt; {
-    <span class="k">let</span> scan = fluent_guest::scan_prefix(<span class="s">b"user/"</span>).map_err(|e| Fail::new(2, <span class="s">"scan"</span>))?;
+    <span class="k">let</span> scan = fluent_guest::scan_prefix(<span class="s">b"user/"</span>).map_err(|_| Fail::new(2, <span class="s">"scan"</span>))?;
     <span class="k">let mut</span> migrated = 0u64;
     <span class="k">for</span> (key, value) <span class="k">in</span> scan {
         <span class="k">let</span> old: serde_json::Value = serde_json::from_slice(&amp;value)
@@ -2521,7 +2521,7 @@ mktrig orderFeed order_feed orders/ orders0      <span class="c"># mode auto-det
         }
         <span class="k">let</span> new = serde_json::json!({ <span class="s">"v"</span>: 2, <span class="s">"name"</span>: old });
         fluent_guest::put(&amp;key, new.to_string().as_bytes())
-            .map_err(|e| Fail::new(4, <span class="s">"put"</span>))?;
+            .map_err(|_| Fail::new(4, <span class="s">"put"</span>))?;
         migrated += 1;
     }
     Ok(format!(<span class="s">"migrated {migrated}"</span>))

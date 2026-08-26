@@ -16,7 +16,7 @@ Walk a prefix, skip already-migrated records, rewrite the rest:
 ```
 #[fluent_guest::execute]
 fn user_v2(_input: Vec<u8>) -> Result<String, Fail> {
-    let scan = fluent_guest::scan_prefix(b"user/").map_err(|e| Fail::new(2, "scan"))?;
+    let scan = fluent_guest::scan_prefix(b"user/").map_err(|_| Fail::new(2, "scan"))?;
     let mut migrated = 0u64;
     for (key, value) in scan {
         let old: serde_json::Value = serde_json::from_slice(&value)
@@ -26,7 +26,7 @@ fn user_v2(_input: Vec<u8>) -> Result<String, Fail> {
         }
         let new = serde_json::json!({ "v": 2, "name": old });
         fluent_guest::put(&key, new.to_string().as_bytes())
-            .map_err(|e| Fail::new(4, "put"))?;
+            .map_err(|_| Fail::new(4, "put"))?;
         migrated += 1;
     }
     Ok(format!("migrated {migrated}"))
