@@ -536,6 +536,33 @@ fn rebuild_from_empty_journal_errors() {
     assert!(journal::rebuild(empty.path(), dest.path(), opts()).is_err());
 }
 
+#[test]
+fn rebuild_refuses_a_non_empty_destination() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+    {
+        let db = Arc::new(Db::open(db_dir.path(), opts()).unwrap());
+        db.put(k(1), v(1, "a")).unwrap();
+        drop(Journal::attach(db, jrn_dir.path()).unwrap());
+    }
+
+    // a directory that already holds a store is never merged into
+    let err = journal::rebuild(jrn_dir.path(), db_dir.path(), opts()).unwrap_err();
+    assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+
+    // nor one holding anything else
+    let stray = tempfile::tempdir().unwrap();
+    std::fs::write(stray.path().join("notes.txt"), b"x").unwrap();
+    let err = journal::rebuild(jrn_dir.path(), stray.path(), opts()).unwrap_err();
+    assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+
+    // an empty directory and an absent path both rebuild
+    let empty = tempfile::tempdir().unwrap();
+    journal::rebuild(jrn_dir.path(), empty.path(), opts()).unwrap();
+    let absent = tempfile::tempdir().unwrap();
+    journal::rebuild(jrn_dir.path(), absent.path().join("store"), opts()).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // A base snapshot larger than rotate_bytes must not be split by rotation
 // (issue #29: mid-base rotation corrupted the rebuild base span)
