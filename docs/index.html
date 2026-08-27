@@ -1993,6 +1993,22 @@ drop(j);                 <span class="c">// joins the drainer, final flush</span
             <tr><td><code>fluent-server</code></td><td><code>--journal DIR</code>, or a <code>[journal]</code> section in the TOML config with <code>dir</code> required; <code>rotate-bytes</code>, <code>compact-when-deltas-exceed</code> and <code>compact-min-bytes</code> tune it there</td></tr>
           </tbody>
         </table></div>
+        <h3>Observing the journal</h3>
+        <p>An embedder that mirrors the journal somewhere else — another volume, an object store — attaches it with an observer instead of polling the directory. The observer hears every fact of the log's life, in the order it became true, and every fact is already durable on disk when it is reported: bytes of a file below a reported length are fsynced and will never change (the log is append-only; the one truncation it performs, a torn tail after a crash, happens before <code>attached</code> reports the file). So a mirror copies exactly the reported bytes, deletes exactly the reported files, and never re-reads or lists the source.</p>
+        <div class="codeblock"><pre><span class="k">use</span> fluent31::{Journal, JournalConfig, JournalObserver, journal};
+
+<span class="k">struct</span> Ship;
+<span class="k">impl</span> JournalObserver <span class="k">for</span> Ship {
+    <span class="k">fn</span> attached(&amp;self, dir: &amp;Path, files: &amp;[(u64, u64)]) {}       <span class="c">// (id, durable length) of every file present</span>
+    <span class="k">fn</span> appended(&amp;self, file: u64, durable_len: u64) {}              <span class="c">// file is fsynced through durable_len</span>
+    <span class="k">fn</span> rotated(&amp;self, sealed: u64, sealed_len: u64, next: u64) {}   <span class="c">// sealed is final; next is active</span>
+    <span class="k">fn</span> pruned(&amp;self, anchor: u64) {}                                <span class="c">// every id below anchor is deleted</span>
+    <span class="k">fn</span> stopped(&amp;self, error: Option&lt;&amp;str&gt;) {}                       <span class="c">// None on a clean detach</span>
+}
+<span class="k">let</span> j = Journal::attach_observed(db.clone(), dir, JournalConfig::default(), Arc::new(Ship))?;
+journal::log_file_name(14);          <span class="c">// "journal-000014.log" — the naming contract</span>
+journal::log_file_id(<span class="s">"journal-000014.log"</span>); <span class="c">// Some(14)</span></pre></div>
+        <p><code>attached</code> arrives on the attaching thread before <code>attach_observed</code> returns; everything after it on the journal's own thread. A compaction reports the anchor file's base as durable (<code>appended</code>) before it reports the superseded files gone (<code>pruned</code>), so a mirror that applies facts in order never holds only superseded files. Observers return promptly and do their I/O elsewhere — the drainer waits for them.</p>
 
         <h2>Rebuilding from the journal</h2>
         <div class="codeblock"><pre>fluent-cli journal-rebuild &lt;journal-dir&gt; &lt;dest-dir&gt;
@@ -2004,7 +2020,7 @@ drop(j);                 <span class="c">// joins the drainer, final flush</span
         <ul>
           <li>For a consistent snapshot on the same filesystem, <code>fork(name)</code>. It is cheap, instant, consistent and hard-linked.</li>
           <li>To copy elsewhere, copy <code>archive/&lt;name&gt;/</code>, which is a plain directory tree (the hard links copy as full files), or <code>restore_to</code> into a mount point.</li>
-          <li>For continuous off-box protection, ship the journal directory's segments. A reassembled journal is verified for contiguity at rebuild.</li>
+          <li>For continuous off-box protection, mirror the journal through a <code>JournalObserver</code> (above): it reports every durable byte and every deletion, so the mirror needs no polling. A reassembled journal is verified for contiguity at rebuild.</li>
         </ul>
         <div class="note"><p><span class="lbl">Never</span>delete <code>wal-*.log</code>, <code>MANIFEST-*</code>, <code>CURRENT</code> or <code>LOCK</code> by hand.</p></div>
       </article>

@@ -85,6 +85,57 @@ const DRAIN_POLL: Duration = Duration::from_millis(200);
 // Public surface
 // ---------------------------------------------------------------------------
 
+/// Lifecycle facts of an attached journal, reported to an embedder that
+/// mirrors the log elsewhere. Every call describes state that is already
+/// durable on disk when it is made, and the calls arrive in the order the
+/// facts became true: [`attached`](Self::attached) first (on the attaching
+/// thread), then everything else on the journal's own thread. Bytes of a
+/// file below a reported length never change afterwards — the log is
+/// append-only, and the one truncation it performs (a torn tail after a
+/// crash) happens before `attached` reports the file. Implementations
+/// return promptly and do their I/O elsewhere; the drainer waits for them.
+pub trait JournalObserver: Send + Sync {
+    /// The journal is attached to `dir`: every log file present, as
+    /// `(id, durable length)` in ascending id order.
+    fn attached(&self, dir: &Path, files: &[(u64, u64)]);
+    /// Log file `file` is durable through `durable_len` bytes.
+    fn appended(&self, file: u64, durable_len: u64);
+    /// `sealed_file` is complete at `sealed_len` bytes and will never grow;
+    /// `next_file` is now the active log.
+    fn rotated(&self, sealed_file: u64, sealed_len: u64, next_file: u64);
+    /// Every log file with an id below `anchor` has been deleted; `anchor`
+    /// holds a durable base snapshot that supersedes them.
+    fn pruned(&self, anchor: u64);
+    /// The journal stopped writing: `None` on a clean detach, otherwise
+    /// the error that stalled it (the journal is stale until re-attached).
+    fn stopped(&self, error: Option<&str>);
+}
+
+/// The file name of log segment `id` inside a journal directory.
+pub fn log_file_name(id: u64) -> String {
+    format!("journal-{id:06}.log")
+}
+
+/// The segment id a journal-directory file name carries, if it is one.
+pub fn log_file_id(name: &str) -> Option<u64> {
+    name.strip_prefix("journal-")?
+        .strip_suffix(".log")?
+        .parse()
+        .ok()
+}
+
+/// The observer of a journal attached without one: hears everything, tells
+/// no one.
+struct Unobserved;
+
+impl JournalObserver for Unobserved {
+    fn attached(&self, _dir: &Path, _files: &[(u64, u64)]) {}
+    fn appended(&self, _file: u64, _durable_len: u64) {}
+    fn rotated(&self, _sealed_file: u64, _sealed_len: u64, _next_file: u64) {}
+    fn pruned(&self, _anchor: u64) {}
+    fn stopped(&self, _error: Option<&str>) {}
+}
+
 /// Tuning for an attached journal. The default matches production use:
 /// 128 MiB log files, auto-compaction once deltas reach 1× the last base
 /// snapshot's size with a 64 MiB floor.
@@ -166,6 +217,18 @@ impl Journal {
 
     /// [`Journal::attach`] with explicit tuning.
     pub fn attach_with_config(db: Arc<Db>, dir: impl AsRef<Path>, cfg: JournalConfig) -> Result<Journal> {
+        Self::attach_observed(db, dir, cfg, Arc::new(Unobserved))
+    }
+
+    /// [`Journal::attach_with_config`] with a [`JournalObserver`] that hears
+    /// every durable fact of the log's life — what an embedder mirroring the
+    /// journal off-box needs, with no polling and no re-reading of files.
+    pub fn attach_observed(
+        db: Arc<Db>,
+        dir: impl AsRef<Path>,
+        cfg: JournalConfig,
+        observer: Arc<dyn JournalObserver>,
+    ) -> Result<Journal> {
         if cfg.rotate_bytes == 0 {
             return Err(Error::InvalidArgument("journal rotate_bytes must be > 0".into()));
         }
@@ -181,7 +244,8 @@ impl Journal {
 
         let source = db.identity().map(|id| id.instance_id).unwrap_or([0u8; INSTANCE_ID_LEN]);
         let fresh = list_log_ids(&dir)?.is_empty();
-        let writer = LogWriter::open(&dir, source, cfg.rotate_bytes)?;
+        let writer = LogWriter::open(&dir, source, cfg.rotate_bytes, observer.clone())?;
+        observer.attached(&dir, &list_log_files(&dir)?);
 
         // Subscribe FIRST so no commit slips between the base cut and the
         // stream (delivery is gap-free past start_seqno).
@@ -199,6 +263,7 @@ impl Journal {
             writer,
             shared: shared.clone(),
             cfg,
+            observer,
             delta_bytes_since_base: 0,
             last_base_bytes: 0,
         };
@@ -266,34 +331,44 @@ struct LogWriter {
     source: InstanceId,
     /// Cumulative bytes appended (framing included) since open.
     appended_bytes: u64,
+    observer: Arc<dyn JournalObserver>,
 }
 
 fn log_path(dir: &Path, id: u64) -> PathBuf {
-    dir.join(format!("journal-{id:06}.log"))
+    dir.join(log_file_name(id))
 }
 
 fn list_log_ids(dir: &Path) -> Result<Vec<u64>> {
     let mut ids = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let name = entry?.file_name();
-        let name = name.to_string_lossy();
-        if let Some(rest) = name.strip_prefix("journal-") {
-            if let Some(num) = rest.strip_suffix(".log") {
-                if let Ok(id) = num.parse::<u64>() {
-                    ids.push(id);
-                }
-            }
+        if let Some(id) = log_file_id(&name.to_string_lossy()) {
+            ids.push(id);
         }
     }
     ids.sort_unstable();
     Ok(ids)
 }
 
+/// Every log file in `dir` with its on-disk length, ascending by id.
+fn list_log_files(dir: &Path) -> Result<Vec<(u64, u64)>> {
+    let mut files = Vec::new();
+    for id in list_log_ids(dir)? {
+        files.push((id, std::fs::metadata(log_path(dir, id))?.len()));
+    }
+    Ok(files)
+}
+
 impl LogWriter {
     /// Open the journal directory: reuse the newest log if a header for this
     /// store is already present, else start a fresh header. A header for a
     /// *different* store is a provenance error.
-    fn open(dir: &Path, source: InstanceId, rotate_at: u64) -> Result<LogWriter> {
+    fn open(
+        dir: &Path,
+        source: InstanceId,
+        rotate_at: u64,
+        observer: Arc<dyn JournalObserver>,
+    ) -> Result<LogWriter> {
         let existing = list_log_ids(dir)?;
         if let Some(&first) = existing.first() {
             let recorded = read_header(&log_path(dir, first))?;
@@ -324,6 +399,7 @@ impl LogWriter {
                 rotate_at,
                 source,
                 appended_bytes: 0,
+                observer,
             });
         }
         // fresh journal: file 1 opens with a header record
@@ -335,6 +411,7 @@ impl LogWriter {
             rotate_at,
             source,
             appended_bytes: 0,
+            observer,
         };
         w.append_raw(&header_payload(&source))?;
         w.sync()?;
@@ -372,15 +449,27 @@ impl LogWriter {
 
     /// Start the next log file. Every file opens with the provenance header,
     /// so pruning any prefix of files always leaves a header-first journal.
+    /// Both files are synced before this returns: the sealed one is final,
+    /// and the new one is durable through its header, so every length the
+    /// observer ever hears is an fsynced one.
     fn rotate(&mut self) -> Result<()> {
         self.file.sync_all()?;
+        let sealed_file = self.file_id;
         let sealed_bytes = self.bytes_in_file;
         self.file_id += 1;
         self.file = File::create(log_path(&self.dir, self.file_id))?;
         self.bytes_in_file = 0;
         self.append_raw(&header_payload(&self.source))?;
+        self.sync()?;
         info!(dir = %self.dir.display(), file = self.file_id, sealed_bytes, "journal rotated to a new file");
+        self.observer
+            .rotated(sealed_file, sealed_bytes, self.file_id);
         Ok(())
+    }
+
+    /// Report the active file's synced length. Call only after [`sync`](Self::sync).
+    fn report_durable(&self) {
+        self.observer.appended(self.file_id, self.bytes_in_file);
     }
 
     fn sync(&mut self) -> Result<()> {
@@ -494,6 +583,7 @@ struct Drainer {
     writer: LogWriter,
     shared: Arc<Shared>,
     cfg: JournalConfig,
+    observer: Arc<dyn JournalObserver>,
     /// Delta bytes appended since the last base snapshot.
     delta_bytes_since_base: u64,
     /// Size of the last base snapshot's records.
@@ -532,8 +622,15 @@ impl Drainer {
         }
         // final flush on clean shutdown
         match self.writer.sync() {
-            Ok(()) => info!(parent: &self.db.inner.span, "journal detached"),
-            Err(e) => warn!(parent: &self.db.inner.span, error = %e, "journal detached; final sync failed"),
+            Ok(()) => {
+                info!(parent: &self.db.inner.span, "journal detached");
+                self.writer.report_durable();
+                self.observer.stopped(None);
+            }
+            Err(e) => {
+                warn!(parent: &self.db.inner.span, error = %e, "journal detached; final sync failed");
+                self.observer.stopped(Some(&e.to_string()));
+            }
         }
     }
 
@@ -553,6 +650,7 @@ impl Drainer {
             last = last.max(e.seqno);
         }
         self.writer.sync()?;
+        self.writer.report_durable();
         let bytes = self.writer.appended_bytes - before;
         self.delta_bytes_since_base += bytes;
         trace!(parent: &self.db.inner.span, entries = entries.len(), bytes, last_seqno = last, "journal deltas appended");
@@ -567,6 +665,7 @@ impl Drainer {
     fn write_base(&mut self) -> Result<()> {
         let before = self.writer.appended_bytes;
         let (base_records, seq) = write_base_snapshot(&self.db, &mut self.writer)?;
+        self.writer.report_durable();
         self.last_base_bytes = self.writer.appended_bytes - before;
         self.delta_bytes_since_base = 0;
         info!(
@@ -608,7 +707,11 @@ impl Drainer {
         let before = self.writer.appended_bytes;
         let (base_records, seq) = write_base_snapshot(&self.db, &mut self.writer)?;
         crate::io::sync_dir(&self.writer.dir)?;
+        // the base is reported durable before anything it supersedes is
+        // reported gone, so a mirror never holds only the superseded files
+        self.writer.report_durable();
         let pruned = prune_files_below(&self.writer.dir, anchor_file)?;
+        self.observer.pruned(anchor_file);
         self.last_base_bytes = self.writer.appended_bytes - before;
         self.delta_bytes_since_base = 0;
         info!(
@@ -632,6 +735,7 @@ impl Drainer {
         error!(parent: &self.db.inner.span, error = %e, "journal stopped; it is stale until re-attached");
         let mut s = self.shared.stats.lock().unwrap();
         s.last_error = Some(e.to_string());
+        self.observer.stopped(Some(&e.to_string()));
     }
 }
 
