@@ -5,13 +5,28 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use fluent31::{Db, Journal, Options, SyncMode};
-use fluent_server::{parse_sync, FileConfig, GraphqlSection, ListenSection, Server, ServerConfig};
+use fluent_server::{
+    parse_sync, FileConfig, GraphqlSection, JournalSection, ListenSection, Server, ServerConfig,
+};
 use tracing::{error, info, warn};
+
+// The process allocates in bursts spread across many short-lived threads
+// (per-request blocking work, each open fork's engine threads, WASM
+// invocations), and must hand freed memory back to the OS afterwards.
+// glibc malloc cannot: it grows one arena per concurrently allocating
+// thread and keeps each arena at its high-water mark, so resident memory
+// ratchets up with every burst that lands on a fresh arena. mimalloc
+// returns freed pages to the OS regardless of where they sit, keeping RSS
+// tied to live data rather than to the history of peaks.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const USAGE: &str = "\
 usage: fluent-server <db-dir> [--config FILE] [--store-name NAME]
                      [--graphql ADDR:PORT] [--replication ADDR:PORT]
                      [--sync always|never|periodic:<ms>] [--max-body-bytes N]
+                     [--journal DIR]
+       fluent-server --print-schema
 
 serves every plane of one store in one process:
   graphql      HTTP, default 127.0.0.1:8317 — typed/admin plane, GraphiQL at /
@@ -26,6 +41,8 @@ serves every plane of one store in one process:
   opt-in mutation journal (rebuild: fluent-cli journal-rebuild), [log]
   sets the stats heartbeat period. Explicit flags override the file.
   Annotated example: crates/fluent-server/src/config.rs
+--journal DIR attaches the journal at DIR; its tuning stays in [journal].
+--print-schema prints the base GraphQL SDL (built-ins only) and exits.
 
 logs go to stderr; RUST_LOG sets the level (default info).";
 
@@ -87,6 +104,14 @@ fn main() -> ExitCode {
                 }
                 None => return usage(),
             },
+            "--journal" => match args.next() {
+                Some(v) => cli.journal.get_or_insert_with(JournalSection::default).dir = Some(v),
+                None => return usage(),
+            },
+            "--print-schema" => {
+                print!("{}", fluent_graphql::base_sdl());
+                return ExitCode::SUCCESS;
+            }
             "--help" | "-h" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;

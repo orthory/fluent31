@@ -2,10 +2,11 @@
 //! opt-in mutation journal (fluent31::journal) — the attach-time base
 //! snapshot captures state that predates the flag, live GraphQL writes
 //! stream in as deltas, and a SIGTERM shutdown drains cleanly — proven by
-//! rebuilding fresh stores from the journal directory alone. The
-//! `--journal-*` tuning flags plumb a JournalConfig through to the writer —
-//! proven by forcing a rotation with a tiny `--journal-rotate-bytes` — and
-//! are refused without `--journal DIR`.
+//! rebuilding fresh stores from the journal directory alone. The journal's
+//! tuning lives in the `[journal]` config section and merges field-wise
+//! with the flag — proven by forcing a rotation with a tiny `rotate-bytes`
+//! from the file while the directory comes from the flag — and a
+//! `[journal]` section that names no directory is refused.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -90,15 +91,15 @@ fn journal_flag_attaches_streams_and_survives_shutdown() {
         db.put(b"pre".to_vec(), b"base".to_vec()).unwrap();
     }
 
-    // ephemeral port picked up front: the binary announces the literal
-    // --listen string, so :0 could not be discovered from its stdout
+    // ephemeral port picked up front: the binary logs the literal
+    // --graphql string, so :0 could not be discovered from its output
     let addr = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().to_string()
     };
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-graphql"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-server"))
         .arg(dir.path())
-        .arg("--listen")
+        .arg("--graphql")
         .arg(&addr)
         .arg("--sync")
         .arg("never")
@@ -136,24 +137,26 @@ fn journal_flag_attaches_streams_and_survives_shutdown() {
 
 #[cfg(unix)]
 #[test]
-fn journal_rotate_bytes_flag_reaches_the_writer() {
+fn journal_tuning_from_config_merges_with_the_dir_flag() {
     let dir = tempfile::tempdir().unwrap();
     let jrn = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("server.toml");
+    std::fs::write(&cfg_path, "[journal]\nrotate-bytes = 512\n").unwrap();
 
     let addr = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().to_string()
     };
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-graphql"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-server"))
         .arg(dir.path())
-        .arg("--listen")
+        .arg("--graphql")
         .arg(&addr)
         .arg("--sync")
         .arg("never")
         .arg("--journal")
         .arg(jrn.path())
-        .arg("--journal-rotate-bytes")
-        .arg("512")
+        .arg("--config")
+        .arg(&cfg_path)
         .spawn()
         .unwrap();
 
@@ -162,7 +165,8 @@ fn journal_rotate_bytes_flag_reaches_the_writer() {
     });
     // one delta bigger than rotate-bytes: appending it pushes the active
     // file past 512 and rotates — a second journal file can only appear if
-    // the flag reached the LogWriter (the default is 128 MiB)
+    // the file's tuning reached the LogWriter (the default is 128 MiB)
+    // alongside the flag's directory
     let val = "x".repeat(4 << 10);
     let resp = graphql_post(
         &addr,
@@ -183,15 +187,17 @@ fn journal_rotate_bytes_flag_reaches_the_writer() {
 }
 
 #[test]
-fn journal_tuning_flags_without_journal_are_refused() {
+fn journal_tuning_without_a_dir_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-graphql"))
+    let cfg_path = dir.path().join("server.toml");
+    std::fs::write(&cfg_path, "[journal]\nrotate-bytes = 512\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-server"))
         .arg(dir.path())
-        .arg("--journal-rotate-bytes")
-        .arg("512")
+        .arg("--config")
+        .arg(&cfg_path)
         .output()
         .unwrap();
-    assert!(!out.status.success(), "tuning without --journal must be refused");
+    assert!(!out.status.success(), "a journal with no dir must be refused");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--journal-* tuning flags need --journal DIR"), "{stderr}");
+    assert!(stderr.contains("[journal] section needs dir"), "{stderr}");
 }

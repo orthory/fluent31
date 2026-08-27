@@ -55,8 +55,7 @@ How to attach it on each surface:
 | Surface | How |
 |---|---|
 | Rust | `Journal::attach(db, dir)` or `attach_with_config` |
-| `fluent-graphql` | `--journal DIR` plus optional `--journal-rotate-bytes`, `--journal-compact-when-deltas-exceed`, `--journal-compact-min-bytes` |
-| `fluent-server` | a `[journal]` section in the TOML config, with `dir` required |
+| `fluent-server` | `--journal DIR`, or a `[journal]` section in the TOML config with `dir` required; `rotate-bytes`, `compact-when-deltas-exceed` and `compact-min-bytes` tune it there |
 
 ## Rebuilding from the journal
 

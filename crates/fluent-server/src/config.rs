@@ -285,8 +285,8 @@ impl FileConfig {
 
     /// Field-wise precedence: `self` (the explicit CLI flags) wins over
     /// `file`; unset slots fall through. Sections the CLI has slots in
-    /// (`[listen]`, `[graphql]`) merge field-wise; the file-only sections
-    /// pass through whole.
+    /// (`[listen]`, `[graphql]`, `[journal]`) merge field-wise; the
+    /// file-only sections pass through whole.
     pub fn overlay(self, file: FileConfig) -> FileConfig {
         FileConfig {
             dir: self.dir.or(file.dir),
@@ -302,7 +302,14 @@ impl FileConfig {
                 fork_idle_ttl_secs: a.fork_idle_ttl_secs.or(b.fork_idle_ttl_secs),
             }),
             replication: self.replication.or(file.replication),
-            journal: self.journal.or(file.journal),
+            journal: merge(self.journal, file.journal, |a, b| JournalSection {
+                dir: a.dir.or(b.dir),
+                rotate_bytes: a.rotate_bytes.or(b.rotate_bytes),
+                compact_when_deltas_exceed: a
+                    .compact_when_deltas_exceed
+                    .or(b.compact_when_deltas_exceed),
+                compact_min_bytes: a.compact_min_bytes.or(b.compact_min_bytes),
+            }),
             engine: self.engine.or(file.engine),
             log: self.log.or(file.log),
         }
@@ -567,5 +574,21 @@ mod tests {
         assert!(parse_sync("periodic:0").is_none());
         assert!(parse_sync("periodic:x").is_none());
         assert!(parse_sync("sometimes").is_none());
+    }
+
+    #[test]
+    fn journal_dir_flag_keeps_file_tuning() {
+        let file: FileConfig =
+            toml::from_str("[journal]\ndir = \"./file\"\nrotate-bytes = 7").unwrap();
+        let cli = FileConfig {
+            journal: Some(JournalSection {
+                dir: Some("./cli".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let j = cli.overlay(file).journal.unwrap();
+        assert_eq!(j.dir.as_deref(), Some("./cli"));
+        assert_eq!(j.rotate_bytes, Some(7));
     }
 }

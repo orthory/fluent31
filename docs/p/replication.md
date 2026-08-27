@@ -9,8 +9,8 @@
 The scope is unbounded for a full replica and narrow for an edge cache. The overlapping index fragments are copied locally, values are fetched lazily and cached, and committed in-scope writes stream in. The replica is a library component: the process that needs the scoped reads embeds an `EdgeReplica` and reads through its store (`get` and `scan`, clamped to the scope). [REPLICATION.md](https://github.com/orthory/fluent31/blob/master/REPLICATION.md) is the spec.
 
 ```
-# master: fluent-server on a named store (join point :8428), or the plane alone
-fluent-replication ./data --store-name prod [--listen 127.0.0.1:8428]
+# master: fluent-server on a named store opens the join point (:8428)
+fluent-server ./data --store-name prod [--replication 127.0.0.1:8428]
 ```
 
 ## How it behaves

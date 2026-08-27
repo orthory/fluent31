@@ -56,7 +56,7 @@ The engine emits [`tracing`](https://docs.rs/tracing) events. The binaries write
 
 GraphQL requests are not logged.
 
-The **stats heartbeat** is the `stats` snapshot as one `info` line per open store (the primary and every fork the server holds open) plus the fork registry's occupancy, every 60 s by default — `[log] stats-every-secs` in the server config, `--stats-every-secs` on `fluent-graphql`, `0` turns it off; an embedder gets the same line from `Db::log_stats()`. When memory grows, the heartbeat says which it was: `imms` climbing (flush not keeping up — a stall follows), subscriptions, snapshots pinning history, or fork instances.
+The **stats heartbeat** is the `stats` snapshot as one `info` line per open store (the primary and every fork the server holds open) plus the fork registry's occupancy, every 60 s by default — `[log] stats-every-secs` in the server config, `0` turns it off; an embedder gets the same line from `Db::log_stats()`. When memory grows, the heartbeat says which it was: `imms` climbing (flush not keeping up — a stall follows), subscriptions, snapshots pinning history, or fork instances.
 
 Guest `log` output is a `debug` event under its own target, enabled alone with `RUST_LOG=fluent31::wasm::guest=debug`.
 

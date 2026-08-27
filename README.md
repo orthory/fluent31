@@ -135,9 +135,9 @@ Under Docker, io_uring is blocked by the default seccomp profile. Add
 crates/fluent31           the engine (lib)
 crates/fluent-guest       guest-side SDK for WASM modules (+ fluent-guest-macros)
 crates/fluent-cli         interactive shell, journal rebuild
-crates/fluent-server      server mode: both planes in one process
-crates/fluent-graphql     GraphQL plane (axum + async-graphql)
-crates/fluent-replication replication: master server + embeddable edge replica
+crates/fluent-server      the server binary: both planes in one process
+crates/fluent-graphql     GraphQL plane (axum + async-graphql), a library
+crates/fluent-replication replication plane: master side + embeddable edge replica, a library
 guests/                   example modules (a separate wasm32 workspace)
 scripts/demo-orders.sh    typed-module demo against a running server
 ```
