@@ -6,12 +6,17 @@
 //! run placed at the FRONT (newest position) of the next level. The last
 //! level is leveled, maintained INCREMENTALLY: one newer run at a time
 //! merges into the base run, touching only the base tables its key range
-//! overlaps — untouched fragments are spliced through by identity, so job
-//! cost is bounded by the newer run, never the whole bottom. When the
-//! bottom outgrows its byte budget (`level_target_bytes`) the tree deepens:
-//! a new level is created below and the old bottom tier-merges into it.
-//! Inputs are pinned at pick time and installation removes exactly the
-//! pinned runs — flush can concurrently prepend to L0.
+//! overlaps — untouched fragments are spliced through by identity. When the
+//! bottom outgrows its byte budget (`level_target_bytes`) the tree deepens by
+//! moving its runs to a new level without rewriting their tables.
+//!
+//! One compaction executor owns the picker. Rewrite jobs run in bounded input
+//! slices; after every slice the scheduler may suspend the job and service any
+//! newly eligible higher level. Installation remains atomic at job completion,
+//! and removes exactly the pinned inputs, so flushes and higher-priority output
+//! installed while a job is suspended are preserved. Shutdown is honored
+//! between slices: an unfinished job's output files are unreferenced by any
+//! manifest, and the next open sweeps them.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -45,8 +50,7 @@ pub(crate) struct Job {
 
 enum JobKind {
     /// Tiered merge: output run lands at the FRONT (newest) of the target
-    /// level. Also used for deepening (target == current level count: a new
-    /// bottom level is created on install).
+    /// level.
     Tier,
     /// Incremental bottom merge: `inputs` are the newest bottom run plus
     /// ONLY the base run's tables overlapping its key range; the output is
@@ -60,6 +64,43 @@ enum JobKind {
         keep_right: Vec<Arc<TableHandle>>,
         new_run_id: u64,
     },
+}
+
+/// What the picker chose: a rewrite the scheduler runs in slices, or the
+/// bottom's runs to move — files untouched, a manifest edit — into a level
+/// created below it.
+enum Work {
+    Rewrite(Job),
+    Deepen { level: usize, inputs: Vec<Run> },
+}
+
+/// A rewrite job in flight: the merge cursor over its pinned inputs plus the
+/// output built so far. It survives suspension untouched — the inputs are
+/// immutable runs and the output installs by exact run id — so a
+/// higher-priority job can run to completion between two of its slices.
+struct RunningJob {
+    job: Job,
+    watermark: SeqNo,
+    merge: MergeIterator,
+    run_id: u64,
+    tables: Vec<Arc<TableHandle>>,
+    builder: Option<(u64, TableBuilder)>,
+    discard: HashMap<u64, u64>,
+    cur_ukey: Vec<u8>,
+    have_key: bool,
+    kept_le_w: bool,
+    started: Instant,
+    slices: u32,
+}
+
+/// The single compaction executor. One job is active at a time; a deeper job
+/// preempted by a newly eligible upper level waits in `suspended` (innermost
+/// last) and resumes once nothing above it is eligible.
+struct Scheduler {
+    active: Option<RunningJob>,
+    suspended: Vec<RunningJob>,
+    /// `compact_all` semantics: merge on any >= 2 runs, never deepen by budget.
+    force: bool,
 }
 
 /// Levels can grow (deepening) but never past this: 16 tiers at any sane
@@ -78,17 +119,10 @@ fn level_target_bytes(db: &DbInner, level: usize) -> u64 {
 
 /// One pass of the maintenance loop; returns whether any work happened.
 pub(crate) fn maintenance_pass(db: &Arc<DbInner>) -> Result<bool> {
-    let mut did = false;
-    {
+    let mut did = {
         let _guard = db.compaction_mu.lock();
-        while let Some(job) = pick(db, false) {
-            run_job(db, job)?;
-            did = true;
-            if db.shutdown.load(Ordering::Acquire) {
-                return Ok(did);
-            }
-        }
-    }
+        Scheduler::new(false).run(db)?
+    };
     did |= process_retired(db)?;
     did |= auto_gc(db)?;
     Ok(did)
@@ -99,13 +133,136 @@ pub(crate) fn maintenance_pass(db: &Arc<DbInner>) -> Result<bool> {
 pub(crate) fn compact_until_quiet(db: &Arc<DbInner>) -> Result<()> {
     db.check_bg_error()?;
     let _guard = db.compaction_mu.lock();
-    while let Some(job) = pick(db, true) {
-        run_job(db, job)?;
-    }
+    Scheduler::new(true).run(db)?;
     Ok(())
 }
 
-fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
+impl Scheduler {
+    fn new(force: bool) -> Self {
+        Self {
+            active: None,
+            suspended: Vec::new(),
+            force,
+        }
+    }
+
+    /// Step until nothing is runnable or the store is shutting down; whether
+    /// any step ran.
+    fn run(mut self, db: &Arc<DbInner>) -> Result<bool> {
+        let mut did_work = false;
+        while self.step(db)? {
+            did_work = true;
+            if db.shutdown.load(Ordering::Acquire) {
+                break;
+            }
+        }
+        Ok(did_work)
+    }
+
+    /// Run one bounded slice of whichever job has priority; false once no
+    /// job is runnable. Deepening is a manifest edit and completes in one
+    /// step.
+    fn step(&mut self, db: &Arc<DbInner>) -> Result<bool> {
+        self.preempt(db)?;
+        if self.active.is_none() && !self.schedule(db)? {
+            return Ok(false);
+        }
+        // a deepen job installed in `schedule` and left nothing to slice
+        let Some(mut active) = self.active.take() else {
+            return Ok(true);
+        };
+        if !active.run_slice(db)? {
+            self.active = Some(active);
+        }
+        Ok(true)
+    }
+
+    /// Take `work` on: a rewrite opens its merge cursor and becomes the
+    /// active job; a deepen installs right here.
+    fn start(&mut self, db: &Arc<DbInner>, work: Work) -> Result<()> {
+        match work {
+            Work::Rewrite(job) => self.active = Some(RunningJob::new(db, job)?),
+            Work::Deepen { level, inputs } => {
+                install_deepen(db, level, &inputs)?;
+                db.progress_signal.notify();
+            }
+        }
+        Ok(())
+    }
+
+    /// A level above the active job that crossed its normal trigger takes
+    /// over; the active job keeps its pinned inputs and partial output.
+    fn preempt(&mut self, db: &Arc<DbInner>) -> Result<()> {
+        let Some(deep) = self.active.take() else {
+            return Ok(());
+        };
+        let Some(job) = pick_before(db, deep.job.level) else {
+            self.active = Some(deep);
+            return Ok(());
+        };
+        debug!(
+            parent: &db.span,
+            level = job.level,
+            suspended = deep.job.level,
+            slices = deep.slices,
+            "compaction preempted"
+        );
+        self.suspended.push(deep);
+        self.start(db, Work::Rewrite(job))
+    }
+
+    /// With nothing active: work above the innermost suspended job first,
+    /// then that job itself; with nothing suspended, whatever the picker
+    /// wants. False when nothing is runnable.
+    fn schedule(&mut self, db: &Arc<DbInner>) -> Result<bool> {
+        let Some(deep) = self.suspended.last() else {
+            let Some(work) = pick(db, self.force) else {
+                return Ok(false);
+            };
+            self.start(db, work)?;
+            return Ok(true);
+        };
+        match pick_before(db, deep.job.level) {
+            Some(job) => self.start(db, Work::Rewrite(job))?,
+            None => self.active = self.suspended.pop(),
+        }
+        Ok(true)
+    }
+}
+
+fn pick_tier(v: &crate::version::Version, level: usize) -> Job {
+    let mut older = v.levels[level + 1].clone();
+    for deeper in &v.levels[level + 2..] {
+        older.extend(deeper.iter().cloned());
+    }
+    Job {
+        level,
+        target: level + 1,
+        inputs: v.levels[level].clone(),
+        older,
+        kind: JobKind::Tier,
+    }
+}
+
+/// Normal-trigger work strictly above `before`, in picker priority order.
+fn pick_before(db: &Arc<DbInner>, before: usize) -> Option<Job> {
+    let s = db.state.read();
+    let v = &s.version;
+    let last = v.levels.len() - 1;
+    for level in 0..last.min(before) {
+        let trigger = if level == 0 {
+            db.opts.l0_compaction_trigger
+        } else {
+            db.opts.tier_width
+        };
+        if v.levels[level].len() >= trigger {
+            return Some(pick_tier(v, level));
+        }
+    }
+    None
+}
+
+fn pick(db: &Arc<DbInner>, force: bool) -> Option<Work> {
     let s = db.state.read();
     let v = &s.version;
     let last = v.levels.len() - 1;
@@ -118,35 +275,22 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
             db.opts.tier_width
         };
         if v.levels[i].len() >= trigger {
-            let mut older: Vec<Run> = v.levels[i + 1].clone();
-            for deeper in &v.levels[i + 2..] {
-                older.extend(deeper.iter().cloned());
-            }
-            return Some(Job {
-                level: i,
-                target: i + 1,
-                inputs: v.levels[i].clone(),
-                older,
-                kind: JobKind::Tier,
-            });
+            return Some(Work::Rewrite(pick_tier(v, i)));
         }
     }
-    // Deepen before merging in place: a bottom level past its byte budget
-    // gets a NEW level below it — its runs tier-merge down, and the old
-    // budget wall stops being rewritten wholesale forever. Not under
-    // `force` (compact_until_quiet wants convergence, not growth).
+    // Deepen before merging in place. A one-level tree first grows a real L1
+    // so future L0 work can preempt bottom maintenance. Otherwise only normal
+    // maintenance deepens, when the current bottom crosses its byte budget.
     let bottom_bytes: u64 = v.levels[last].iter().map(|r| r.size()).sum();
-    if !force
-        && v.levels.len() < MAX_DYNAMIC_LEVELS
+    let one_level_tree_with_work = last == 0 && v.levels[last].len() >= 2;
+    let bottom_over_budget = !force && bottom_bytes > level_target_bytes(db, last);
+    let deepen = v.levels.len() < MAX_DYNAMIC_LEVELS
         && !v.levels[last].is_empty()
-        && bottom_bytes > level_target_bytes(db, last)
-    {
-        return Some(Job {
+        && (one_level_tree_with_work || bottom_over_budget);
+    if deepen {
+        return Some(Work::Deepen {
             level: last,
-            target: last + 1,
             inputs: v.levels[last].clone(),
-            older: Vec::new(),
-            kind: JobKind::Tier,
         });
     }
     if v.levels[last].len() >= 2 {
@@ -195,7 +339,7 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
             id: base.id,
             tables: overlapped,
         };
-        return Some(Job {
+        return Some(Work::Rewrite(Job {
             level: last,
             target: last,
             inputs: vec![upper, overlap_run],
@@ -206,136 +350,221 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
                 keep_right,
                 new_run_id: db.alloc_file_id(),
             },
-        });
+        }));
     }
     None
 }
 
-fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
-    let started = Instant::now();
-    let watermark = db.watermark();
-    let input_runs = job.inputs.len();
-    let input_tables: usize = job.inputs.iter().map(|r| r.tables.len()).sum();
-    let input_bytes: u64 = job.inputs.iter().map(|r| r.size()).sum();
-    let kind = match &job.kind {
-        JobKind::Tier => "tier",
-        JobKind::BottomSplice { .. } => "bottom-splice",
-    };
+impl JobKind {
+    fn label(&self) -> &'static str {
+        match self {
+            JobKind::Tier => "tier",
+            JobKind::BottomSplice { .. } => "bottom-splice",
+        }
+    }
+}
 
-    let children: Vec<Box<dyn InternalIterator>> = job
-        .inputs
-        .iter()
-        .map(|r| Box::new(r.iter()) as Box<dyn InternalIterator>)
-        .collect();
-    let mut merge = MergeIterator::new(children, false);
-    merge.seek_to_first()?;
+impl RunningJob {
+    fn new(db: &Arc<DbInner>, job: Job) -> Result<Self> {
+        let children: Vec<Box<dyn InternalIterator>> = job
+            .inputs
+            .iter()
+            .map(|r| Box::new(r.iter()) as Box<dyn InternalIterator>)
+            .collect();
+        let mut merge = MergeIterator::new(children, false);
+        merge.seek_to_first()?;
+        Ok(Self {
+            job,
+            watermark: db.watermark(),
+            merge,
+            run_id: db.alloc_file_id(),
+            tables: Vec::new(),
+            builder: None,
+            discard: HashMap::new(),
+            cur_ukey: Vec::new(),
+            have_key: false,
+            kept_le_w: false,
+            started: Instant::now(),
+            slices: 0,
+        })
+    }
 
-    let run_id = db.alloc_file_id();
-    let mut tables = Vec::new();
-    let mut builder: Option<(u64, TableBuilder)> = None;
-    let mut discard: HashMap<u64, u64> = HashMap::new();
-
-    let mut cur_ukey: Vec<u8> = Vec::new();
-    let mut have_key = false;
-    let mut kept_le_w = false;
-
-    while merge.valid() {
-        let (keep, is_ptr_drop) = {
-            let ik = merge.ikey();
-            let uk = ikey_ukey(ik);
-            if !have_key || uk != cur_ukey.as_slice() {
-                cur_ukey = uk.to_vec();
-                have_key = true;
-                kept_le_w = false;
+    /// Process at most one scheduling quantum, finishing the current user
+    /// key so its versions never straddle priority boundaries. Returns true
+    /// once the job is durably installed.
+    fn run_slice(&mut self, db: &Arc<DbInner>) -> Result<bool> {
+        let budget = db.opts.compaction_slice_bytes.max(1);
+        let mut processed = 0u64;
+        self.slices += 1;
+        while self.merge.valid() {
+            let new_user_key =
+                !self.have_key || ikey_ukey(self.merge.ikey()) != self.cur_ukey.as_slice();
+            let slice_spent = processed >= budget && new_user_key;
+            if slice_spent {
+                return Ok(false);
             }
-            let seq = ikey_seqno(ik);
-            let kind = ikey_kind(ik)?;
-            if seq > watermark {
-                // still visible to some possible snapshot: keep verbatim
-                (true, false)
-            } else if !kept_le_w {
-                kept_le_w = true;
-                // the newest version at-or-below the watermark: keep, unless
-                // it is a tombstone provably shadowing nothing older
-                if kind == ValueKind::Delete
-                    && !job.older.iter().any(|r| r.may_contain_ukey(&cur_ukey))
-                {
-                    (false, false)
-                } else {
-                    (true, false)
+
+            let entry_bytes =
+                (self.merge.ikey().len() as u64).saturating_add(self.merge.value().len() as u64);
+            let (keep, is_ptr_drop) = {
+                let ik = self.merge.ikey();
+                if new_user_key {
+                    self.cur_ukey = ikey_ukey(ik).to_vec();
+                    self.have_key = true;
+                    self.kept_le_w = false;
                 }
-            } else {
-                // shadowed by a kept newer version for every live snapshot
-                (false, kind == ValueKind::Put)
-            }
-        };
-
-        if keep {
-            let ukey_changed_boundary = {
-                // fragments split only between user keys
-                match &builder {
-                    Some((_, b)) => {
-                        b.estimated_size() >= db.opts.target_file_size
-                            && ikey_ukey(merge.ikey()) != b.last_ukey()
+                let seq = ikey_seqno(ik);
+                let kind = ikey_kind(ik)?;
+                if seq > self.watermark {
+                    // still visible to some possible snapshot: keep verbatim
+                    (true, false)
+                } else if !self.kept_le_w {
+                    self.kept_le_w = true;
+                    // the newest version at-or-below the watermark: keep, unless
+                    // it is a tombstone provably shadowing nothing older
+                    let shadows_older = self
+                        .job
+                        .older
+                        .iter()
+                        .any(|r| r.may_contain_ukey(&self.cur_ukey));
+                    if kind == ValueKind::Delete && !shadows_older {
+                        (false, false)
+                    } else {
+                        (true, false)
                     }
-                    None => false,
+                } else {
+                    // shadowed by a kept newer version for every live snapshot
+                    (false, kind == ValueKind::Put)
                 }
             };
-            if ukey_changed_boundary {
-                let (id, b) = builder.take().unwrap();
-                tables.push(db.finish_table(id, b)?);
+
+            if keep {
+                // fragments split only between user keys
+                let full = self.builder.take_if(|(_, b)| {
+                    b.estimated_size() >= db.opts.target_file_size
+                        && ikey_ukey(self.merge.ikey()) != b.last_ukey()
+                });
+                if let Some((id, b)) = full {
+                    self.tables.push(db.finish_table(id, b)?);
+                }
+                if self.builder.is_none() {
+                    let id = db.alloc_file_id();
+                    let file = db.io.create_new(&db.paths.table(id))?;
+                    self.builder = Some((
+                        id,
+                        TableBuilder::new(
+                            file,
+                            db.opts.block_size,
+                            db.opts.bloom_bits_per_key,
+                            db.opts.compression,
+                        ),
+                    ));
+                }
+                let Some((_, builder)) = self.builder.as_mut() else {
+                    unreachable!("opened above")
+                };
+                builder.add(self.merge.ikey(), self.merge.value())?;
+            } else if is_ptr_drop {
+                if let ReprRef::Ptr(p) = decode_repr(self.merge.value())? {
+                    *self.discard.entry(p.file).or_insert(0) += u64::from(p.len);
+                }
             }
-            if builder.is_none() {
-                let id = db.alloc_file_id();
-                let file = db.io.create_new(&db.paths.table(id))?;
-                builder = Some((
-                    id,
-                    TableBuilder::new(
-                        file,
-                        db.opts.block_size,
-                        db.opts.bloom_bits_per_key,
-                        db.opts.compression,
-                    ),
-                ));
-            }
-            builder.as_mut().unwrap().1.add(merge.ikey(), merge.value())?;
-        } else if is_ptr_drop {
-            if let ReprRef::Ptr(p) = decode_repr(merge.value())? {
-                *discard.entry(p.file).or_insert(0) += u64::from(p.len);
-            }
+            self.merge.next()?;
+            processed = processed.saturating_add(entry_bytes);
         }
-        merge.next()?;
-    }
-    if let Some((id, b)) = builder.take() {
-        tables.push(db.finish_table(id, b)?);
-    }
-    crate::io::sync_dir(&db.paths.dir)?;
 
-    let out_tables = tables.len();
-    let out_bytes: u64 = tables.iter().map(|t| t.size).sum();
-    let discard_bytes: u64 = discard.values().sum();
-    let output = if tables.is_empty() {
-        None
-    } else {
-        Some(Run {
-            id: run_id,
-            tables,
-        })
-    };
+        if let Some((id, b)) = self.builder.take() {
+            self.tables.push(db.finish_table(id, b)?);
+        }
+        crate::io::sync_dir(&db.paths.dir)?;
 
-    install(db, &job, output, discard)?;
-    db.progress_signal.notify();
+        let out_tables = self.tables.len();
+        let out_bytes: u64 = self.tables.iter().map(|t| t.size).sum();
+        let discard_bytes: u64 = self.discard.values().sum();
+        let output = (!self.tables.is_empty()).then(|| Run {
+            id: self.run_id,
+            tables: std::mem::take(&mut self.tables),
+        });
+        install(db, &self.job, output, std::mem::take(&mut self.discard))?;
+        db.progress_signal.notify();
+        info!(
+            parent: &db.span,
+            level = self.job.level,
+            target = self.job.target,
+            kind = self.job.kind.label(),
+            input_runs = self.job.inputs.len(),
+            input_tables = self.job.inputs.iter().map(|r| r.tables.len()).sum::<usize>(),
+            input_bytes = self.job.inputs.iter().map(|r| r.size()).sum::<u64>(),
+            out_tables,
+            out_bytes,
+            discard_bytes,
+            slices = self.slices,
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            "compacted"
+        );
+        Ok(true)
+    }
+}
+
+/// Run one rewrite job to completion, priority ignored.
+#[cfg(test)]
+fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
+    let mut running = RunningJob::new(db, job)?;
+    while !running.run_slice(db)? {}
+    Ok(())
+}
+
+/// The picker's choice when the test expects a rewrite; a deepen fails it.
+#[cfg(test)]
+fn pick_rewrite(db: &Arc<DbInner>, force: bool) -> Option<Job> {
+    match pick(db, force)? {
+        Work::Rewrite(job) => Some(job),
+        Work::Deepen { .. } => panic!("picker chose to deepen where a rewrite was expected"),
+    }
+}
+
+/// Move the bottom's runs, files untouched, into a level created below it.
+fn install_deepen(db: &Arc<DbInner>, level: usize, inputs: &[Run]) -> Result<()> {
+    let started = Instant::now();
+    let input_ids: Vec<u64> = inputs.iter().map(|r| r.id).collect();
+
+    let mut manifest = db.manifest.lock();
+    let mut data = manifest.data.clone();
+    debug_assert_eq!(level + 1, data.levels.len(), "deepening moves the bottom");
+    data.levels[level].retain(|run| !input_ids.contains(&run.id));
+    data.levels.push(
+        inputs
+            .iter()
+            .map(|run| RunMeta {
+                id: run.id,
+                table_ids: run.tables.iter().map(|table| table.id).collect(),
+            })
+            .collect(),
+    );
+    data.next_file_id = db.next_file_id.load(Ordering::SeqCst);
+    let gen = manifest.gen + 1;
+    manifest::save(&db.paths, gen, &data)?;
+    manifest.gen = gen;
+    manifest.data = data;
+
+    let mut state = db.state.write();
+    let mut version = state.version.clone_shape();
+    debug_assert_eq!(
+        level + 1,
+        version.levels.len(),
+        "deepening moves the bottom"
+    );
+    version.levels[level].retain(|run| !input_ids.contains(&run.id));
+    version.levels.push(inputs.to_vec());
+    state.version = Arc::new(version);
     info!(
         parent: &db.span,
-        level = job.level,
-        target = job.target,
-        kind,
-        input_runs,
-        input_tables,
-        input_bytes,
-        out_tables,
-        out_bytes,
-        discard_bytes,
+        level,
+        target = level + 1,
+        kind = "deepen",
+        input_runs = inputs.len(),
+        input_tables = inputs.iter().map(|r| r.tables.len()).sum::<usize>(),
+        input_bytes = inputs.iter().map(|r| r.size()).sum::<u64>(),
         elapsed_ms = started.elapsed().as_millis() as u64,
         "compacted"
     );
@@ -355,10 +584,6 @@ fn install(
     data.levels[job.level].retain(|r| !input_ids.contains(&r.id));
     match &job.kind {
         JobKind::Tier => {
-            // deepening: the target level may not exist yet
-            if job.target == data.levels.len() {
-                data.levels.push(Vec::new());
-            }
             if let Some(run) = &output {
                 data.levels[job.target].insert(
                     0,
@@ -420,9 +645,6 @@ fn install(
     v.levels[job.level].retain(|r| !input_ids.contains(&r.id));
     match job.kind {
         JobKind::Tier => {
-            if job.target == v.levels.len() {
-                v.levels.push(Vec::new());
-            }
             if let Some(run) = output {
                 v.levels[job.target].insert(0, run);
             }
@@ -765,9 +987,210 @@ mod shape_tests {
             l0_compaction_trigger: 2,
             tier_width: 2,
             max_levels: 2,
+            compaction_slice_bytes: 1,
             value_threshold: 4096,
             ..Options::default()
         }
+    }
+
+    fn flush_run(db: &crate::Db, prefix: &str, count: u32) {
+        for i in 0..count {
+            db.put(format!("{prefix}/{i:06}"), vec![i as u8; 32])
+                .unwrap();
+        }
+        db.flush().unwrap();
+    }
+
+    #[test]
+    fn scheduler_preempts_a_sliced_deep_job_for_l0() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = tiny_opts();
+        opts.max_levels = 3;
+        opts.memtable_size = 16 << 20;
+        opts.l0_stall_trigger = 2;
+        opts.compaction_slice_bytes = 1;
+        let reopen_opts = opts.clone();
+        let db = Arc::new(crate::Db::open(dir.path(), opts).unwrap());
+        let inner = db.inner.clone();
+        let hold = inner.compaction_mu.lock();
+
+        // Build two L1 runs, then begin (but do not finish) their L1->L2 job.
+        for generation in 0..2 {
+            flush_run(&db, &format!("old/{generation}/a"), 200);
+            flush_run(&db, &format!("old/{generation}/b"), 200);
+            let job = pick_rewrite(&inner, false).expect("L0 tier job");
+            assert_eq!(job.level, 0);
+            run_job(&inner, job).unwrap();
+        }
+        let deep = pick_rewrite(&inner, false).expect("L1 tier job");
+        assert_eq!(deep.level, 1);
+        let mut scheduler = Scheduler::new(false);
+        scheduler.active = Some(RunningJob::new(&inner, deep).unwrap());
+        assert!(scheduler.step(&inner).unwrap());
+        assert_eq!(scheduler.active.as_ref().unwrap().job.level, 1);
+
+        // Fill L0 to the write-stall threshold while the deep job is suspended.
+        flush_run(&db, "new/a", 40);
+        flush_run(&db, "new/b", 40);
+        assert_eq!(inner.state.read().version.levels[0].len(), 2);
+
+        let (sent, received) = std::sync::mpsc::channel();
+        let writer_db = db.clone();
+        let writer = std::thread::spawn(move || {
+            sent.send(writer_db.put("writer/after-stall", "ok"))
+                .unwrap();
+        });
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+
+        // The next slice is L0, not another slice of the active deep job.
+        assert!(scheduler.step(&inner).unwrap());
+        assert_eq!(scheduler.active.as_ref().unwrap().job.level, 0);
+        assert_eq!(scheduler.suspended.len(), 1);
+        for _ in 0..10_000 {
+            if inner.state.read().version.levels[0].is_empty() {
+                break;
+            }
+            assert!(scheduler.step(&inner).unwrap());
+        }
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("writer stayed stalled behind the deep job")
+            .unwrap();
+        writer.join().unwrap();
+
+        while scheduler.step(&inner).unwrap() {}
+        assert_eq!(
+            db.get(b"old/1/b/000199").unwrap().as_deref(),
+            Some(&[199; 32][..])
+        );
+        assert_eq!(
+            db.get(b"writer/after-stall").unwrap().as_deref(),
+            Some(&b"ok"[..])
+        );
+
+        drop(hold);
+        drop(inner);
+        drop(db);
+        let db = crate::Db::open(dir.path(), reopen_opts).unwrap();
+        assert_eq!(
+            db.get(b"writer/after-stall").unwrap().as_deref(),
+            Some(&b"ok"[..])
+        );
+    }
+
+    #[test]
+    fn scheduler_preempts_bottom_splice_without_losing_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = tiny_opts();
+        opts.max_levels = 2;
+        opts.memtable_size = 16 << 20;
+        opts.l0_stall_trigger = 2;
+        opts.compaction_slice_bytes = 1;
+        let reopen_opts = opts.clone();
+        let db = Arc::new(crate::Db::open(dir.path(), opts).unwrap());
+        let inner = db.inner.clone();
+        let hold = inner.compaction_mu.lock();
+
+        db.put("victim", "alive").unwrap();
+        flush_run(&db, "base/a", 200);
+        flush_run(&db, "base/b", 200);
+        let base = pick_rewrite(&inner, false).expect("base L0 tier job");
+        assert_eq!(base.level, 0);
+        run_job(&inner, base).unwrap();
+
+        db.delete("victim").unwrap();
+        flush_run(&db, "upper/a", 200);
+        flush_run(&db, "upper/b", 200);
+        let upper = pick_rewrite(&inner, false).expect("upper L0 tier job");
+        assert_eq!(upper.level, 0);
+        run_job(&inner, upper).unwrap();
+
+        let splice = pick_rewrite(&inner, false).expect("bottom splice job");
+        assert!(matches!(splice.kind, JobKind::BottomSplice { .. }));
+        let mut scheduler = Scheduler::new(false);
+        scheduler.active = Some(RunningJob::new(&inner, splice).unwrap());
+        assert!(scheduler.step(&inner).unwrap());
+
+        flush_run(&db, "newer/a", 40);
+        flush_run(&db, "newer/b", 40);
+        let (sent, received) = std::sync::mpsc::channel();
+        let writer_db = db.clone();
+        let writer = std::thread::spawn(move || {
+            sent.send(writer_db.put("writer/through-bottom", "ok"))
+                .unwrap();
+        });
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+
+        assert!(scheduler.step(&inner).unwrap());
+        assert_eq!(scheduler.active.as_ref().unwrap().job.level, 0);
+        for _ in 0..10_000 {
+            if inner.state.read().version.levels[0].is_empty() {
+                break;
+            }
+            assert!(scheduler.step(&inner).unwrap());
+        }
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("writer stayed stalled behind the bottom splice")
+            .unwrap();
+        writer.join().unwrap();
+        while scheduler.step(&inner).unwrap() {}
+
+        assert_eq!(db.get(b"victim").unwrap(), None);
+        assert_eq!(
+            db.get(b"newer/a/000000").unwrap().as_deref(),
+            Some(&[0; 32][..])
+        );
+        assert_eq!(
+            db.get(b"writer/through-bottom").unwrap().as_deref(),
+            Some(&b"ok"[..])
+        );
+
+        drop(hold);
+        db.compact_all().unwrap();
+        drop(inner);
+        drop(db);
+        let db = crate::Db::open(dir.path(), reopen_opts).unwrap();
+        assert_eq!(db.get(b"victim").unwrap(), None);
+        assert_eq!(
+            db.get(b"writer/through-bottom").unwrap().as_deref(),
+            Some(&b"ok"[..])
+        );
+    }
+
+    #[test]
+    fn deepening_moves_existing_tables_by_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = tiny_opts();
+        opts.max_levels = 1;
+        opts.memtable_size = 16 << 20;
+        let db = crate::Db::open(dir.path(), opts).unwrap();
+        let inner = db.inner.clone();
+        let _hold = inner.compaction_mu.lock();
+
+        flush_run(&db, "first", 40);
+        flush_run(&db, "second", 40);
+        let before: Vec<u64> = inner.state.read().version.levels[0]
+            .iter()
+            .flat_map(|run| run.tables.iter().map(|table| table.id))
+            .collect();
+        let work = pick(&inner, false).expect("one-level tree must deepen");
+        assert!(matches!(work, Work::Deepen { .. }));
+        let mut scheduler = Scheduler::new(false);
+        scheduler.start(&inner, work).unwrap();
+        assert!(scheduler.active.is_none(), "deepening has nothing to slice");
+
+        let state = inner.state.read();
+        assert!(state.version.levels[0].is_empty());
+        let after: Vec<u64> = state.version.levels[1]
+            .iter()
+            .flat_map(|run| run.tables.iter().map(|table| table.id))
+            .collect();
+        assert_eq!(after, before, "deepening rewrote an existing table");
     }
 
     /// Regression (review finding): a 3+-run bottom must read the NEWEST
@@ -978,7 +1401,7 @@ mod shape_tests {
         db.flush().unwrap();
         db.put("zz", vec![0u8; 16]).unwrap();
         db.flush().unwrap();
-        let job = pick(&inner, false).expect("tier L0->bottom (B)");
+        let job = pick_rewrite(&inner, false).expect("tier L0->bottom (B)");
         run_job(&inner, job).unwrap();
         assert_eq!(bottom_len(&inner), 1, "bottom = [B]");
 
@@ -987,7 +1410,7 @@ mod shape_tests {
         db.flush().unwrap();
         db.put("zz", vec![1u8; 16]).unwrap();
         db.flush().unwrap();
-        let job = pick(&inner, false).expect("tier L0->bottom (M)");
+        let job = pick_rewrite(&inner, false).expect("tier L0->bottom (M)");
         run_job(&inner, job).unwrap();
         assert_eq!(bottom_len(&inner), 2, "bottom = [M, B]");
 
@@ -997,14 +1420,14 @@ mod shape_tests {
         db.flush().unwrap();
         db.put("zz", vec![2u8; 16]).unwrap();
         db.flush().unwrap();
-        let job = pick(&inner, false).expect("tier L0->bottom (F)");
+        let job = pick_rewrite(&inner, false).expect("tier L0->bottom (F)");
         assert!(matches!(job.kind, JobKind::Tier), "L0 tier must win over splice");
         run_job(&inner, job).unwrap();
         assert_eq!(bottom_len(&inner), 3, "bottom = [F(del k), M(put k), B]");
         assert_eq!(db.get(b"k").unwrap(), None, "delete visible pre-splice");
 
         // Step D: the incremental splice merges F + B's overlap only.
-        let job = pick(&inner, false).expect("bottom splice");
+        let job = pick_rewrite(&inner, false).expect("bottom splice");
         assert!(matches!(job.kind, JobKind::BottomSplice { .. }));
         assert!(job.older.is_empty(), "splice job carries no older runs");
         run_job(&inner, job).unwrap();

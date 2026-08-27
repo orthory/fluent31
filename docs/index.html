@@ -1702,6 +1702,7 @@ scan_close      : (h: i32) -&gt; i32   <span class="c">// free the handle</span>
             <tr><td><code>max_levels</code></td><td><code>usize</code></td><td>7</td><td>The level count; the last level is one leveled run.</td></tr>
             <tr><td><code>l0_stall_trigger</code></td><td><code>usize</code></td><td>12</td><td>L0 runs at which writers stall until compaction catches up.</td></tr>
             <tr><td><code>target_file_size</code></td><td><code>u64</code></td><td>64 MiB</td><td>Compaction splits runs into fragments of about this size.</td></tr>
+            <tr><td><code>compaction_slice_bytes</code></td><td><code>u64</code></td><td>1 MiB</td><td>Input bytes a compaction job processes before a level that crossed its trigger above it may take over. The current key always finishes, so a key with many versions can overrun it.</td></tr>
             <tr><td><code>value_threshold</code></td><td><code>usize</code></td><td>4096</td><td>Values at or above this go to the value log; smaller ones stay inline. <code>0</code> separates everything and <code>usize::MAX</code> disables separation.</td></tr>
             <tr><td><code>vlog_file_size</code></td><td><code>u64</code></td><td>128 MiB</td><td>Seal and rotate the value-log head at this size.</td></tr>
             <tr><td><code>vlog_gc_ratio</code></td><td><code>f64</code></td><td>0.5</td><td>A sealed value-log file becomes a GC victim once this fraction of it is known dead.</td></tr>
@@ -2250,11 +2251,12 @@ replica.master();                            <span class="c">// StoreIdentity</s
             <tr><td><code>value_threshold</code></td><td>values are small and scans should stay inline</td><td>values are large and the index should stay small</td></tr>
             <tr><td><code>compression = Lz4</code></td><td>you are disk-bound with compressible values</td><td>you are CPU-bound</td></tr>
             <tr><td><code>vlog_gc_ratio</code></td><td>you want less GC churn</td><td>you want space back sooner</td></tr>
+            <tr><td><code>compaction_slice_bytes</code></td><td>deep merges should finish sooner and write latency can wait</td><td>writers stall while a deep merge runs</td></tr>
             <tr><td><code>trigger_inline_value</code></td><td>changes-mode consumers need payloads without a read</td><td>values are large and write amplification matters</td></tr>
             <tr><td><code>sub_queue_bytes</code></td><td>subscribers are bursty</td><td>memory is tight</td></tr>
           </tbody>
         </table></div>
-        <p>Writers stall rather than fail when frozen memtables exceed <code>max_immutable_memtables</code> or L0 exceeds <code>l0_stall_trigger</code>. Sustained stalls mean compaction cannot keep up. Each stall episode is logged: <code>warn</code> as it begins, with its cause; <code>info</code> as it ends, with its duration.</p>
+        <p>Writers stall rather than fail when frozen memtables exceed <code>max_immutable_memtables</code> or L0 exceeds <code>l0_stall_trigger</code>. A deep merge does not hold L0 back: compaction works in slices of <code>compaction_slice_bytes</code>, and between slices a level that crossed its trigger takes over from the deeper job, which resumes afterwards. Sustained stalls therefore mean compaction as a whole cannot keep up, not that one large job is in the way. Each stall episode is logged: <code>warn</code> as it begins, with its cause; <code>info</code> as it ends, with its duration.</p>
 
         <h2>Monitoring</h2>
         <ul>
@@ -2270,7 +2272,7 @@ replica.master();                            <span class="c">// StoreIdentity</s
             <tr><td><code>error</code></td><td>a background failure degraded the store (every one is logged, not only the first); the journal stopped; a network plane died</td></tr>
             <tr><td><code>warn</code></td><td>a write stall began (and why), a subscriber cut for lag, a trigger run failing (with its backoff), a torn WAL tail at recovery, a WASM trap, a replica re-syncing, a file the store could not delete</td></tr>
             <tr><td><code>info</code></td><td>open (recovery summary) and close; every flush, compaction and value-log GC; forks created and deleted; modules, triggers and pins added and removed; journal base, rotate and compact; replication streams starting and ending; fork instances the server opens and closes; the stats heartbeat</td></tr>
-            <tr><td><code>debug</code></td><td>each WASM invocation (fuel, memory, duration), trigger drains, subscriptions opening and closing, GC liveness sampling, execute retries</td></tr>
+            <tr><td><code>debug</code></td><td>each WASM invocation (fuel, memory, duration), trigger drains, subscriptions opening and closing, GC liveness sampling, a compaction job suspended for a higher level, execute retries</td></tr>
             <tr><td><code>trace</code></td><td>per batch: journal deltas, streamed batches</td></tr>
           </tbody>
         </table></div>

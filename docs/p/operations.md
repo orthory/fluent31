@@ -30,10 +30,11 @@ One process per directory. Everything is CRC32C-checked. Don't hand-edit anythin
 | `value_threshold` | values are small and scans should stay inline | values are large and the index should stay small |
 | `compression = Lz4` | you are disk-bound with compressible values | you are CPU-bound |
 | `vlog_gc_ratio` | you want less GC churn | you want space back sooner |
+| `compaction_slice_bytes` | deep merges should finish sooner and write latency can wait | writers stall while a deep merge runs |
 | `trigger_inline_value` | changes-mode consumers need payloads without a read | values are large and write amplification matters |
 | `sub_queue_bytes` | subscribers are bursty | memory is tight |
 
-Writers stall rather than fail when frozen memtables exceed `max_immutable_memtables` or L0 exceeds `l0_stall_trigger`. Sustained stalls mean compaction cannot keep up. Each stall episode is logged: `warn` as it begins, with its cause; `info` as it ends, with its duration.
+Writers stall rather than fail when frozen memtables exceed `max_immutable_memtables` or L0 exceeds `l0_stall_trigger`. A deep merge does not hold L0 back: compaction works in slices of `compaction_slice_bytes`, and between slices a level that crossed its trigger takes over from the deeper job, which resumes afterwards. Sustained stalls therefore mean compaction as a whole cannot keep up, not that one large job is in the way. Each stall episode is logged: `warn` as it begins, with its cause; `info` as it ends, with its duration.
 
 ## Monitoring
 
@@ -50,7 +51,7 @@ The engine emits [`tracing`](https://docs.rs/tracing) events. The binaries write
 | `error` | a background failure degraded the store (every one is logged, not only the first); the journal stopped; a network plane died |
 | `warn` | a write stall began (and why), a subscriber cut for lag, a trigger run failing (with its backoff), a torn WAL tail at recovery, a WASM trap, a replica re-syncing, a file the store could not delete |
 | `info` | open (recovery summary) and close; every flush, compaction and value-log GC; forks created and deleted; modules, triggers and pins added and removed; journal base, rotate and compact; replication streams starting and ending; fork instances the server opens and closes; the stats heartbeat |
-| `debug` | each WASM invocation (fuel, memory, duration), trigger drains, subscriptions opening and closing, GC liveness sampling, execute retries |
+| `debug` | each WASM invocation (fuel, memory, duration), trigger drains, subscriptions opening and closing, GC liveness sampling, a compaction job suspended for a higher level, execute retries |
 | `trace` | per batch: journal deltas, streamed batches |
 
 GraphQL requests are not logged.
