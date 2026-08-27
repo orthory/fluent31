@@ -32,7 +32,7 @@ output_write : (ptr: i32, len: i32) -> i32
 log : (level: i32, ptr: i32, len: i32) -> i32
 ```
 
-Debug logging, capped at `max_wasm_log` total bytes and then `ENOSPC`. The host prints to stderr only when `FLUENT31_WASM_LOG` is set. Never use logs to communicate results.
+Debug logging, capped at `max_wasm_log` total bytes and then `ENOSPC`. The host emits each line as a `debug` event under the `fluent31::wasm::guest` target (`RUST_LOG=fluent31::wasm::guest=debug` to see them). Never use logs to communicate results.
 
 ## Point access
 

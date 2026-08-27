@@ -77,7 +77,7 @@ Reads see the invocation's snapshot, and in an executor the transaction's own bu
 ```
 fluent_guest::input() -> Vec<u8>    // the whole input blob
 fluent_guest::output(&[u8])         // APPENDS to the output; call repeatedly to stream
-fluent_guest::log(&str)             // stderr, only when FLUENT31_WASM_LOG is set
+fluent_guest::log(&str)             // a debug event under target fluent31::wasm::guest
 ```
 
 The entry macros call `input()` and `output()` for you; reach for them directly when the entry is written by hand or when the output is built in pieces. Logs are for debugging only — they are rate-capped and invisible unless the host asks for them, so results never travel that way.

@@ -124,8 +124,10 @@ the return value if truncated output would be a correctness bug.
 log : (level: i32, ptr: i32, len: i32) -> i32
 ```
 Debug logging, rate-capped at `max_wasm_log` total bytes (default 1 MiB,
-then `ENOSPC`). Host prints to stderr only when the `FLUENT31_WASM_LOG`
-env var is set. Never use logs to communicate results.
+then `ENOSPC`). The host emits each line as a `debug` event under the
+`fluent31::wasm::guest` target (`RUST_LOG=fluent31::wasm::guest=debug`
+to see them; silent and cheap otherwise). Never use logs to communicate
+results.
 
 ```
 get            : (kptr, klen, off, vbuf, vcap: i32) -> i64

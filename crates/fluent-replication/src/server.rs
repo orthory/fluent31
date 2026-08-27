@@ -9,6 +9,7 @@
 //! engine cuts the subscriber loose (`Lagged`) rather than stalling any
 //! writer.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use fluent31::{Db, StoreIdentity, StreamEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
+use tracing::{debug, info, warn};
 
 use crate::proto::*;
 
@@ -68,15 +70,20 @@ impl ReplServer {
 
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
         loop {
-            let (sock, _peer) = listener.accept().await?;
+            let (sock, peer) = listener.accept().await?;
             let srv = self.clone();
             tokio::spawn(async move {
-                let _ = srv.run_conn(sock).await;
+                debug!(%peer, "replication connection accepted");
+                let Err(e) = srv.run_conn(sock, peer).await else {
+                    debug!(%peer, "replication connection closed");
+                    return;
+                };
+                warn!(%peer, error = %e, "replication connection failed");
             });
         }
     }
 
-    async fn run_conn(self: Arc<Self>, mut sock: TcpStream) -> std::io::Result<()> {
+    async fn run_conn(self: Arc<Self>, mut sock: TcpStream, peer: SocketAddr) -> std::io::Result<()> {
         sock.set_nodelay(true)?;
         loop {
             let Some((request_id, opcode, payload)) = read_frame(&mut sock, self.cfg.max_frame).await?
@@ -87,7 +94,7 @@ impl ReplServer {
             if opcode == OP_SUBSCRIBE {
                 // reply then flip to push-only mode; this call never returns
                 // to request handling
-                return self.run_subscription(sock, request_id, &payload).await;
+                return self.run_subscription(sock, peer, request_id, &payload).await;
             }
 
             let (status, body) = self.handle(opcode, &payload).await;
@@ -160,6 +167,7 @@ impl ReplServer {
     async fn run_subscription(
         self: Arc<Self>,
         mut sock: TcpStream,
+        peer: SocketAddr,
         request_id: u64,
         payload: &[u8],
     ) -> std::io::Result<()> {
@@ -177,6 +185,7 @@ impl ReplServer {
             }
         };
         let db = self.db.clone();
+        let range = format!("{}..{}", hex_prefix(&lo), hi.as_deref().map_or("".into(), hex_prefix));
         let sub = match self
             .engine_call(move || db.subscribe(&lo, hi.as_deref()))
             .await
@@ -199,6 +208,7 @@ impl ReplServer {
             &sub.start_seqno().to_le_bytes(),
         ))
         .await?;
+        info!(%peer, range, start = sub.start_seqno(), "replication stream subscribed");
 
         // bounded: a slow edge fills this, the forwarder stalls, the
         // engine-side queue overflows, and the subscription reports Lagged
@@ -206,20 +216,22 @@ impl ReplServer {
         let ping_every = self.cfg.ping_every;
         let forwarder = tokio::task::spawn_blocking(move || {
             let mut sub = sub;
+            let mut batches: u64 = 0;
             loop {
                 let frame = match sub.recv_timeout(ping_every) {
                     Ok(Some(StreamEvent::Batch(b))) => {
+                        batches += 1;
                         response(0, PUSH_STREAM, &encode_stream_batch(&b))
                     }
                     Ok(Some(StreamEvent::Lagged)) => {
                         let _ = tx.blocking_send(response(0, PUSH_LAGGED, &[]));
-                        return;
+                        return (StreamEnd::Lagged, batches);
                     }
                     Ok(None) => response(0, PUSH_PING, &[]),
-                    Err(_) => return, // store degraded/closed: drop the conn
+                    Err(e) => return (StreamEnd::Degraded(e), batches), // store degraded/closed: drop the conn
                 };
                 if tx.blocking_send(frame).is_err() {
-                    return; // connection gone; dropping `sub` releases its pin
+                    return (StreamEnd::PeerGone, batches); // connection gone; dropping `sub` releases its pin
                 }
             }
         });
@@ -230,9 +242,24 @@ impl ReplServer {
             }
         }
         drop(rx); // unblocks the forwarder, which drops the subscription
-        let _ = forwarder.await;
+        let Ok((end, batches)) = forwarder.await else {
+            warn!(%peer, range, "replication stream forwarder panicked");
+            return Ok(());
+        };
+        match end {
+            StreamEnd::PeerGone => info!(%peer, range, batches, "replication stream closed by peer"),
+            StreamEnd::Lagged => warn!(%peer, range, batches, "replication stream cut: edge lagged past the buffer"),
+            StreamEnd::Degraded(e) => warn!(%peer, range, batches, error = %e, "replication stream dropped: store degraded"),
+        }
         Ok(())
     }
+}
+
+/// Why a push-mode connection's forwarder stopped.
+enum StreamEnd {
+    PeerGone,
+    Lagged,
+    Degraded(fluent31::Error),
 }
 
 enum DispatchErr {

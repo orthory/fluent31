@@ -277,3 +277,9 @@ impl<'a> RdExt<'a> for Rd<'a> {
         Ok(a)
     }
 }
+
+/// A key's leading bytes as hex: enough to identify a range in a log line
+/// without dumping the whole key.
+pub(crate) fn hex_prefix(key: &[u8]) -> String {
+    key.iter().take(16).map(|b| format!("{b:02x}")).collect()
+}

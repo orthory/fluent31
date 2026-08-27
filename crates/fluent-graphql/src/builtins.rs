@@ -348,6 +348,14 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
                             Value::String(s.commit_batches.to_string()),
                         ),
                         ("walSyncs", Value::String(s.wal_syncs.to_string())),
+                        (
+                            "subscriptions",
+                            Value::Number(i64::try_from(s.subscriptions).unwrap_or(i64::MAX).into()),
+                        ),
+                        (
+                            "snapshots",
+                            Value::Number(i64::try_from(s.snapshots).unwrap_or(i64::MAX).into()),
+                        ),
                     ]))))
                 })
             })
