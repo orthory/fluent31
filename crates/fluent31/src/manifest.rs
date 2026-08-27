@@ -18,6 +18,7 @@ use crate::error::{corrupt, Error, Result};
 use crate::identity::{InstanceId, PendingFork, StoreIdentity, INSTANCE_ID_LEN};
 use crate::io::{atomic_write, sync_dir};
 use crate::types::SeqNo;
+use tracing::{warn, Span};
 
 const MANIFEST_MAGIC: u64 = 0xf115_e731_3aa1_0001;
 /// Base format: structure only.
@@ -298,6 +299,34 @@ pub(crate) fn save(paths: &DbPaths, gen: u64, data: &ManifestData) -> Result<()>
     Ok(())
 }
 
+/// Delete every `MANIFEST-<gen>` file in the store directory for which
+/// `stale(gen)` holds. Best effort: a file that will not go is reported and
+/// left for the next sweep, and the store is correct either way — only
+/// CURRENT names the live generation.
+pub(crate) fn sweep(paths: &DbPaths, span: &Span, stale: impl Fn(u64) -> bool) {
+    let Ok(entries) = std::fs::read_dir(&paths.dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(gen) = name.to_str().and_then(generation) else {
+            continue;
+        };
+        if !stale(gen) {
+            continue;
+        }
+        let Err(e) = std::fs::remove_file(entry.path()) else {
+            continue;
+        };
+        warn!(parent: span, gen, error = %e, "could not delete a stale manifest");
+    }
+}
+
+/// The generation a `MANIFEST-<gen>` file name carries.
+fn generation(name: &str) -> Option<u64> {
+    name.strip_prefix("MANIFEST-")?.parse().ok()
+}
+
 /// Read CURRENT and the manifest it names. Returns (gen, data).
 pub(crate) fn load(paths: &DbPaths) -> Result<(u64, ManifestData)> {
     let cur = std::fs::read_to_string(paths.current())
@@ -450,5 +479,30 @@ mod tests {
         let (gen, got) = load(&paths).unwrap();
         assert_eq!(gen, 2);
         assert_eq!(got, d2);
+    }
+
+    #[test]
+    fn sweep_removes_exactly_the_stale_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = DbPaths::new(dir.path());
+        let d = sample();
+        for gen in [1, 2, 3, 7] {
+            save(&paths, gen, &d).unwrap();
+        }
+        std::fs::write(dir.path().join("MANIFEST-notanumber"), b"x").unwrap();
+
+        sweep(&paths, &Span::none(), |gen| gen < 3);
+        assert!(!paths.manifest(1).exists());
+        assert!(!paths.manifest(2).exists());
+        assert!(paths.manifest(3).exists());
+        assert!(
+            paths.manifest(7).exists(),
+            "a newer generation is not this sweep's to judge"
+        );
+        assert!(dir.path().join("MANIFEST-notanumber").exists());
+
+        sweep(&paths, &Span::none(), |gen| gen != 3);
+        assert!(paths.manifest(3).exists());
+        assert!(!paths.manifest(7).exists());
     }
 }

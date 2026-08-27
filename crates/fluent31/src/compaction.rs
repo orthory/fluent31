@@ -29,7 +29,7 @@ use crate::batch::BatchOp;
 use crate::db::{DbInner, RetiredVlog};
 use crate::error::Result;
 use crate::iter::{InternalIterator, MergeIterator};
-use crate::manifest::{self, RunMeta};
+use crate::manifest::RunMeta;
 use crate::table::TableBuilder;
 use crate::types::{
     decode_repr, ikey_kind, ikey_seqno, ikey_ukey, ReprRef, SeqNo, ValueKind, MAX_SEQNO,
@@ -542,10 +542,7 @@ fn install_deepen(db: &Arc<DbInner>, level: usize, inputs: &[Run]) -> Result<()>
             .collect(),
     );
     data.next_file_id = db.next_file_id.load(Ordering::SeqCst);
-    let gen = manifest.gen + 1;
-    manifest::save(&db.paths, gen, &data)?;
-    manifest.gen = gen;
-    manifest.data = data;
+    manifest.commit(&db.paths, &db.span, data)?;
 
     let mut state = db.state.write();
     let mut version = state.version.clone_shape();
@@ -635,10 +632,7 @@ fn install(
         data.discard = map.into_iter().collect();
     }
     data.next_file_id = db.next_file_id.load(Ordering::SeqCst);
-    let gen = m.gen + 1;
-    manifest::save(&db.paths, gen, &data)?;
-    m.gen = gen;
-    m.data = data;
+    m.commit(&db.paths, &db.span, data)?;
 
     let mut s = db.state.write();
     let mut v = s.version.clone_shape();
@@ -715,10 +709,7 @@ fn process_retired(db: &Arc<DbInner>) -> Result<bool> {
         let mut data = m.data.clone();
         data.vlog_retired
             .retain(|(id, _)| !ready.iter().any(|r| r.id == *id));
-        let gen = m.gen + 1;
-        manifest::save(&db.paths, gen, &data)?;
-        m.gen = gen;
-        m.data = data;
+        m.commit(&db.paths, &db.span, data)?;
 
         // only now drop the victims from the resolution map: the gates
         // guarantee no current or future reader can resolve a version that
@@ -947,10 +938,7 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
         data.vlog_live.retain(|&id| id != victim_id);
         data.vlog_retired.push((victim_id, retired_at));
         data.discard.retain(|(id, _)| *id != victim_id);
-        let gen = m.gen + 1;
-        manifest::save(&db.paths, gen, &data)?;
-        m.gen = gen;
-        m.data = data;
+        m.commit(&db.paths, &db.span, data)?;
         // NOTE: the victim deliberately STAYS in Version::vlogs — registered
         // snapshots at/below S still resolve old versions that point into
         // it. process_retired removes it from the resolution map only once

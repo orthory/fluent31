@@ -140,7 +140,9 @@ vlog_live, vlog_head, vlog_retired[(id, seqno)], discard[(id, bytes)]}`
 with magic/format/CRC framing. Commit ordering, always: table files
 fdatasynced → dir fsync → `MANIFEST-<gen+1>` written + fsynced → dir fsync
 → CURRENT flipped (tmp + fsync + rename + dir fsync) → obsolete files
-dropped. sst/vlog unlinks happen **only in handle `Drop`** after
+dropped, the superseded `MANIFEST-*` generations among them (best effort:
+one that will not go waits for the next commit or the next open).
+sst/vlog unlinks happen **only in handle `Drop`** after
 `mark_obsolete` — pinned Versions (readers, forks) keep paths alive
 for hard-linking; WALs/manifests are deleted by path (never linked).
 
@@ -150,7 +152,9 @@ recovery never deletes a WAL above the floor, which closes the
 rotation-vs-GC data-loss window found in design review.
 
 **Recovery** (`Db::open`):
-1. flock LOCK; load CURRENT → manifest; delete orphaned `MANIFEST-*`.
+1. flock LOCK; load CURRENT → manifest; delete every other `MANIFEST-*`
+   (a newer one is a crashed, never-flipped write; an older one escaped
+   its commit's sweep).
 2. Open all referenced tables (self-describing; manifest stores only ids).
 3. Vlog: open the manifest's live set, then **adopt young files**
    (id ≥ manifest's head id — vlog rotation doesn't flip the manifest);
