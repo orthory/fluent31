@@ -56,6 +56,21 @@ pub(crate) struct ManifestState {
     pub data: ManifestData,
 }
 
+impl ManifestState {
+    /// Publish `data` as the next generation: write and flip it durably, then
+    /// sweep the generations it supersedes so a long-running store never
+    /// accumulates them. A generation newer than this one is a crashed,
+    /// never-flipped write; the open-time sweep owns those.
+    pub fn commit(&mut self, paths: &DbPaths, span: &Span, data: ManifestData) -> Result<()> {
+        let gen = self.gen + 1;
+        manifest::save(paths, gen, &data)?;
+        self.gen = gen;
+        self.data = data;
+        manifest::sweep(paths, span, |stale| stale < gen);
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SnapshotList {
     counts: BTreeMap<SeqNo, usize>,
@@ -1143,10 +1158,7 @@ impl DbInner {
             }
             data.wal_floor = data.wal_floor.max(imm.wal_id + 1);
             data.next_file_id = self.next_file_id.load(Ordering::SeqCst);
-            let gen = m.gen + 1;
-            manifest::save(&self.paths, gen, &data)?;
-            m.gen = gen;
-            m.data = data;
+            m.commit(&self.paths, &self.span, data)?;
 
             let mut s = self.state.write();
             let mut v = s.version.clone_shape();
@@ -1848,10 +1860,7 @@ impl Db {
         }
         let mut data = m.data.clone();
         data.pins.push(info.clone());
-        let gen = m.gen + 1;
-        manifest::save(&self.inner.paths, gen, &data)?;
-        m.gen = gen;
-        m.data = data;
+        m.commit(&self.inner.paths, &self.inner.span, data)?;
         hold.1 = None; // the pin owns the registration now
         info!(parent: &self.inner.span, pin = name, seqno = seq, "pinned");
         Ok(info)
@@ -1867,10 +1876,7 @@ impl Db {
             };
             let mut data = m.data.clone();
             let removed = data.pins.remove(idx);
-            let gen = m.gen + 1;
-            manifest::save(&self.inner.paths, gen, &data)?;
-            m.gen = gen;
-            m.data = data;
+            m.commit(&self.inner.paths, &self.inner.span, data)?;
             removed.seqno
         };
         // release AFTER the removal is durable: a crash in between leaves a
@@ -2180,24 +2186,9 @@ fn open_inner_with(
     resolve_identity(&mut mdata, opts.store_name.as_deref())?;
     let span = store_span(dir, mdata.identity.as_ref());
 
-    // remove orphaned manifests (older gens and pre-flip crashed newer gens)
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for entry in rd.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let Some(g) = name
-                .strip_prefix("MANIFEST-")
-                .and_then(|s| s.parse::<u64>().ok())
-            else {
-                continue;
-            };
-            if g == gen {
-                continue;
-            }
-            let Err(e) = std::fs::remove_file(entry.path()) else { continue };
-            warn!(parent: &span, gen = g, error = %e, "could not delete orphaned manifest");
-        }
-    }
+    // every generation but the live one is stale here: older ones a commit
+    // failed to sweep, newer ones a crash left written but never flipped to
+    manifest::sweep(&paths, &span, |stale| stale != gen);
 
     let mut next_file_id = mdata.next_file_id.max(1);
 
@@ -2507,10 +2498,7 @@ fn open_inner_with(
         data.vlog_live = live_ids;
         data.vlog_head = head_id;
         data.next_file_id = inner.next_file_id.load(Ordering::SeqCst);
-        let gen = m.gen + 1;
-        manifest::save(&inner.paths, gen, &data)?;
-        m.gen = gen;
-        m.data = data;
+        m.commit(&inner.paths, &inner.span, data)?;
         drop(m);
         inner.delete_old_wals(wal_id);
     }

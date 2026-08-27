@@ -136,6 +136,32 @@ fn truncated_table_is_a_clean_error() {
     }
 }
 
+/// Every flush commits a manifest generation; a store that runs for weeks
+/// without reopening must not keep them all.
+#[test]
+fn a_live_store_keeps_only_the_current_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path(), small_opts()).unwrap();
+    for round in 0..5u32 {
+        db.put(k(round), val(round)).unwrap();
+        db.flush().unwrap();
+    }
+    // close, never reopen: a commit in flight on a background thread finishes
+    // (flip, then sweep) before its thread joins, and only open sweeps otherwise
+    drop(db);
+    let manifests = files_with(dir.path(), "MANIFEST-", "");
+    let current = std::fs::read_to_string(dir.path().join("CURRENT")).unwrap();
+    assert_eq!(
+        manifests.len(),
+        1,
+        "stale generations survived their commits: {manifests:?}"
+    );
+    assert_eq!(
+        manifests[0].file_name().unwrap().to_string_lossy(),
+        current.trim()
+    );
+}
+
 #[test]
 fn corrupted_manifest_fails_open() {
     let dir = tempfile::tempdir().unwrap();
