@@ -144,6 +144,9 @@ records, reset wholesale when it exceeds its cap. The replica is read
 through `EdgeReplica::store()`: `get` and `scan`, clamped to the scope;
 an out-of-scope `get` answers `InvalidArgument`. It serves no network
 protocol of its own — the embedding process owns any onward surface.
+The driver logs (`tracing`) its attach, each slice pull and each
+re-sync at `info`, and a `LAGGED` cut, a broken stream or a provenance
+mismatch at `warn`; the server logs each subscription and why it ended.
 
 ## 9. Known limits (deliberate)
 

@@ -4,8 +4,9 @@
 //! the tuning sections are file-only and cover everything the composed
 //! crates expose as configuration: `[engine]` is the full
 //! [`fluent31::Options`] tunable surface, `[graphql]` /
-//! `[replication]` are the per-plane limits, and `[journal]` attaches the
-//! opt-in mutation journal ([`fluent31::journal`]) at its `dir`. An
+//! `[replication]` are the per-plane limits, `[journal]` attaches the
+//! opt-in mutation journal ([`fluent31::journal`]) at its `dir`, and
+//! `[log]` tunes what the process logs (levels come from `RUST_LOG`). An
 //! explicit flag overrides its file value, the file overrides the
 //! built-in default. Unknown keys are an error — a typo must not
 //! silently fall back.
@@ -33,6 +34,9 @@
 //! rotate-bytes = 134217728
 //! compact-when-deltas-exceed = 1.0
 //! compact-min-bytes = 67108864
+//!
+//! [log]
+//! stats-every-secs = 60         # engine stats line per open store; 0 = off
 //!
 //! [engine]
 //! create-if-missing = true
@@ -92,6 +96,7 @@ pub struct FileConfig {
     pub replication: Option<ReplicationSection>,
     pub journal: Option<JournalSection>,
     pub engine: Option<EngineSection>,
+    pub log: Option<LogSection>,
 }
 
 #[derive(Debug, Default, PartialEq, Deserialize)]
@@ -114,6 +119,17 @@ pub struct GraphqlSection {
 pub struct ReplicationSection {
     pub max_frame_bytes: Option<usize>,
     pub ping_every_ms: Option<u64>,
+}
+
+/// What the process logs beyond its events. Levels are not configured
+/// here: `RUST_LOG` is the one switch for them, so a log filter never
+/// needs a restart-with-config to change.
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct LogSection {
+    /// Period of the stats heartbeat (one INFO line per open store plus
+    /// the fork registry's occupancy); `0` turns it off.
+    pub stats_every_secs: Option<u64>,
 }
 
 /// The opt-in mutation journal ([`fluent31::journal`]): the section being
@@ -287,6 +303,7 @@ impl FileConfig {
             replication: self.replication.or(file.replication),
             journal: self.journal.or(file.journal),
             engine: self.engine.or(file.engine),
+            log: self.log.or(file.log),
         }
     }
 
@@ -319,6 +336,11 @@ impl FileConfig {
             }
             if let Some(v) = r.ping_every_ms {
                 c.replication.ping_every = Duration::from_millis(v);
+            }
+        }
+        if let Some(l) = &self.log {
+            if let Some(v) = l.stats_every_secs {
+                c.stats_every = Duration::from_secs(v);
             }
         }
         c
@@ -400,9 +422,13 @@ mod tests {
             compression = "lz4"
             memtable-size = 65536
             vlog-gc-ratio = 0.7
+
+            [log]
+            stats-every-secs = 5
             "#,
         )
         .unwrap();
+        assert_eq!(cfg.log.as_ref().unwrap().stats_every_secs, Some(5));
         assert_eq!(cfg.dir.as_deref(), Some("./data"));
         assert_eq!(cfg.listen.as_ref().unwrap().replication.as_deref(), Some("127.0.0.1:3"));
         assert_eq!(cfg.graphql.as_ref().unwrap().fork_max_open, Some(2));
@@ -422,6 +448,7 @@ mod tests {
         assert!(toml::from_str::<FileConfig>("[engine]\nmemtable-sise = 1").is_err());
         assert!(toml::from_str::<FileConfig>("[engine]\nio-backend = \"turbo\"").is_err());
         assert!(toml::from_str::<FileConfig>("[journal]\nrotate-byte = 1").is_err());
+        assert!(toml::from_str::<FileConfig>("[log]\nlevel = \"info\"").is_err());
     }
 
     #[test]
@@ -511,11 +538,14 @@ mod tests {
             fork-idle-ttl-secs = 60
             [replication]
             ping-every-ms = 500
+            [log]
+            stats-every-secs = 0
             "#,
         )
         .unwrap();
         let c = cfg.server_config();
         let d = crate::ServerConfig::default();
+        assert_eq!(c.stats_every, Duration::ZERO);
         assert_eq!(c.replication_addr, "127.0.0.1:9");
         assert_eq!(c.graphql_addr, d.graphql_addr);
         assert_eq!(c.registry.max_open, 3);

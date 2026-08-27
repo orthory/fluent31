@@ -479,6 +479,17 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
 - `fluent-cli`: interactive shell (get/put/del/scan/count, txns,
   snapshots, install/query/exec, forks, flush/compact/gc/stats) —
   every command prints its latency.
+- Diagnostics: the engine emits `tracing` events and never installs a
+  subscriber (the binaries do; an embedder brings its own). Each open
+  store owns one `db` span (`dir`, `store`, `instance`) held in
+  `DbInner`, and every engine event names it as an explicit `parent:`
+  rather than relying on a thread-local entered span — so events from
+  background threads, caller threads, and every fork instance a server
+  holds open all carry their store without any thread ever entering a
+  span. Write stalls are logged per episode (a gauge counts parked
+  writers; the first in and the last out log), and `set_bg_error` logs
+  every failure even though its slot keeps only the first. Level policy
+  and the heartbeat: "Monitoring" in the usage docs.
 - Cargo features: `wasm` (default) gates wasmtime; `--no-default-features`
   builds the pure storage engine (used to cross-check the uring backend).
 - Group commit (committer-thread pipeline): `SyncMode::Always` batch

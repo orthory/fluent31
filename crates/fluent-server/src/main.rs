@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use fluent31::{Db, Journal, Options, SyncMode};
 use fluent_server::{parse_sync, FileConfig, GraphqlSection, ListenSection, Server, ServerConfig};
+use tracing::{error, info, warn};
 
 const USAGE: &str = "\
 usage: fluent-server <db-dir> [--config FILE] [--store-name NAME]
@@ -20,15 +21,30 @@ serves every plane of one store in one process:
 
 --config FILE reads TOML settings, kebab-case: top-level dir / store-name /
   sync, [listen] graphql/replication, and the file-only tuning
-  sections [graphql] [replication] [journal] [engine] — [engine]
+  sections [graphql] [replication] [journal] [engine] [log] — [engine]
   covers every fluent31::Options tunable, [journal] dir attaches the
-  opt-in mutation journal (rebuild: fluent-cli journal-rebuild). Explicit
-  flags override the file. Annotated example:
-  crates/fluent-server/src/config.rs";
+  opt-in mutation journal (rebuild: fluent-cli journal-rebuild), [log]
+  sets the stats heartbeat period. Explicit flags override the file.
+  Annotated example: crates/fluent-server/src/config.rs
+
+logs go to stderr; RUST_LOG sets the level (default info).";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
     ExitCode::FAILURE
+}
+
+/// Diagnostics go to stderr as structured lines; `RUST_LOG` overrides the
+/// default level (`info`), per crate if wanted: `RUST_LOG=fluent31=debug`.
+fn init_logging() {
+    use std::io::IsTerminal;
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
 }
 
 /// The `[listen]` slots the address flags write into.
@@ -37,6 +53,7 @@ fn listen(cli: &mut FileConfig) -> &mut ListenSection {
 }
 
 fn main() -> ExitCode {
+    init_logging();
     let mut cli = FileConfig::default();
     let mut config_path: Option<String> = None;
     let mut args = std::env::args().skip(1);
@@ -85,7 +102,7 @@ fn main() -> ExitCode {
         Some(path) => match FileConfig::load(std::path::Path::new(path)) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("fluent-server: --config {path}: {e}");
+                error!(config = path, error = %e, "cannot load config");
                 return ExitCode::FAILURE;
             }
         },
@@ -94,7 +111,7 @@ fn main() -> ExitCode {
     if let Some(s) = &file.sync {
         if parse_sync(s).is_none() {
             let path = config_path.as_deref().unwrap_or_default();
-            eprintln!("fluent-server: --config {path}: invalid sync {s:?} (always | never | periodic:<ms>)");
+            error!(config = path, sync = s, "invalid sync mode (always | never | periodic:<ms>)");
             return ExitCode::FAILURE;
         }
     }
@@ -117,7 +134,7 @@ fn main() -> ExitCode {
         Some(j) => match &j.dir {
             Some(d) => Some((d.clone(), j.config())),
             None => {
-                eprintln!("fluent-server: [journal] section needs dir");
+                error!("[journal] section needs dir");
                 return ExitCode::FAILURE;
             }
         },
@@ -126,7 +143,7 @@ fn main() -> ExitCode {
     let db = match Db::open(&dir, opts.clone()) {
         Ok(d) => Arc::new(d),
         Err(e) => {
-            eprintln!("fluent-server: cannot open {dir}: {e}");
+            error!(dir, error = %e, "cannot open store");
             return ExitCode::FAILURE;
         }
     };
@@ -135,12 +152,9 @@ fn main() -> ExitCode {
     // flush) runs after serve returns, before the last Db handle goes down.
     let _journal = match journal {
         Some((jdir, jcfg)) => match Journal::attach_with_config(db.clone(), &jdir, jcfg) {
-            Ok(j) => {
-                println!("fluent-server: journal      {jdir} (mutation journal — rebuild: fluent-cli journal-rebuild)");
-                Some(j)
-            }
+            Ok(j) => Some(j),
             Err(e) => {
-                eprintln!("fluent-server: cannot attach journal at {jdir}: {e}");
+                error!(dir = jdir, error = %e, "cannot attach journal");
                 return ExitCode::FAILURE;
             }
         },
@@ -176,33 +190,32 @@ async fn serve(db: Arc<Db>, dir: String, opts: Options, cfg: ServerConfig) -> Ex
     let server = match Server::start(db.clone(), &dir, opts, cfg).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("fluent-server: {e}");
+            error!(error = %e, "cannot start");
             return ExitCode::FAILURE;
         }
     };
-    println!(
-        "fluent-server: graphql      http://{}/graphql (GraphiQL at /, forks at /graphql/<instanceId>)",
-        server.graphql_addr
+    info!(
+        listen = %server.graphql_addr,
+        "serving graphql: /graphql (GraphiQL at /, forks at /graphql/<instanceId>)"
     );
     match (server.replication_addr, db.identity()) {
-        (Some(addr), Some(id)) => println!(
-            "fluent-server: replication  {addr} — store {:?} instance {} (replicas and edge caches join here, REPLICATION.md)",
-            id.name,
-            id.instance_hex()
+        (Some(addr), Some(id)) => info!(
+            listen = %addr,
+            store = %id.name,
+            instance = %id.instance_hex(),
+            "serving replication: replicas and edge caches join here (REPLICATION.md)"
         ),
-        _ => println!(
-            "fluent-server: replication  off — unnamed store; pass --store-name NAME to open the join point"
-        ),
+        _ => info!("replication off: unnamed store; pass --store-name NAME to open the join point"),
     }
 
     // First signal: stop accepting and drain in-flight GraphQL requests
     // (in-flight replication connections are severed at exit; the WAL
     // keeps the store consistent). Second signal: exit immediately.
     any_signal().await;
-    eprintln!("fluent-server: shutting down — draining in-flight requests (signal again to exit immediately)");
+    info!("shutting down: draining in-flight requests (signal again to exit immediately)");
     tokio::spawn(async {
         any_signal().await;
-        eprintln!("fluent-server: forced exit");
+        warn!("forced exit");
         std::process::exit(130);
     });
     server.shutdown().await;

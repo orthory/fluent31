@@ -40,6 +40,8 @@ replica.master();                            // StoreIdentity
 
 The library surface is `fluent_replication::{ReplServer, ReplServerConfig, ReplClient, EdgeReplica, EdgeReplicaConfig, MasterInfo}` and, on the engine side, `fluent31::edge::{EdgeStore, EdgeConfig, EdgeStats, ValueFetcher}`. Lower level: `ReplClient::connect(addr)` gives `(client, MasterInfo { name, instance_id, visible_seqno })`, with `snapshot`, `fetch_table_chunk` and `fetch_value`.
 
+A replica logs its attach, every slice pull and every re-sync at `info`; a lag cut, a broken stream and a changed master identity are `warn`. The master logs each stream it serves and why it ended.
+
 ## Store identity
 
 A store can carry an operator-chosen name. From the name the engine mints a deterministic 128-bit instance id, and forks and restores mint new ones. Replication verifies the id on every connection, so a replaced master invalidates every replica at once. Under the server, every fork is an instance addressed at `/graphql/<instanceId>`. The id is an address, not a credential.

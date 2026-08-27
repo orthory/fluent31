@@ -54,6 +54,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
+use tracing::{debug, info, warn};
 
 use crate::batch::{BatchOp, WriteBatch};
 use crate::coding::{put_len_prefixed, put_uvarint, Reader};
@@ -372,7 +373,9 @@ impl TriggerState {
             .is_some_and(|s| Instant::now() < s.not_before)
     }
 
-    fn record_failure(&self, name: &str, err: &Error) {
+    /// Returns the failure streak and the backoff it earned; the caller
+    /// reports them with the store's context.
+    fn record_failure(&self, name: &str, err: &Error) -> (u32, Duration) {
         let mut msg = err.to_string();
         if msg.len() > 500 {
             let mut cut = 500;
@@ -394,6 +397,7 @@ impl TriggerState {
         let backoff = Duration::from_millis(100 << (s.failures - 1).min(6));
         s.not_before = Instant::now() + backoff;
         s.last_error = msg;
+        (s.failures, backoff)
     }
 
     fn clear_status(&self, name: &str) {
@@ -470,6 +474,7 @@ pub(crate) fn create_trigger(
     let mut next = defs.as_ref().clone();
     next.push(def);
     *defs = Arc::new(next);
+    info!(parent: &db.span, trigger = name, module, mode = mode.as_str(), "trigger created");
     Ok(mode)
 }
 
@@ -492,6 +497,7 @@ pub(crate) fn delete_trigger(db: &DbInner, name: &str) -> Result<()> {
     b.delete(sys_trigger_key(name));
     db.write_batch_unchecked(b)?;
     while clear_queue_chunk(db, name)? {}
+    info!(parent: &db.span, trigger = name, "trigger deleted");
     Ok(())
 }
 
@@ -612,6 +618,7 @@ fn runner_pass(db: &Arc<DbInner>) -> bool {
                 // deleted trigger with residual events (create/delete race
                 // or a crash mid-delete): garbage-collect them
                 if clear_queue_chunk(db, &name).unwrap_or(false) {
+                    debug!(parent: &db.span, trigger = %name, "cleared residual events of a deleted trigger");
                     did = true;
                 }
             }
@@ -626,7 +633,18 @@ fn runner_pass(db: &Arc<DbInner>) -> bool {
                     }
                     Ok(false) => {}
                     Err(Error::Closed) => return did,
-                    Err(e) => db.triggers.record_failure(&name, &e),
+                    Err(e) => {
+                        let (failures, backoff) = db.triggers.record_failure(&name, &e);
+                        warn!(
+                            parent: &db.span,
+                            trigger = %name,
+                            module = %def.module,
+                            failures,
+                            backoff_ms = backoff.as_millis() as u64,
+                            error = %e,
+                            "trigger run failed; backing off"
+                        );
+                    }
                 }
             }
         }
@@ -645,6 +663,7 @@ fn drain_one(db: &Arc<DbInner>, def: &TriggerDef) -> Result<bool> {
         return Ok(false);
     }
     crate::wasm::execute_system(db, &def.module, &input, &consume, def.mode.entry())?;
+    debug!(parent: &db.span, trigger = %def.name, module = %def.module, events = consume.len(), "trigger drained a batch");
     Ok(true)
 }
 

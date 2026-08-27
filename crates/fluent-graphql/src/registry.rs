@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fluent31::{Db, Options};
+use tracing::info;
 
 use crate::SchemaManager;
 
@@ -128,6 +129,7 @@ impl InstanceRegistry {
 
         let shared = self.shared.clone();
         let id_owned = id.to_string();
+        let started = Instant::now();
         let mgr = tokio::task::spawn_blocking(move || {
             let path = find_fork_dir(&shared.root_dir, &id_owned)
                 .map_err(ResolveError::Engine)?
@@ -148,6 +150,13 @@ impl InstanceRegistry {
                 last_used: Instant::now(),
             },
         );
+        info!(
+            instance = id,
+            dir = %mgr.db.path().display(),
+            forks_open = open.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "fork instance opened"
+        );
         // LRU past the cap; the entry just inserted is the most recent
         while open.len() > self.shared.cfg.max_open {
             let Some(oldest) = open
@@ -158,6 +167,7 @@ impl InstanceRegistry {
                 break;
             };
             open.remove(&oldest);
+            info!(instance = %oldest, max_open = self.shared.cfg.max_open, "fork instance closed: over the open cap");
         }
         Ok(mgr)
     }
@@ -175,16 +185,40 @@ impl InstanceRegistry {
     /// closing here never severs an executing operation.
     pub fn evict_idle(&self) {
         let ttl = self.shared.cfg.idle_ttl;
-        self.shared
-            .open
-            .lock()
-            .unwrap()
-            .retain(|_, e| e.last_used.elapsed() < ttl);
+        self.shared.open.lock().unwrap().retain(|id, e| {
+            let idle = e.last_used.elapsed();
+            let keep = idle < ttl;
+            if !keep {
+                info!(instance = %id, idle_secs = idle.as_secs(), "fork instance closed: idle");
+            }
+            keep
+        });
     }
 
     /// Open fork instances (diagnostics/tests).
     pub fn open_count(&self) -> usize {
         self.shared.open.lock().unwrap().len()
+    }
+
+    /// The periodic stats heartbeat: one line per open store (primary and
+    /// every open fork — each is a full engine with its own memory) plus
+    /// the registry's own occupancy. The server calls this on a timer.
+    pub fn log_stats(&self) {
+        // the map lock guards the map only: take the handles, release it,
+        // then make the engine calls
+        let forks: Vec<Arc<SchemaManager>> = self
+            .shared
+            .open
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.mgr.clone())
+            .collect();
+        self.shared.primary.db.log_stats();
+        for mgr in &forks {
+            mgr.db.log_stats();
+        }
+        info!(forks_open = forks.len(), max_open = self.shared.cfg.max_open, "fork registry");
     }
 }
 

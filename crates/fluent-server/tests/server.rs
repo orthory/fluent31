@@ -20,6 +20,15 @@ fn ephemeral_cfg() -> ServerConfig {
     }
 }
 
+/// The value of the last `key=` field on one log line. The binary logs
+/// to stderr in tracing's default text format: fields trail the message
+/// as `key=value`, and a span's own fields appear first inside `db{…}`,
+/// so the event's field is the last occurrence.
+fn log_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let at = line.rfind(&format!(" {key}="))? + key.len() + 2;
+    line[at..].split(|c: char| c.is_whitespace() || c == '}').next()
+}
+
 async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !cond() {
@@ -208,15 +217,15 @@ memtable-size = 4194304
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-server"))
         .arg("--config")
         .arg(&cfg_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::BufRead;
-        for line in std::io::BufReader::new(stdout).lines() {
+        for line in std::io::BufReader::new(stderr).lines() {
             let Ok(line) = line else { break };
             if tx.send(line).is_err() {
                 break;
@@ -224,7 +233,7 @@ memtable-size = 4194304
         }
     });
 
-    // the binary announces each plane's bound address on stdout
+    // the binary announces each plane's bound address as a log line
     let mut graphql: Option<SocketAddr> = None;
     let mut replication_line = String::new();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -234,15 +243,14 @@ memtable-size = 4194304
             child.kill().ok();
             panic!("binary did not announce its planes in time");
         };
-        if let Some(rest) = line.strip_prefix("fluent-server: graphql") {
-            let addr = rest.trim_start().strip_prefix("http://").unwrap();
-            graphql = Some(addr[..addr.find("/graphql").unwrap()].parse().unwrap());
-        } else if line.starts_with("fluent-server: replication") {
+        if line.contains("serving graphql") {
+            graphql = Some(log_field(&line, "listen").unwrap().parse().unwrap());
+        } else if line.contains("serving replication") {
             replication_line = line;
         }
     }
     assert!(
-        replication_line.contains("\"cfg-test\""),
+        log_field(&replication_line, "store") == Some("cfg-test"),
         "store name not sourced from the config file: {replication_line}"
     );
 
@@ -319,15 +327,15 @@ dir = "{}"
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent-server"))
         .arg("--config")
         .arg(&cfg_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::BufRead;
-        for line in std::io::BufReader::new(stdout).lines() {
+        for line in std::io::BufReader::new(stderr).lines() {
             let Ok(line) = line else { break };
             if tx.send(line).is_err() {
                 break;
@@ -345,10 +353,9 @@ dir = "{}"
             child.kill().ok();
             panic!("binary did not announce journal + graphql in time");
         };
-        if let Some(rest) = line.strip_prefix("fluent-server: graphql") {
-            let addr = rest.trim_start().strip_prefix("http://").unwrap();
-            graphql = Some(addr[..addr.find("/graphql").unwrap()].parse().unwrap());
-        } else if line.starts_with("fluent-server: journal") {
+        if line.contains("serving graphql") {
+            graphql = Some(log_field(&line, "listen").unwrap().parse().unwrap());
+        } else if line.contains("journal attached") {
             journal_line = line;
         }
     }

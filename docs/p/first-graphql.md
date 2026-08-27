@@ -10,9 +10,12 @@ Make sure the shell from the previous step has exited: it holds the store's lock
 
 ```
 $ cargo run -p fluent-server -- ./data --store-name prod
-graphql      http://127.0.0.1:8317/graphql   (GraphiQL at /)
-replication  tcp 127.0.0.1:8428
+INFO db{dir=./data store=prod instance=6065…}: fluent31::db: store opened backend="io_uring" seqno=0 …
+INFO fluent_server: serving graphql: /graphql (GraphiQL at /, …) listen=127.0.0.1:8317
+INFO fluent_server: serving replication: … listen=127.0.0.1:8428 store=prod instance=6065…
 ```
+
+The log is stderr; `RUST_LOG` sets the level ([Operations](operations.md)).
 
 `--store-name` is persisted in the store on first use, so it is passed once and then omitted. It fixes the store's identity, and it is what opens the replication join point; without a name the GraphQL plane still serves and that port stays closed.
 

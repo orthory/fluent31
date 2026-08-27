@@ -16,6 +16,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
+
+use tracing::{debug, info};
 
 use crate::batch::BatchOp;
 use crate::db::{DbInner, RetiredVlog};
@@ -209,7 +212,15 @@ fn pick(db: &Arc<DbInner>, force: bool) -> Option<Job> {
 }
 
 fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
+    let started = Instant::now();
     let watermark = db.watermark();
+    let input_runs = job.inputs.len();
+    let input_tables: usize = job.inputs.iter().map(|r| r.tables.len()).sum();
+    let input_bytes: u64 = job.inputs.iter().map(|r| r.size()).sum();
+    let kind = match &job.kind {
+        JobKind::Tier => "tier",
+        JobKind::BottomSplice { .. } => "bottom-splice",
+    };
 
     let children: Vec<Box<dyn InternalIterator>> = job
         .inputs
@@ -300,6 +311,9 @@ fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
     }
     crate::io::sync_dir(&db.paths.dir)?;
 
+    let out_tables = tables.len();
+    let out_bytes: u64 = tables.iter().map(|t| t.size).sum();
+    let discard_bytes: u64 = discard.values().sum();
     let output = if tables.is_empty() {
         None
     } else {
@@ -311,6 +325,20 @@ fn run_job(db: &Arc<DbInner>, job: Job) -> Result<()> {
 
     install(db, &job, output, discard)?;
     db.progress_signal.notify();
+    info!(
+        parent: &db.span,
+        level = job.level,
+        target = job.target,
+        kind,
+        input_runs,
+        input_tables,
+        input_bytes,
+        out_tables,
+        out_bytes,
+        discard_bytes,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "compacted"
+    );
     Ok(())
 }
 
@@ -480,10 +508,12 @@ fn process_retired(db: &Arc<DbInner>) -> Result<bool> {
         }
         s.version = Arc::new(v);
     }
+    let released: Vec<u64> = ready.iter().map(|r| r.id).collect();
     for r in ready {
         // actual unlink happens when the last pinned Version drops its Arc
         r.handle.mark_obsolete();
     }
+    info!(parent: &db.span, vlogs = ?released, "released retired value-log files");
     Ok(true)
 }
 
@@ -579,6 +609,7 @@ fn sample_victim(db: &Arc<DbInner>) -> Result<Option<(u64, Arc<VlogFileHandle>)>
         }
     }
     let ratio = dead as f64 / sampled_len as f64;
+    debug!(parent: &db.span, vlog = id, sampled_bytes = sampled_len, dead_ratio = ratio, "sampled value-log liveness");
     if ratio >= db.opts.vlog_gc_ratio {
         Ok(Some((id, handle)))
     } else {
@@ -594,9 +625,10 @@ fn sample_victim(db: &Arc<DbInner>) -> Result<Option<(u64, Arc<VlogFileHandle>)>
 pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
     let _g = db.gc_mu.lock();
     db.check_bg_error()?;
+    let started = Instant::now();
 
     // ---- pick a victim ----------------------------------------------------
-    let (victim_id, handle) = {
+    let (victim_id, handle, picked_by) = {
         let m = db.manifest.lock();
         let s = db.state.read();
         let head = s.version.vlog_head_id;
@@ -629,10 +661,10 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
                 // file's actual liveness per pass.
                 match sample_victim(db)? {
                     None => return Ok(None),
-                    Some(v) => v,
+                    Some((id, h)) => (id, h, "sample"),
                 }
             }
-            Some((id, _)) => (id, s.version.vlogs.get(&id).unwrap().clone()),
+            Some((id, _)) => (id, s.version.vlogs.get(&id).unwrap().clone(), "discard-stats"),
         }
     };
 
@@ -640,6 +672,9 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
     let (mut records, _valid) = vlog::scan_records(handle.file.as_ref())?;
     // key order gives the LSM liveness probes locality
     records.sort_by(|a, b| a.2.cmp(&b.2));
+    let scanned = records.len();
+    let mut relocated: usize = 0;
+    let mut relocated_bytes: u64 = 0;
 
     for chunk in records.chunks(256) {
         let mut ws = db.write_mu.lock();
@@ -656,6 +691,8 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
                 continue; // relocated or overwritten already — garbage now
             }
             let value = vlog::read_value(&handle, &p, key, None)?;
+            relocated += 1;
+            relocated_bytes += value.len() as u64;
             ops.push(BatchOp::Put {
                 key: key.clone(),
                 value,
@@ -702,6 +739,17 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
         retired_at,
         handle,
     });
+    info!(
+        parent: &db.span,
+        vlog = victim_id,
+        picked_by,
+        scanned,
+        relocated,
+        relocated_bytes,
+        retired_at,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "value-log gc: live records relocated, file retired"
+    );
     Ok(Some(victim_id))
 }
 

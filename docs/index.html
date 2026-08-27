@@ -837,8 +837,10 @@ fluent31&gt; help</pre></div>
 
         <p>Make sure the shell from the previous step has exited: it holds the store's lock, and the server needs it.</p>
         <div class="codeblock"><pre>$ cargo run -p fluent-server -- ./data <span class="w">--store-name</span> prod
-graphql      http://127.0.0.1:8317/graphql   (GraphiQL at /)
-replication  tcp 127.0.0.1:8428</pre></div>
+INFO db{dir=./data store=prod instance=6065…}: fluent31::db: store opened backend="io_uring" seqno=0 …
+INFO fluent_server: serving graphql: /graphql (GraphiQL at /, …) listen=127.0.0.1:8317
+INFO fluent_server: serving replication: … listen=127.0.0.1:8428 store=prod instance=6065…</pre></div>
+        <p>The log is stderr; <code>RUST_LOG</code> sets the level (<a href="#operations">Operations</a>).</p>
         <p><code>--store-name</code> is persisted in the store on first use, so it is passed once and then omitted. It fixes the store's identity, and it is what opens the replication join point; without a name the GraphQL plane still serves and that port stays closed.</p>
         <p>Open <a href="http://127.0.0.1:8317/">http://127.0.0.1:8317/</a> for GraphiQL, which has the whole schema and its documentation built in. Everything below works there or over <code>curl</code>.</p>
 
@@ -1362,7 +1364,7 @@ fluent_guest::scan_prefix(prefix: &amp;[u8]) -&gt; Result&lt;Scan, i32&gt;</pre>
         <h2>Input, output and logging</h2>
         <div class="codeblock"><pre>fluent_guest::input() -&gt; Vec&lt;u8&gt;    <span class="c">// the whole input blob</span>
 fluent_guest::output(&amp;[u8])         <span class="c">// APPENDS to the output; call repeatedly to stream</span>
-fluent_guest::log(&amp;str)             <span class="c">// stderr, only when FLUENT31_WASM_LOG is set</span></pre></div>
+fluent_guest::log(&amp;str)             <span class="c">// a debug event under target fluent31::wasm::guest</span></pre></div>
         <p>The entry macros call <code>input()</code> and <code>output()</code> for you; reach for them directly when the entry is written by hand or when the output is built in pieces. Logs are for debugging only — they are rate-capped and invisible unless the host asks for them, so results never travel that way.</p>
 
         <h2>Trigger input</h2>
@@ -1425,7 +1427,7 @@ input_read : (dst: i32, cap: i32, off: i32) -&gt; i32</pre></div>
         <div class="codeblock"><pre>output_write : (ptr: i32, len: i32) -&gt; i32</pre></div>
         <p><strong>Appends</strong> <code>len</code> bytes to the invocation's output. Returns <code>0</code>, or <code>ENOSPC</code> once the total would exceed <code>max_wasm_output</code>. Check the return value wherever truncated output would be a correctness bug rather than a cosmetic one.</p>
         <div class="codeblock"><pre>log : (level: i32, ptr: i32, len: i32) -&gt; i32</pre></div>
-        <p>Debug logging, capped at <code>max_wasm_log</code> total bytes and then <code>ENOSPC</code>. The host prints to stderr only when <code>FLUENT31_WASM_LOG</code> is set. Never use logs to communicate results.</p>
+        <p>Debug logging, capped at <code>max_wasm_log</code> total bytes and then <code>ENOSPC</code>. The host emits each line as a <code>debug</code> event under the <code>fluent31::wasm::guest</code> target (<code>RUST_LOG=fluent31::wasm::guest=debug</code> to see them). Never use logs to communicate results.</p>
 
         <h2>Point access</h2>
         <div class="codeblock"><pre>get            : (kptr, klen, off, vbuf, vcap: i32) -&gt; i64
@@ -1578,7 +1580,7 @@ scan_close      : (h: i32) -&gt; i32   <span class="c">// free the handle</span>
         <p>A trigger consumer's failure is not returned to anyone — the write that caused it has already committed. It surfaces as a stalled queue: <code>triggers</code> shows a growing <code>pending</code> and a <code>lastError</code>, and the runner keeps retrying with backoff until the module is fixed or replaced. <a href="#triggers">Triggers</a> covers the drain loop.</p>
 
         <h2>Seeing inside a module</h2>
-        <p>Set <code>FLUENT31_WASM_LOG</code> and the host prints <code>fluent_guest::log</code> output to stderr; leave it unset and the calls are cheap and silent. Logs are capped at <code>max_wasm_log</code> per invocation, so they are a debugging channel and never a results channel. Beyond that the tools are the ordinary ones: exercise the module against a <a href="#forks">fork</a> of real data, and pin the invariant with a test that runs the executor concurrently — <a href="#testing">Testing</a> has the harness.</p>
+        <p>Run with <code>RUST_LOG=fluent31::wasm::guest=debug</code> and the host emits <code>fluent_guest::log</code> output as log lines; otherwise the calls are cheap and silent. Logs are capped at <code>max_wasm_log</code> per invocation, so they are a debugging channel and never a results channel. Beyond that the tools are the ordinary ones: exercise the module against a <a href="#forks">fork</a> of real data, and pin the invariant with a test that runs the executor concurrently — <a href="#testing">Testing</a> has the harness.</p>
       </article>
       <!-- ============================================================ -->
       <article data-page="embedded-api">
@@ -1685,7 +1687,7 @@ db.flush()?;         <span class="c">// freeze the memtable and wait until it is
 db.compact_all()?;   <span class="c">// compact until no trigger fires</span>
 db.gc_vlog()?;       <span class="c">// one value-log GC pass; Ok(Some(file_id)) if a file was retired</span>
 <span class="k">let</span> s: DbStats = db.stats();</pre></div>
-        <p><code>DbStats</code> has <code>backend</code> (<code>"io_uring"</code> or <code>"std"</code>), <code>visible_seqno</code>, <code>memtable_bytes</code>, <code>immutable_memtables</code>, <code>levels</code> as a <code>Vec&lt;(runs, files, bytes)&gt;</code>, <code>vlog_files</code>, <code>vlog_retired</code> (retired files waiting on the deletion gates), <code>discard_bytes</code> (value-log bytes known to be dead), <code>cache_hits</code>, <code>cache_misses</code>, <code>commit_groups</code>, <code>commit_batches</code> (the difference from <code>commit_groups</code> is how many fsyncs group commit saved) and <code>wal_syncs</code>.</p>
+        <p><code>DbStats</code> has <code>backend</code> (<code>"io_uring"</code> or <code>"std"</code>), <code>visible_seqno</code>, <code>memtable_bytes</code>, <code>immutable_memtables</code>, <code>levels</code> as a <code>Vec&lt;(runs, files, bytes)&gt;</code>, <code>vlog_files</code>, <code>vlog_retired</code> (retired files waiting on the deletion gates), <code>discard_bytes</code> (value-log bytes known to be dead), <code>cache_hits</code>, <code>cache_misses</code>, <code>commit_groups</code>, <code>commit_batches</code> (the difference from <code>commit_groups</code> is how many fsyncs group commit saved), <code>wal_syncs</code>, <code>subscriptions</code> (live stream subscriptions, each buffering up to <code>sub_queue_bytes</code>) and <code>snapshots</code> (registered snapshots — explicit, transactions, pins and subscription holds — every one a GC hold).</p>
         <p>Compaction and value-log GC run on their own on background threads. The manual calls exist for tests, benchmarks and "reclaim now".</p>
 
         <h2>Modules and triggers</h2>
@@ -2040,8 +2042,8 @@ fluent-cli journal-rebuild &lt;journal-dir&gt; &lt;dest-dir&gt;</pre></div>
             <tr><td>replication</td><td><code>127.0.0.1:8428</code></td><td>the join point for replicas and edge caches; opens only on a named store</td></tr>
           </tbody>
         </table></div>
-        <p>The store directory is flocked, so the planes cannot be split across processes. Server mode is how they share one handle. <code>--store-name</code> is persisted in the store, so pass it once. Without a name, graphql serves and the join point stays closed; the startup banner says so.</p>
-        <p>On the first SIGINT or SIGTERM the server stops accepting and drains in-flight GraphQL requests, then the process exits and open replication connections drop (the WAL keeps the store consistent). A second signal exits immediately. If the engine degrades (<code>Error::Background</code>), GraphQL answers <code>BACKGROUND</code> and replication answers <code>ERR</code>; restart the process.</p>
+        <p>The store directory is flocked, so the planes cannot be split across processes. Server mode is how they share one handle. <code>--store-name</code> is persisted in the store, so pass it once. Without a name, graphql serves and the join point stays closed; the log says so.</p>
+        <p>On the first SIGINT or SIGTERM the server stops accepting and drains in-flight GraphQL requests, then the process exits and open replication connections drop (the WAL keeps the store consistent). A second signal exits immediately. The log (stderr; <code>RUST_LOG</code> sets the level — <a href="#operations">Operations</a>) reports each bound address as it comes up and, for a named store, its name and instance id; every flush, compaction, fork and journal event follows at <code>info</code>, with a stats heartbeat every 60 s. If the engine degrades (<code>Error::Background</code>), GraphQL answers <code>BACKGROUND</code> and replication answers <code>ERR</code>; restart the process.</p>
         <div class="note"><p><span class="lbl">Exposure.</span>Every plane defaults to loopback and speaks plain TCP or HTTP with no authentication. To expose one, bind it explicitly and put TLS and access control in front: a reverse proxy for GraphQL, a network boundary for replication.</p></div>
 
         <h2>Config file</h2>
@@ -2069,6 +2071,9 @@ rotate-bytes = 134217728
 compact-when-deltas-exceed = 1.0
 compact-min-bytes = 67108864
 
+[log]
+stats-every-secs = 60         <span class="c"># stats heartbeat per open store; 0 = off</span>
+
 [engine]                      <span class="c"># every fluent31::Options tunable, kebab-case</span>
 create-if-missing = true
 wasm-enabled = true
@@ -2079,7 +2084,7 @@ memtable-size = 8388608
 
         <h2>Standalone planes</h2>
         <p>Each plane also runs on its own, with the same defaults:</p>
-        <div class="codeblock"><pre>fluent-graphql &lt;db-dir&gt; [<span class="w">--listen</span> ADDR:PORT] [<span class="w">--sync</span> ..] [<span class="w">--max-body-bytes</span> N] [<span class="w">--journal</span> DIR ...]
+        <div class="codeblock"><pre>fluent-graphql &lt;db-dir&gt; [<span class="w">--listen</span> ADDR:PORT] [<span class="w">--sync</span> ..] [<span class="w">--max-body-bytes</span> N] [<span class="w">--journal</span> DIR ...] [<span class="w">--stats-every-secs</span> N]
 fluent-graphql <span class="w">--print-schema</span>                 <span class="c"># the base SDL (built-ins only)</span>
 fluent-replication &lt;db-dir&gt; [<span class="w">--store-name</span> NAME] [<span class="w">--listen</span> ADDR:PORT]</pre></div>
         <p>Only one of them can hold the store at a time. <code>fluent-graphql</code> refuses <code>--journal-*</code> tuning flags without <code>--journal DIR</code>.</p>
@@ -2092,8 +2097,8 @@ fluent-replication &lt;db-dir&gt; [<span class="w">--store-name</span> NAME] [<s
 server.graphql_addr; server.replication_addr;   <span class="c">// replication_addr: None when unnamed</span>
 server.db();
 server.shutdown().<span class="k">await</span>;</pre></div>
-        <p><code>ServerConfig</code> holds <code>graphql_addr</code>, <code>replication_addr</code>, <code>max_body_bytes</code>, <code>registry: RegistryConfig { max_open, idle_ttl }</code> and <code>replication: ReplServerConfig { max_frame, ping_every }</code>. Nothing is served unless every bind succeeds; failures come back as <code>StartError::{Engine, Bind}</code>. The TOML loader is public too (<code>FileConfig::load</code>, <code>overlay</code>, <code>server_config</code>, <code>engine_options</code>, <code>parse_sync</code>).</p>
-        <p>For the GraphQL plane alone: <code>SchemaManager::new(db)</code>, then <code>InstanceRegistry::new(..)</code>, then <code>fluent_graphql::router(registry, max_body)</code>, which is an <code>axum::Router</code>. Call <code>registry.evict_idle()</code> periodically; the binaries tick every 60 seconds. For replication: <code>ReplServer::new(db, cfg)?</code> fails with <code>InvalidArgument</code> on an unnamed store; then <code>.serve(listener)</code>.</p>
+        <p><code>ServerConfig</code> holds <code>graphql_addr</code>, <code>replication_addr</code>, <code>max_body_bytes</code>, <code>registry: RegistryConfig { max_open, idle_ttl }</code>, <code>replication: ReplServerConfig { max_frame, ping_every }</code> and <code>stats_every</code> (the heartbeat period; 60 s, zero = off). Nothing is served unless every bind succeeds; failures come back as <code>StartError::{Engine, Bind}</code>. The TOML loader is public too (<code>FileConfig::load</code>, <code>overlay</code>, <code>server_config</code>, <code>engine_options</code>, <code>parse_sync</code>).</p>
+        <p>For the GraphQL plane alone: <code>SchemaManager::new(db)</code>, then <code>InstanceRegistry::new(..)</code>, then <code>fluent_graphql::router(registry, max_body)</code>, which is an <code>axum::Router</code>. Call <code>registry.evict_idle()</code> periodically; the binaries tick every 60 seconds. The stats heartbeat is <code>fluent_graphql::stats_heartbeat(registry, every)</code>, a future to spawn. For replication: <code>ReplServer::new(db, cfg)?</code> fails with <code>InvalidArgument</code> on an unnamed store; then <code>.serve(listener)</code>.</p>
       </article>
       <!-- ============================================================ -->
       <article data-page="replication">
@@ -2127,6 +2132,8 @@ replica.store().stats();                     <span class="c">// EdgeStats</span>
 replica.master();                            <span class="c">// StoreIdentity</span></pre></div>
         <p>The library surface is <code>fluent_replication::{ReplServer, ReplServerConfig, ReplClient, EdgeReplica, EdgeReplicaConfig, MasterInfo}</code> and, on the engine side, <code>fluent31::edge::{EdgeStore, EdgeConfig, EdgeStats, ValueFetcher}</code>. Lower level: <code>ReplClient::connect(addr)</code> gives <code>(client, MasterInfo { name, instance_id, visible_seqno })</code>, with <code>snapshot</code>, <code>fetch_table_chunk</code> and <code>fetch_value</code>.</p>
 
+        <p>A replica logs its attach, every slice pull and every re-sync at <code>info</code>; a lag cut, a broken stream and a changed master identity are <code>warn</code>. The master logs each stream it serves and why it ended.</p>
+
         <h2>Store identity</h2>
         <p>A store can carry an operator-chosen name. From the name the engine mints a deterministic 128-bit instance id, and forks and restores mint new ones. Replication verifies the id on every connection, so a replaced master invalidates every replica at once. Under the server, every fork is an instance addressed at <code>/graphql/&lt;instanceId&gt;</code>. The id is an address, not a credential.</p>
       </article>
@@ -2159,15 +2166,29 @@ replica.master();                            <span class="c">// StoreIdentity</s
             <tr><td><code>sub_queue_bytes</code></td><td>subscribers are bursty</td><td>memory is tight</td></tr>
           </tbody>
         </table></div>
-        <p>Writers stall rather than fail when frozen memtables exceed <code>max_immutable_memtables</code> or L0 exceeds <code>l0_stall_trigger</code>. Sustained stalls mean compaction cannot keep up.</p>
+        <p>Writers stall rather than fail when frozen memtables exceed <code>max_immutable_memtables</code> or L0 exceeds <code>l0_stall_trigger</code>. Sustained stalls mean compaction cannot keep up. Each stall episode is logged: <code>warn</code> as it begins, with its cause; <code>info</code> as it ends, with its duration.</p>
 
         <h2>Monitoring</h2>
         <ul>
-          <li><code>stats</code> (engine, shell, GraphQL) reports the seqno, the memtable and level shape, value-log live, retired and discardable bytes, the cache hit rate, and group commit amortization. An edge replica reports through <code>EdgeStats</code> instead.</li>
+          <li><code>stats</code> (engine, shell, GraphQL) reports the seqno, the memtable and level shape, value-log live, retired and discardable bytes, the cache hit rate, group commit amortization, and the live subscription and snapshot counts. An edge replica reports through <code>EdgeStats</code> instead.</li>
           <li><code>triggers</code> reports <code>pending</code> (the backlog depth) and <code>lastError</code> per trigger.</li>
           <li><code>Journal::stats()</code>: <code>last_seqno</code> against <code>db.seqno()</code> is the journal lag; <code>last_error</code> is the last failure.</li>
-          <li><code>FLUENT31_WASM_LOG=1</code> prints guest <code>log</code> calls to stderr.</li>
         </ul>
+        <h3>Logging</h3>
+        <p>The engine emits <a href="https://docs.rs/tracing"><code>tracing</code></a> events. The binaries write them to stderr and read <code>RUST_LOG</code> for the level (default <code>info</code>; <code>fluent-cli</code> defaults to <code>warn</code> so the shell stays quiet). An embedding process installs its own subscriber; without one the events cost nothing. Every engine line names the store it is about (<code>db{dir=… store=… instance=…}</code>), so a server holding forks stays legible.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Level</th><th>What</th></tr></thead>
+          <tbody>
+            <tr><td><code>error</code></td><td>a background failure degraded the store (every one is logged, not only the first); the journal stopped; a network plane died</td></tr>
+            <tr><td><code>warn</code></td><td>a write stall began (and why), a subscriber cut for lag, a trigger run failing (with its backoff), a torn WAL tail at recovery, a WASM trap, a replica re-syncing, a file the store could not delete</td></tr>
+            <tr><td><code>info</code></td><td>open (recovery summary) and close; every flush, compaction and value-log GC; forks created and deleted; modules, triggers and pins added and removed; journal base, rotate and compact; replication streams starting and ending; fork instances the server opens and closes; the stats heartbeat</td></tr>
+            <tr><td><code>debug</code></td><td>each WASM invocation (fuel, memory, duration), trigger drains, subscriptions opening and closing, GC liveness sampling, execute retries</td></tr>
+            <tr><td><code>trace</code></td><td>per batch: journal deltas, streamed batches</td></tr>
+          </tbody>
+        </table></div>
+        <p>GraphQL requests are not logged.</p>
+        <p>The <strong>stats heartbeat</strong> is the <code>stats</code> snapshot as one <code>info</code> line per open store (the primary and every fork the server holds open) plus the fork registry's occupancy, every 60 s by default — <code>[log] stats-every-secs</code> in the server config, <code>--stats-every-secs</code> on <code>fluent-graphql</code>, <code>0</code> turns it off; an embedder gets the same line from <code>Db::log_stats()</code>. When memory grows, the heartbeat says which it was: <code>imms</code> climbing (flush not keeping up — a stall follows), subscriptions, snapshots pinning history, or fork instances.</p>
+        <p>Guest <code>log</code> output is a <code>debug</code> event under its own target, enabled alone with <code>RUST_LOG=fluent31::wasm::guest=debug</code>.</p>
 
         <h2>Limits</h2>
         <div class="tablewrap"><table>

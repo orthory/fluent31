@@ -56,7 +56,7 @@ A trigger consumer's failure is not returned to anyone — the write that caused
 
 ## Seeing inside a module
 
-Set `FLUENT31_WASM_LOG` and the host prints `fluent_guest::log` output to stderr; leave it unset and the calls are cheap and silent. Logs are capped at `max_wasm_log` per invocation, so they are a debugging channel and never a results channel. Beyond that the tools are the ordinary ones: exercise the module against a [fork](forks.md) of real data, and pin the invariant with a test that runs the executor concurrently — [Testing](testing.md) has the harness.
+Run with `RUST_LOG=fluent31::wasm::guest=debug` and the host emits `fluent_guest::log` output as log lines; otherwise the calls are cheap and silent. Logs are capped at `max_wasm_log` per invocation, so they are a debugging channel and never a results channel. Beyond that the tools are the ordinary ones: exercise the module against a [fork](forks.md) of real data, and pin the invariant with a test that runs the executor concurrently — [Testing](testing.md) has the harness.
 
 ---
 

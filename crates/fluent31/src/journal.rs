@@ -50,6 +50,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use tracing::{error, info, trace, warn};
+
 use crate::coding::{crc32, put_len_prefixed, put_u64, Reader};
 use crate::config::Options;
 use crate::db::{Db, StreamEvent};
@@ -207,6 +209,14 @@ impl Journal {
             // so a re-attach also reclaims the old files' disk
             drainer.compact()?;
         }
+        info!(
+            parent: &drainer.db.inner.span,
+            dir = %dir.display(),
+            fresh,
+            rotate_bytes = drainer.cfg.rotate_bytes,
+            auto_compact_ratio = drainer.cfg.compact_when_deltas_exceed,
+            "journal attached"
+        );
 
         let thread = std::thread::Builder::new()
             .name("fluent31-journal".into())
@@ -364,10 +374,13 @@ impl LogWriter {
     /// so pruning any prefix of files always leaves a header-first journal.
     fn rotate(&mut self) -> Result<()> {
         self.file.sync_all()?;
+        let sealed_bytes = self.bytes_in_file;
         self.file_id += 1;
         self.file = File::create(log_path(&self.dir, self.file_id))?;
         self.bytes_in_file = 0;
-        self.append_raw(&header_payload(&self.source))
+        self.append_raw(&header_payload(&self.source))?;
+        info!(dir = %self.dir.display(), file = self.file_id, sealed_bytes, "journal rotated to a new file");
+        Ok(())
     }
 
     fn sync(&mut self) -> Result<()> {
@@ -518,7 +531,10 @@ impl Drainer {
             }
         }
         // final flush on clean shutdown
-        let _ = self.writer.sync();
+        match self.writer.sync() {
+            Ok(()) => info!(parent: &self.db.inner.span, "journal detached"),
+            Err(e) => warn!(parent: &self.db.inner.span, error = %e, "journal detached; final sync failed"),
+        }
     }
 
     fn auto_compact_due(&self) -> bool {
@@ -537,7 +553,9 @@ impl Drainer {
             last = last.max(e.seqno);
         }
         self.writer.sync()?;
-        self.delta_bytes_since_base += self.writer.appended_bytes - before;
+        let bytes = self.writer.appended_bytes - before;
+        self.delta_bytes_since_base += bytes;
+        trace!(parent: &self.db.inner.span, entries = entries.len(), bytes, last_seqno = last, "journal deltas appended");
         let mut s = self.shared.stats.lock().unwrap();
         s.deltas_written += entries.len() as u64;
         s.last_seqno = s.last_seqno.max(last);
@@ -551,6 +569,14 @@ impl Drainer {
         let (base_records, seq) = write_base_snapshot(&self.db, &mut self.writer)?;
         self.last_base_bytes = self.writer.appended_bytes - before;
         self.delta_bytes_since_base = 0;
+        info!(
+            parent: &self.db.inner.span,
+            file = self.writer.file_id,
+            records = base_records,
+            bytes = self.last_base_bytes,
+            seqno = seq,
+            "journal base snapshot written"
+        );
         let mut s = self.shared.stats.lock().unwrap();
         s.base_records_written += base_records;
         s.last_seqno = s.last_seqno.max(seq);
@@ -561,6 +587,7 @@ impl Drainer {
     /// subscription is dropped; the new one is installed gap-free, and the
     /// fresh base supersedes everything before the hole at rebuild.
     fn heal_lag(&mut self) -> Result<()> {
+        warn!(parent: &self.db.inner.span, "journal stream lagged past its buffer; re-subscribing and rebaselining");
         self.sub = self.db.subscribe(USER_KEYSPACE_START, None)?;
         self.compact()?;
         self.shared.stats.lock().unwrap().rebaselines += 1;
@@ -584,6 +611,15 @@ impl Drainer {
         let pruned = prune_files_below(&self.writer.dir, anchor_file)?;
         self.last_base_bytes = self.writer.appended_bytes - before;
         self.delta_bytes_since_base = 0;
+        info!(
+            parent: &self.db.inner.span,
+            anchor_file,
+            records = base_records,
+            bytes = self.last_base_bytes,
+            files_pruned = pruned,
+            seqno = seq,
+            "journal compacted: fresh base written, superseded files pruned"
+        );
         let mut s = self.shared.stats.lock().unwrap();
         s.compactions += 1;
         s.files_pruned += pruned;
@@ -593,6 +629,7 @@ impl Drainer {
     }
 
     fn record_error(&self, e: Error) {
+        error!(parent: &self.db.inner.span, error = %e, "journal stopped; it is stale until re-attached");
         let mut s = self.shared.stats.lock().unwrap();
         s.last_error = Some(e.to_string());
     }

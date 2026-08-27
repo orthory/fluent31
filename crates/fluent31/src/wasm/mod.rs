@@ -32,8 +32,10 @@ pub(crate) mod abi;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
+use tracing::{debug, info, warn};
 use wasmtime::{Config, Engine, Linker, Module, Store};
 
 use crate::batch::WriteBatch;
@@ -202,7 +204,9 @@ pub(crate) fn install_module(db: &Arc<DbInner>, name: &str, wasm: &[u8]) -> Resu
     }
     let mut b = WriteBatch::new();
     b.put(sys_wasm_key(name), wasm.to_vec());
-    db.write_batch_unchecked(b)
+    db.write_batch_unchecked(b)?;
+    info!(parent: &db.span, module = name, bytes = wasm.len(), entries = ?role_entries_of(&module), "module installed");
+    Ok(())
 }
 
 pub(crate) fn uninstall_module(db: &Arc<DbInner>, name: &str) -> Result<()> {
@@ -212,7 +216,9 @@ pub(crate) fn uninstall_module(db: &Arc<DbInner>, name: &str) -> Result<()> {
     }
     let mut b = WriteBatch::new();
     b.delete(sys_wasm_key(name));
-    db.write_batch_unchecked(b)
+    db.write_batch_unchecked(b)?;
+    info!(parent: &db.span, module = name, "module uninstalled");
+    Ok(())
 }
 
 pub(crate) fn list_modules(db: &Arc<DbInner>) -> Result<Vec<ModuleInfo>> {
@@ -255,13 +261,16 @@ impl Drop for SnapGuard {
     }
 }
 
+/// `ident` names the code for diagnostics (see `ModuleSource::ident`).
 fn run_instance(
     db: &Arc<DbInner>,
     module: &Module,
     ctx: HostCtx,
     entry: &str,
+    ident: &str,
 ) -> Result<(i32, HostCtx)> {
     let rt = &db.wasm;
+    let started = Instant::now();
     let mut store = Store::new(&rt.engine, ctx);
     store
         .set_fuel(db.opts.wasm_fuel)
@@ -274,25 +283,30 @@ fn run_instance(
     let run = instance
         .get_typed_func::<(), i32>(&mut store, entry)
         .map_err(|e| Error::Wasm(format!("missing {entry}(): {e}")))?;
-    match run.call(&mut store, ()) {
+    let outcome = run.call(&mut store, ());
+    // what the invocation cost, whichever way it ended
+    let fuel_used = db.opts.wasm_fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+    let memory_bytes = instance
+        .get_memory(&mut store, "memory")
+        .map_or(0, |m| m.data_size(&store));
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let mut ctx = store.into_data();
+    // a host-side engine error (Corruption/Io surfaced to the guest as
+    // EIO) fails the invocation whichever way the guest ended: even if it
+    // swallowed the errno and exited cleanly, and in preference to the
+    // generic trap text when it trapped
+    if let Some(e) = ctx.host_error.take() {
+        warn!(parent: &db.span, ident, entry, error = %e, fuel_used, memory_bytes, elapsed_ms, "wasm host call failed inside the guest");
+        return Err(e);
+    }
+    match outcome {
         Ok(code) => {
-            let mut ctx = store.into_data();
-            // a host-side engine error (Corruption/Io surfaced to the guest
-            // as EIO) must fail the invocation even if the guest swallowed
-            // the errno and exited cleanly
-            if let Some(e) = ctx.host_error.take() {
-                return Err(e);
-            }
+            debug!(parent: &db.span, ident, entry, code, fuel_used, memory_bytes, output_bytes = ctx.output.len(), elapsed_ms, "wasm ran");
             Ok((code, ctx))
         }
         Err(trap) => {
-            // surface a host-side error (EIO from a failing read, etc.) in
-            // preference to the generic trap text
-            let ctx = store.into_data();
-            match ctx.host_error {
-                Some(e) => Err(e),
-                None => Err(Error::Wasm(format!("trap: {trap:#}"))),
-            }
+            warn!(parent: &db.span, ident, entry, trap = %format!("{trap:#}"), fuel_used, memory_bytes, elapsed_ms, "wasm trapped");
+            Err(Error::Wasm(format!("trap: {trap:#}")))
         }
     }
 }
@@ -335,7 +349,7 @@ pub(crate) fn query(
         )));
     }
     let ctx = HostCtx::new(db.clone(), Access::ReadOnly(guard.seq), input.to_vec());
-    let (code, ctx) = run_instance(db, &module, ctx, "query")?;
+    let (code, ctx) = run_instance(db, &module, ctx, "query", &source.ident())?;
     if code != 0 {
         return Err(Error::GuestFailed {
             code,
@@ -416,7 +430,8 @@ fn execute_impl(
         ModuleSource::Bytes(wasm) => Code::Pinned(compile_uncached(db, wasm)?),
     };
     let attempts = db.opts.execute_retries.max(1);
-    for _ in 0..attempts {
+    let ident = source.ident();
+    for attempt in 1..=attempts {
         // fresh everything per attempt: snapshot, txn, store, fuel, output
         let mut txn = Txn::new(db.clone());
         if system {
@@ -437,7 +452,7 @@ fn execute_impl(
             )));
         }
         let ctx = HostCtx::new(db.clone(), Access::Txn(Some(txn)), input.to_vec());
-        let (code, mut ctx) = run_instance(db, &module, ctx, entry)?;
+        let (code, mut ctx) = run_instance(db, &module, ctx, entry, &ident)?;
         let txn = match ctx.access {
             Access::Txn(ref mut t) => t.take().expect("txn present"),
             _ => unreachable!(),
@@ -450,10 +465,14 @@ fn execute_impl(
         }
         match txn.commit() {
             Ok(()) => return Ok(ctx.output),
-            Err(Error::Conflict) => continue,
+            Err(Error::Conflict) => {
+                debug!(parent: &db.span, ident, entry, attempt, attempts, "execute attempt conflicted at commit; retrying");
+                continue;
+            }
             Err(e) => return Err(e),
         }
     }
+    warn!(parent: &db.span, ident, entry, attempts, "execute gave up: every attempt conflicted at commit");
     Err(Error::Conflict)
 }
 
@@ -461,7 +480,12 @@ fn execute_impl(
 /// ABI as the role entries, read-only access at `seq`, empty input —
 /// and return its
 /// output bytes. `Ok(None)` when the module exports no `describe` function.
-fn describe_compiled(db: &Arc<DbInner>, module: &Module, seq: SeqNo) -> Result<Option<Vec<u8>>> {
+fn describe_compiled(
+    db: &Arc<DbInner>,
+    module: &Module,
+    seq: SeqNo,
+    ident: &str,
+) -> Result<Option<Vec<u8>>> {
     let has_describe = module
         .get_export("describe")
         .is_some_and(|e| e.func().is_some());
@@ -469,7 +493,7 @@ fn describe_compiled(db: &Arc<DbInner>, module: &Module, seq: SeqNo) -> Result<O
         return Ok(None);
     }
     let ctx = HostCtx::new(db.clone(), Access::ReadOnly(seq), Vec::new());
-    let (code, ctx) = run_instance(db, module, ctx, "describe")?;
+    let (code, ctx) = run_instance(db, module, ctx, "describe", ident)?;
     if code != 0 {
         return Err(Error::GuestFailed {
             code,
@@ -487,7 +511,7 @@ pub(crate) fn describe_module(db: &Arc<DbInner>, name: &str) -> Result<Option<Ve
         registered: true,
     };
     let module = load_module_at(db, name, guard.seq)?;
-    describe_compiled(db, &module, guard.seq)
+    describe_compiled(db, &module, guard.seq, &ModuleSource::Installed(name).ident())
 }
 
 /// `describe` candidate module bytes without installing them (install-time
@@ -499,5 +523,5 @@ pub(crate) fn describe_wasm(db: &Arc<DbInner>, wasm: &[u8]) -> Result<Option<Vec
         seq: db.register_snapshot(),
         registered: true,
     };
-    describe_compiled(db, &module, guard.seq)
+    describe_compiled(db, &module, guard.seq, &ModuleSource::Bytes(wasm).ident())
 }

@@ -249,12 +249,15 @@ pub(crate) fn register(linker: &mut Linker<HostCtx>) -> WResult<()> {
                 return Ok(ENOSPC);
             }
             ctx.log_bytes += data.len();
-            if std::env::var_os("FLUENT31_WASM_LOG").is_some() {
-                eprintln!(
-                    "[wasm log {level}] {}",
-                    String::from_utf8_lossy(&data)
-                );
-            }
+            // guest output has its own target so it can be enabled alone
+            // (`fluent31::wasm::guest=debug`) and stays silent by default
+            tracing::debug!(
+                target: "fluent31::wasm::guest",
+                parent: &ctx.db.span,
+                level,
+                "{}",
+                String::from_utf8_lossy(&data)
+            );
             Ok(0)
         },
     )?;
