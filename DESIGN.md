@@ -80,8 +80,12 @@ every block carrying `[compression=0 u8][crc32c u32]`.
 - Data block (~8 KiB): `[iklen][rlen][ikey][repr]` entries + a `u32` offset
   array for in-block binary search.
 - Filter: one bloom per fragment over user keys (10 bits/key, consecutive
-  duplicates deduped). Fragments are bounded (§4), so blooms/indexes stay
-  small and are pinned per open table.
+  duplicates deduped). Fragments are bounded (§4), so indexes stay small:
+  the index is pinned per open table as one flat arena (concatenated last
+  keys, `u32` ends, block refs — no per-entry allocation). The bloom is not
+  pinned: it is read through the block cache under `(file_id, filter
+  offset)` like any block, verified once at open, and stays resident only
+  while queried, so `block_cache_size` bounds every block the reader holds.
 - Stats: entry/tombstone counts, min/max seqno, first/last internal key.
 - `TableBuilder::finish` **fdatasyncs before returning** — a table is
   durable before any manifest can reference it.

@@ -14,7 +14,7 @@ Under `SyncMode::Always` a dedicated commit thread drains everything queued in e
 
 ## Storage layout
 
-The tree is laid out for lazy leveling: upper levels are merged tierwise, where a full level merges into a single run at the front of the level below, and the bottom level holds one leveled run. Runs are divided into key-bounded fragments of approximately `target_file_size`, each carrying its own bloom filter and index, sized so that the index and filter of an entire dataset can remain resident in memory.
+The tree is laid out for lazy leveling: upper levels are merged tierwise, where a full level merges into a single run at the front of the level below, and the bottom level holds one leveled run. Runs are divided into key-bounded fragments of approximately `target_file_size`, each carrying its own bloom filter and index, sized so that the indexes of an entire dataset can remain resident in memory. Bloom filters share the block cache with data blocks rather than being pinned, so a fragment nobody queries costs no memory for its filter.
 
 Key-value separation keeps the tree small: compaction relocates pointers rather than payloads, so the cost of a merge is governed by key volume rather than value volume. The value log is reclaimed by a separate collector, which rewrites a file's live records through the ordinary write path, retires the file, and unlinks it only once no registered snapshot can still reach the superseded versions and the relocations are present in fsynced tables. The `vlog_retired` statistic counts the files held between those two conditions.
 
