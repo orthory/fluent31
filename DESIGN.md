@@ -104,8 +104,19 @@ vlog-file set; it is published under the state lock and pinned by `Arc`.
   Installation removes exactly the pinned inputs, so flushes prepending to
   L0 mid-merge are safe. Full-tier merges preserve the newest-first
   recency invariant.
-- **Bottom level**: whenever it holds ≥ 2 runs, everything merges into one
-  (leveling at the bottom).
+- **Bottom level**: whenever it holds ≥ 2 runs, the run adjacent to the
+  leveled base merges into only the base fragments overlapping its key
+  range. Untouched fragments survive by identity. A bottom past its byte
+  budget deepens by moving its runs into a new manifest level without
+  rewriting table files; repeated moves find a level whose budget fits.
+- **Priority scheduler**: a rewrite consumes at most
+  `compaction_slice_bytes` of input before returning to the picker (the
+  current user key always finishes). A newly eligible upper level suspends
+  the deeper job; after the upper job installs, the immutable deep inputs
+  resume. Jobs still install atomically, and exact-input removal preserves
+  every run installed while they were suspended. `compact_all` uses this
+  same scheduler with force thresholds instead of owning an exclusive
+  full-store merge path.
 - **Point lookup**: memtable → frozen → runs newest-first; each run binary
   searches its single candidate fragment after a bloom + range check; the
   first version with `seqno <= snap` wins; a run whose versions are all
@@ -451,8 +462,8 @@ Lock order (strict): `write_mu → manifest → state → snapshots`, with
 `gc_mu`/`compaction_mu` outermost within their flows. Never hold the state
 guard while taking the manifest lock (a stats() violation deadlocked
 exactly as predicted and is fixed). `compaction_mu` serializes the
-maintenance thread and user `compact_all` — two concurrent pickers would
-merge the same inputs.
+maintenance thread and user `compact_all`; the one scheduler may suspend a
+deep job between bounded slices, but never executes two jobs concurrently.
 
 ## 12. Testing
 

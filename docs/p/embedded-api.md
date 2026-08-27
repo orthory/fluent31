@@ -39,6 +39,7 @@ Every field, with its default:
 | `max_levels` | `usize` | 7 | The level count; the last level is one leveled run. |
 | `l0_stall_trigger` | `usize` | 12 | L0 runs at which writers stall until compaction catches up. |
 | `target_file_size` | `u64` | 64 MiB | Compaction splits runs into fragments of about this size. |
+| `compaction_slice_bytes` | `u64` | 1 MiB | Input bytes a compaction job processes before a level that crossed its trigger above it may take over. The current key always finishes, so a key with many versions can overrun it. |
 | `value_threshold` | `usize` | 4096 | Values at or above this go to the value log; smaller ones stay inline. `0` separates everything and `usize::MAX` disables separation. |
 | `vlog_file_size` | `u64` | 128 MiB | Seal and rotate the value-log head at this size. |
 | `vlog_gc_ratio` | `f64` | 0.5 | A sealed value-log file becomes a GC victim once this fraction of it is known dead. |
