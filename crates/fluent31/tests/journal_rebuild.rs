@@ -828,3 +828,225 @@ fn delta_seqno_regression_is_corruption() {
     let err = journal::rebuild(jrn_dir.path(), dest.path(), opts()).unwrap_err();
     assert!(matches!(err, Error::Corruption(_)), "want Corruption, got {err:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Observer: a mirror built from nothing but the reported facts rebuilds exactly
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Fact {
+    Attached(Vec<(u64, u64)>),
+    Appended(u64, u64),
+    Rotated(u64, u64, u64),
+    Pruned(u64),
+    Stopped(Option<String>),
+}
+
+/// Mirrors a journal into `mirror` from what the observer hears and nothing
+/// else: bytes are copied only up to each reported durable length (and only
+/// the bytes not already held — those below a reported length are promised
+/// immutable), files are deleted only below each reported anchor. The source
+/// directory is never listed.
+struct Mirror {
+    src: std::sync::Mutex<Option<std::path::PathBuf>>,
+    mirror: std::path::PathBuf,
+    facts: std::sync::Mutex<Vec<Fact>>,
+}
+
+impl Mirror {
+    fn record(&self, fact: Fact) {
+        self.facts.lock().unwrap().push(fact);
+    }
+
+    fn copy_through(&self, file: u64, durable_len: u64) {
+        use std::io::Write;
+        let src = self
+            .src
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("attached is reported first");
+        let bytes = std::fs::read(src.join(journal::log_file_name(file))).unwrap();
+        assert!(
+            bytes.len() as u64 >= durable_len,
+            "file {file}: {durable_len} bytes reported durable, {} on disk",
+            bytes.len()
+        );
+        let dst = self.mirror.join(journal::log_file_name(file));
+        let held = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
+        assert!(
+            held <= durable_len,
+            "file {file}: reported {durable_len} after {held} were already mirrored"
+        );
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&dst)
+            .unwrap();
+        f.write_all(&bytes[held as usize..durable_len as usize])
+            .unwrap();
+    }
+}
+
+impl fluent31::JournalObserver for Mirror {
+    fn attached(&self, dir: &std::path::Path, files: &[(u64, u64)]) {
+        *self.src.lock().unwrap() = Some(dir.to_path_buf());
+        for &(id, len) in files {
+            self.copy_through(id, len);
+        }
+        self.record(Fact::Attached(files.to_vec()));
+    }
+    fn appended(&self, file: u64, durable_len: u64) {
+        self.copy_through(file, durable_len);
+        self.record(Fact::Appended(file, durable_len));
+    }
+    fn rotated(&self, sealed_file: u64, sealed_len: u64, next_file: u64) {
+        self.copy_through(sealed_file, sealed_len);
+        let held = std::fs::metadata(self.mirror.join(journal::log_file_name(sealed_file)))
+            .unwrap()
+            .len();
+        assert_eq!(held, sealed_len, "sealed file {sealed_file} mirrored short");
+        self.record(Fact::Rotated(sealed_file, sealed_len, next_file));
+    }
+    fn pruned(&self, anchor: u64) {
+        for entry in std::fs::read_dir(&self.mirror).unwrap() {
+            let entry = entry.unwrap();
+            let Some(id) = journal::log_file_id(&entry.file_name().to_string_lossy()) else {
+                continue;
+            };
+            if id < anchor {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+        self.record(Fact::Pruned(anchor));
+    }
+    fn stopped(&self, error: Option<&str>) {
+        self.record(Fact::Stopped(error.map(str::to_owned)));
+    }
+}
+
+/// `(id, length)` of every journal-*.log file in `dir`, ascending.
+fn log_files(dir: &std::path::Path) -> Vec<(u64, u64)> {
+    let mut files: Vec<(u64, u64)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter_map(|e| {
+            Some((
+                journal::log_file_id(&e.file_name().to_string_lossy())?,
+                e.metadata().unwrap().len(),
+            ))
+        })
+        .collect();
+    files.sort_unstable();
+    files
+}
+
+#[test]
+fn log_file_names_round_trip() {
+    assert_eq!(journal::log_file_name(42), "journal-000042.log");
+    assert_eq!(journal::log_file_id(&journal::log_file_name(42)), Some(42));
+    assert_eq!(journal::log_file_id("journal-000042.tmp"), None);
+    assert_eq!(journal::log_file_id("CURRENT"), None);
+}
+
+#[test]
+fn observer_facts_alone_mirror_a_rebuildable_journal() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let jrn_dir = tempfile::tempdir().unwrap();
+    let mirror_dir = tempfile::tempdir().unwrap();
+    let mirror = Arc::new(Mirror {
+        src: std::sync::Mutex::new(None),
+        mirror: mirror_dir.path().to_path_buf(),
+        facts: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let expected = {
+        let o = Options {
+            sub_queue_bytes: 32 << 10,
+            ..opts()
+        };
+        let db = Arc::new(Db::open(db_dir.path(), o).unwrap());
+        // state that predates attach lands in the initial base snapshot
+        for i in 0..50u32 {
+            db.put(k(i), v(i, "pre")).unwrap();
+        }
+        let journal = Journal::attach_observed(
+            db.clone(),
+            jrn_dir.path(),
+            tiny_compaction(),
+            mirror.clone(),
+        )
+        .unwrap();
+        // enough churn to rotate and compact repeatedly
+        for round in 0..45u32 {
+            for i in 0..150u32 {
+                db.put(k(i), v(i, &format!("r{round:02}"))).unwrap();
+            }
+        }
+        let expected = dump(&db);
+        let target = db.stats().visible_seqno;
+        wait_until("drain", 20, || journal.stats().last_seqno >= target);
+        let stats = journal.stats();
+        assert!(
+            stats.compactions >= 2,
+            "expected repeated compaction, got {}",
+            stats.compactions
+        );
+        assert!(stats.files_pruned > 0, "compaction never pruned a file");
+        drop(journal);
+        expected
+    };
+
+    let facts = mirror.facts.lock().unwrap().clone();
+    assert!(
+        matches!(facts.first(), Some(Fact::Attached(_))),
+        "first fact must be attached: {:?}",
+        facts.first()
+    );
+    assert_eq!(
+        facts.last(),
+        Some(&Fact::Stopped(None)),
+        "last fact must be a clean stop"
+    );
+    assert!(
+        facts.iter().any(|f| matches!(f, Fact::Rotated(..))),
+        "no rotation reported"
+    );
+    assert!(
+        facts.iter().any(|f| matches!(f, Fact::Pruned(_))),
+        "no prune reported"
+    );
+    // a prune is only ever reported after the anchor's base was reported
+    // durable, so the mirror never holds superseded files alone
+    for (i, fact) in facts.iter().enumerate() {
+        let Fact::Pruned(anchor) = fact else { continue };
+        let anchor_reported = facts[..i]
+            .iter()
+            .any(|g| matches!(g, Fact::Appended(file, _) if file == anchor));
+        assert!(
+            anchor_reported,
+            "prune below {anchor} reported before the anchor's base"
+        );
+    }
+
+    // the mirror ends up file-for-file, byte-for-byte the source directory
+    assert_eq!(log_files(mirror_dir.path()), log_files(jrn_dir.path()));
+    for (id, _) in log_files(jrn_dir.path()) {
+        let name = journal::log_file_name(id);
+        assert_eq!(
+            std::fs::read(mirror_dir.path().join(&name)).unwrap(),
+            std::fs::read(jrn_dir.path().join(&name)).unwrap(),
+            "{name} differs"
+        );
+    }
+
+    // and it rebuilds the exact state on its own
+    let rebuilt_dir = tempfile::tempdir().unwrap();
+    journal::rebuild(mirror_dir.path(), rebuilt_dir.path(), opts()).unwrap();
+    let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
+    assert_eq!(
+        dump(&rebuilt),
+        expected,
+        "state rebuilt from the mirror diverged"
+    );
+}

@@ -57,6 +57,28 @@ How to attach it on each surface:
 | Rust | `Journal::attach(db, dir)` or `attach_with_config` |
 | `fluent-server` | `--journal DIR`, or a `[journal]` section in the TOML config with `dir` required; `rotate-bytes`, `compact-when-deltas-exceed` and `compact-min-bytes` tune it there |
 
+### Observing the journal
+
+An embedder that mirrors the journal somewhere else — another volume, an object store — attaches it with an observer instead of polling the directory. The observer hears every fact of the log's life, in the order it became true, and every fact is already durable on disk when it is reported: bytes of a file below a reported length are fsynced and will never change (the log is append-only; the one truncation it performs, a torn tail after a crash, happens before `attached` reports the file). So a mirror copies exactly the reported bytes, deletes exactly the reported files, and never re-reads or lists the source.
+
+```
+use fluent31::{Journal, JournalConfig, JournalObserver, journal};
+
+struct Ship;
+impl JournalObserver for Ship {
+    fn attached(&self, dir: &Path, files: &[(u64, u64)]) {}       // (id, durable length) of every file present
+    fn appended(&self, file: u64, durable_len: u64) {}              // file is fsynced through durable_len
+    fn rotated(&self, sealed: u64, sealed_len: u64, next: u64) {}   // sealed is final; next is active
+    fn pruned(&self, anchor: u64) {}                                // every id below anchor is deleted
+    fn stopped(&self, error: Option<&str>) {}                       // None on a clean detach
+}
+let j = Journal::attach_observed(db.clone(), dir, JournalConfig::default(), Arc::new(Ship))?;
+journal::log_file_name(14);          // "journal-000014.log" — the naming contract
+journal::log_file_id("journal-000014.log"); // Some(14)
+```
+
+`attached` arrives on the attaching thread before `attach_observed` returns; everything after it on the journal's own thread. A compaction reports the anchor file's base as durable (`appended`) before it reports the superseded files gone (`pruned`), so a mirror that applies facts in order never holds only superseded files. Observers return promptly and do their I/O elsewhere — the drainer waits for them.
+
 ## Rebuilding from the journal
 
 ```
@@ -72,7 +94,7 @@ The tail is approximate in both directions. The journal's last few unsynced reco
 
 - For a consistent snapshot on the same filesystem, `fork(name)`. It is cheap, instant, consistent and hard-linked.
 - To copy elsewhere, copy `archive/<name>/`, which is a plain directory tree (the hard links copy as full files), or `restore_to` into a mount point.
-- For continuous off-box protection, ship the journal directory's segments. A reassembled journal is verified for contiguity at rebuild.
+- For continuous off-box protection, mirror the journal through a `JournalObserver` (above): it reports every durable byte and every deletion, so the mirror needs no polling. A reassembled journal is verified for contiguity at rebuild.
 
 > **Never** delete `wal-*.log`, `MANIFEST-*`, `CURRENT` or `LOCK` by hand.
 
