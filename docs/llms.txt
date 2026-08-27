@@ -32,6 +32,7 @@ databases that are wrong here.
 - [Your first module](https://orthory.github.io/fluent31/p/first-module.md): Install code into the database and call it by name. This is the feature the rest of the engine is arranged around.
 - [Your first trigger](https://orthory.github.io/fluent31/p/first-trigger.md): Bind a module to a key range and the engine invokes it after every committed write into that range. Derived data stops being the writer's problem.
 - [Embed it in Rust](https://orthory.github.io/fluent31/p/embed.md): The shell and the server are wrappers around a library. This is the library.
+- [The whole thing at once](https://orthory.github.io/fluent31/p/walkthrough.md): One program that installs modules, binds a trigger, drives an executor under contention, waits for derived state and rehearses a destructive change on a fork — asserting every step.
 
 ## Concepts
 

@@ -49,6 +49,7 @@ txn.commit()?;                       // Err(Error::Conflict) if acct moved: re-r
 ```sh
 cargo run -p fluent-cli -- ./data                        # interactive shell
 cargo run -p fluent-server -- ./data --store-name prod   # GraphQL :8317, replication :8428
+cargo run -p fluent31 --example walkthrough              # the whole path in one program, asserting every step
 cargo run -p fluent31 --example live_stats               # a trigger-maintained GROUP BY, checked against a recount
 ```
 

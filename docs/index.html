@@ -637,6 +637,7 @@ document.addEventListener('DOMContentLoaded', function () {
       <a data-nav="first-module" data-step="3" href="#first-module">Your first module</a>
       <a data-nav="first-trigger" data-step="4" href="#first-trigger">Your first trigger</a>
       <a data-nav="embed" data-step="5" href="#embed">Embed it in Rust</a>
+      <a data-nav="walkthrough" data-step="6" href="#walkthrough">The whole thing at once</a>
 
       <h5>Concepts</h5>
       <a data-nav="snapshots" href="#snapshots">Snapshots and seqnos</a>
@@ -791,7 +792,7 @@ cargo test --workspace</pre></div>
       </article>
       <!-- ============================================================ -->
       <article data-page="first-store">
-        <p class="eyebrow">Tutorial <span class="of">·</span> Step 1 <span class="of">of 5</span></p>
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 1 <span class="of">of 6</span></p>
         <h1>Your first store</h1>
         <p class="lead">One command, no code: a running database you can write to and read back.</p>
 
@@ -831,7 +832,7 @@ fluent31&gt; help</pre></div>
       </article>
       <!-- ============================================================ -->
       <article data-page="first-graphql">
-        <p class="eyebrow">Tutorial <span class="of">·</span> Step 2 <span class="of">of 5</span></p>
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 2 <span class="of">of 6</span></p>
         <h1>Serve it over GraphQL</h1>
         <p class="lead">The same store on a network surface, with a schema, an explorer and live subscriptions — no code yet.</p>
 
@@ -878,7 +879,7 @@ query {
       </article>
       <!-- ============================================================ -->
       <article data-page="first-module">
-        <p class="eyebrow">Tutorial <span class="of">·</span> Step 3 <span class="of">of 5</span></p>
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 3 <span class="of">of 6</span></p>
         <h1>Your first module</h1>
         <p class="lead">Install code into the database and call it by name. This is the feature the rest of the engine is arranged around.</p>
 
@@ -941,7 +942,7 @@ fluent31&gt; query count user/
       </article>
       <!-- ============================================================ -->
       <article data-page="first-trigger">
-        <p class="eyebrow">Tutorial <span class="of">·</span> Step 4 <span class="of">of 5</span></p>
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 4 <span class="of">of 6</span></p>
         <h1>Your first trigger</h1>
         <p class="lead">Bind a module to a key range and the engine invokes it after every committed write into that range. Derived data stops being the writer's problem.</p>
 
@@ -982,7 +983,7 @@ fluent31&gt; scan idx/ idx0
       </article>
       <!-- ============================================================ -->
       <article data-page="embed">
-        <p class="eyebrow">Tutorial <span class="of">·</span> Step 5 <span class="of">of 5</span></p>
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 5 <span class="of">of 6</span></p>
         <h1>Embed it in Rust</h1>
         <p class="lead">The shell and the server are wrappers around a library. This is the library.</p>
 
@@ -1026,6 +1027,92 @@ db.subscribe(<span class="s">b"orders/"</span>, Some(<span class="s">b"orders0"<
 db.stats();</pre></div>
         <p>Everything done through the shell and the server in the previous steps is available here, because that is what both of them call.</p>
 
+        <h2>Next</h2>
+        <p>Each step so far has shown one surface on its own. The last one puts them in a single program — one that installs, binds, contends and forks, and checks its own answers.</p>
+      </article>
+      <!-- ============================================================ -->
+      <article data-page="walkthrough">
+        <p class="eyebrow">Tutorial <span class="of">·</span> Step 6 <span class="of">of 6</span></p>
+        <h1>The whole thing at once</h1>
+        <p class="lead">One program that installs modules, binds a trigger, drives an executor under contention, waits for derived state and rehearses a destructive change on a fork — asserting every step.</p>
+
+        <p>The previous steps each showed one surface. This is the shape a real driver has, and it is a file in the repository rather than prose: <code>crates/fluent31/examples/walkthrough.rs</code>. The test suite compiles it and it asserts its own results, so it cannot quietly stop being true.</p>
+
+        <h2>Run it</h2>
+        <div class="codeblock"><pre>cargo run -p fluent31 --example walkthrough</pre></div>
+        <p>Modules are ordinary crates compiled to <code>wasm32-unknown-unknown</code>, and the example builds them on first run. In a project of your own that step is yours: <code>cargo build --manifest-path guests/Cargo.toml --target wasm32-unknown-unknown --release</code>, then install the <code>.wasm</code> bytes it produces.</p>
+
+        <h2>What it does</h2>
+        <p>It uses two modules the repository already ships. <code>place_order</code> is an executor: one transaction allocates an order id from a counter key, writes the record and folds the amount into the customer's running total. <code>customer_index</code> is a trigger consumer that keeps a secondary index over those records. Neither knows about the other.</p>
+        <div class="codeblock"><pre>db.install_module(<span class="s">"place_order"</span>, &amp;guest_wasm(<span class="s">"place_order"</span>))?;
+db.install_module(<span class="s">"customer_index"</span>, &amp;guest_wasm(<span class="s">"customer_index"</span>))?;
+
+<span class="k">let</span> mode = db.create_trigger(<span class="s">"customerIndex"</span>, <span class="s">"customer_index"</span>,
+                            Some(<span class="s">b"orders/"</span>), Some(<span class="s">b"orders0"</span>))?;</pre></div>
+        <p>The mode is not an argument. <code>customer_index</code> exports <code>on_touch</code>, so the engine registers it in keys mode; a module exporting <code>on_apply</code> would get changes mode instead. The call returns what was detected.</p>
+
+        <h2>The two loops you have to write</h2>
+        <p>Everything else in the file is ordinary Rust. These two are the ones that are easy to leave out and painful to leave out.</p>
+
+        <p><strong>Waiting for derived state.</strong> A trigger runs after the write that caused it has already committed, so a read taken the moment a write returns sees the state before the trigger ran. There is no synchronous "run the triggers now":</p>
+        <div class="codeblock"><pre><span class="k">let</span> deadline = Instant::now() + Duration::from_secs(30);
+<span class="k">loop</span> {
+    <span class="k">let</span> all = db.list_triggers()?;
+    <span class="k">let</span> mine: Vec&lt;_&gt; = all.iter().filter(|t| names.contains(&amp;t.name.as_str())).collect();
+    <span class="k">if let</span> Some(t) = mine.iter().find(|t| t.last_error.is_some()) {
+        panic!(<span class="s">"trigger {} is stuck: {:?}"</span>, t.name, t.last_error);   <span class="c">// never transient</span>
+    }
+    <span class="k">if</span> mine.iter().all(|t| t.pending == 0) { <span class="k">break</span>; }
+    assert!(Instant::now() &lt; deadline, <span class="s">"triggers did not drain in 30s"</span>);
+    std::thread::sleep(Duration::from_millis(5));
+}</pre></div>
+        <p><code>last_error</code> is fatal rather than transient: a module that fails holds its batch instead of dropping it, so a queue that stops moving does not start again on its own.</p>
+
+        <p><strong>Retrying a conflict.</strong> <code>execute</code> runs the module inside a transaction and re-runs it on a commit conflict — but only <code>execute_retries</code> times, three by default. Under real contention those get spent and <code>Conflict</code> reaches the caller, having written nothing:</p>
+        <div class="codeblock"><pre><span class="k">loop</span> {
+    <span class="k">match</span> db.execute(<span class="s">"place_order"</span>, input.as_bytes()) {
+        Ok(out) =&gt; <span class="k">return</span> serde_json::from_slice(&amp;out)?,
+        Err(Error::Conflict) =&gt; <span class="k">continue</span>,        <span class="c">// nothing was written; run it again</span>
+        Err(e) =&gt; <span class="k">return</span> Err(e),
+    }
+}</pre></div>
+        <p>Four threads placing twenty-four orders against a single counter key spend the engine's three attempts routinely — a typical run reports around half the calls arriving here. Without this loop that is not a slow path, it is lost work.</p>
+
+        <h2>What it proves</h2>
+        <p>Every line of output is an assertion that held:</p>
+        <div class="codeblock"><pre>== install the modules
+   modules: customer_index, place_order
+   place_order describes itself as kind="execute" output="PlacedOrder!"
+
+== bind the trigger over [orders/, orders0)
+   mode detected from the module's exports: keys
+
+== one order, through the executor
+   {"amountCents":1250,"customer":"acme","customerOrders":1,"customerTotalCents":1250,"id":1}
+   index entry: idx/customer/acme/00000001
+
+== 4 threads x 6 orders, all retrying on conflict
+   24 orders placed, 24 distinct ids, 14 reached the caller as Conflict
+
+== the derived state agrees with the records
+   acme: 9 orders, 3850 cents
+   globex: 8 orders, 2800 cents
+   initech: 8 orders, 3000 cents
+
+== rehearse a destructive change on a fork
+   forked at seqno 228 -&gt; /tmp/.tmpAOxum2/archive/rehearsal
+   fork: 1 keys left, parent: 26 — untouched
+
+done: installed, bound, drained, contended and rehearsed.</pre></div>
+        <p>Two of those are worth naming. Every order gets a distinct id even though every order increments the same counter, because the id is allocated inside the transaction — a losing attempt is discarded whole rather than leaving a gap or a duplicate. And the executor's own per-customer count, written by the module, matches the number of index entries written by an unrelated trigger.</p>
+
+        <h2>Rehearsing on a fork</h2>
+        <p>The last section deletes every order — on a copy. <code>fork</code> publishes a complete database directory by hard-linking what is already immutable, so the copy costs file count rather than data size, and opening it gives a writable clone:</p>
+        <div class="codeblock"><pre><span class="k">let</span> fork = db.fork(<span class="s">"rehearsal"</span>)?;
+<span class="k">let</span> rehearsal = Db::open(&amp;fork.path, Options::default())?;
+<span class="c">// ... run the change here, against real data, with nothing at stake</span></pre></div>
+        <p>This is what makes a migration checkable before it is real: run it on the fork, look at the result, and throw the fork away if it is wrong. <a href="#ex-forks">Forks in practice</a> covers the rest of the shape.</p>
+
         <h2>Where to go next</h2>
         <ul>
           <li><strong>Concepts</strong> explains why the engine behaves the way these steps showed — snapshots and the watermark, the consistency contract, what triggers guarantee, what a fork is.</li>
@@ -1033,7 +1120,7 @@ db.stats();</pre></div>
           <li><strong>Reference</strong> is the exact surface of each entry point: every <code>Options</code> field, the GraphQL schema, the shell commands, server configuration, replication, operations.</li>
           <li><strong>Recipes</strong> are the worked shapes — aggregates, invariants, indexes, feeds, migrations, forks — each with the reference module that implements it.</li>
         </ul>
-        <p>The repository also carries walkthroughs that assert their own results, which are the fastest way to see the trigger machinery under load:</p>
+        <p>The repository carries four more walkthroughs of the same kind, each asserting its own results:</p>
         <div class="codeblock"><pre>cargo run -p fluent31 --example live_stats       <span class="c"># a live aggregate, checked against a full recount</span>
 cargo run -p fluent31 --example dynamic_index    <span class="c"># indexes created at runtime from a spec key</span>
 cargo run -p fluent31 --example cascade_delete
