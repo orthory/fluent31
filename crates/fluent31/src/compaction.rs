@@ -48,6 +48,20 @@ pub(crate) struct Job {
     kind: JobKind,
 }
 
+impl Job {
+    /// Could a run behind this job's output hold `ukey`? A tombstone whose
+    /// key no older run can contain shadows nothing and may be dropped.
+    /// Fallible: a run's bloom filter may have to be re-read from its file.
+    fn older_may_contain(&self, ukey: &[u8]) -> Result<bool> {
+        for run in &self.older {
+            if run.may_contain_ukey(ukey)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
 enum JobKind {
     /// Tiered merge: output run lands at the FRONT (newest) of the target
     /// level.
@@ -422,11 +436,7 @@ impl RunningJob {
                     self.kept_le_w = true;
                     // the newest version at-or-below the watermark: keep, unless
                     // it is a tombstone provably shadowing nothing older
-                    let shadows_older = self
-                        .job
-                        .older
-                        .iter()
-                        .any(|r| r.may_contain_ukey(&self.cur_ukey));
+                    let shadows_older = self.job.older_may_contain(&self.cur_ukey)?;
                     if kind == ValueKind::Delete && !shadows_older {
                         (false, false)
                     } else {
