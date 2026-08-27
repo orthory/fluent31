@@ -329,10 +329,10 @@ scripts/build-agent-docs.py --check                                       # agen
 - Index, view, feed, cascade: a trigger over the range. Copy `guests/customer_index` (keys mode) or `guests/order_feed`, `live_stats`, `dynamic_index`, `cascade_delete` (changes mode).
 - Migration: a one-shot executor (`execonce`, `wasmExecuteOnce`, `db.execute_wasm`), idempotent by inspection, rehearsed on a fork.
 - Backup, staging, rollback: `fork(name)`; `pin` then `fork_at`; `restore_to`.
-- Disaster recovery: attach a journal (a `[journal]` section in the server TOML, or `--journal DIR` on the standalone `fluent-graphql`); rebuild with `fluent-cli journal-rebuild`.
+- Disaster recovery: attach a journal (`--journal DIR`, or a `[journal]` section in the server TOML); rebuild with `fluent-cli journal-rebuild`.
 - Replica: a named master, then embed `fluent_replication::EdgeReplica` in the reading process.
 - Wait for a trigger: there is no synchronous drain. Poll `list_triggers()` until every `pending == 0` and `last_error` is `None`, with a deadline. The reference loop is `crates/fluent31/examples/util/mod.rs::drain`.
-- Diagnose: the binaries log to stderr (`RUST_LOG`; default `info`, `fluent-cli` `warn`). Store open/close, every flush, compaction and value-log GC, forks, modules, triggers, journal and replication lifecycle at `info`; stalls, lag cuts, trigger failures and WASM traps at `warn`; every background failure at `error`; a per-store stats heartbeat every 60 s (`[log] stats-every-secs`, `--stats-every-secs`). GraphQL requests are not logged.
+- Diagnose: the binaries log to stderr (`RUST_LOG`; default `info`, `fluent-cli` `warn`). Store open/close, every flush, compaction and value-log GC, forks, modules, triggers, journal and replication lifecycle at `info`; stalls, lag cuts, trigger failures and WASM traps at `warn`; every background failure at `error`; a per-store stats heartbeat every 60 s (`[log] stats-every-secs`). GraphQL requests are not logged.
 
 ## Traps
 
@@ -353,6 +353,7 @@ scripts/build-agent-docs.py --check                                       # agen
 - `count` in the shell has no default limit; `scan` defaults to 50.
 - A fork is refused for deletion while it is open as a database.
 - Value-log GC relocations re-put live values, so they appear on the change stream as `Put` entries with unchanged values, and can cost a hot large-value key a transaction retry.
+- `fluent-server` allocates through mimalloc, so its RSS follows live data and comes back down after a burst; glibc malloc would keep every thread arena at its high-water mark.
 - A process that keeps growing: read the stats heartbeat. `imms` climbing is flush falling behind (a stall follows); `subscriptions` and `snapshots` are GC holds; every open fork instance is a full engine with its own memtable and cache.
 
 ## Changing this repo

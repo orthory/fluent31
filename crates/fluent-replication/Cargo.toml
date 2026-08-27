@@ -8,16 +8,11 @@ description = "Edge replication channel for fluent31: scoped slice sync, lazy va
 name = "fluent_replication"
 path = "src/lib.rs"
 
-[[bin]]
-name = "fluent-replication"
-path = "src/main.rs"
-
 [dependencies]
 fluent31 = { path = "../fluent31" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal"] }
 bytes = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"

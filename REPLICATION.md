@@ -3,7 +3,7 @@
 The replication channel for fluent31: a small **ephemeral edge replica**
 holds the slice of one master's tree that overlaps its key scope
 `[lo, hi)`, serves reads locally, and reaches back for what it doesn't
-have. Server: the `fluent-replication` binary (default
+have. Server: `fluent-server` on a named store (join point default
 `127.0.0.1:8428`). Edge replicas are embedded: the process that needs
 the scoped reads drives one with `fluent_replication::EdgeReplica` and
 reads through `EdgeReplica::store()`. Library types:

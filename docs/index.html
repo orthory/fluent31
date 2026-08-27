@@ -735,7 +735,6 @@ subscription { orderFeed { seqno event { id record } query { snapshotSeqno } } }
             <tr><td><code>fluent-guest</code> crate</td><td>The SDK for writing WASM modules.</td></tr>
             <tr><td><code>fluent-cli</code></td><td>An interactive shell. Also the journal rebuild tool.</td></tr>
             <tr><td><code>fluent-server</code></td><td>One process serving one store on two planes: GraphQL (typed and admin operations, subscriptions) and replication (the join point for replicas).</td></tr>
-            <tr><td><code>fluent-graphql</code>, <code>fluent-replication</code></td><td>Each plane as a standalone binary, with the same defaults.</td></tr>
           </tbody>
         </table></div>
 
@@ -1991,8 +1990,7 @@ drop(j);                 <span class="c">// joins the drainer, final flush</span
           <thead><tr><th>Surface</th><th>How</th></tr></thead>
           <tbody>
             <tr><td>Rust</td><td><code>Journal::attach(db, dir)</code> or <code>attach_with_config</code></td></tr>
-            <tr><td><code>fluent-graphql</code></td><td><code>--journal DIR</code> plus optional <code>--journal-rotate-bytes</code>, <code>--journal-compact-when-deltas-exceed</code>, <code>--journal-compact-min-bytes</code></td></tr>
-            <tr><td><code>fluent-server</code></td><td>a <code>[journal]</code> section in the TOML config, with <code>dir</code> required</td></tr>
+            <tr><td><code>fluent-server</code></td><td><code>--journal DIR</code>, or a <code>[journal]</code> section in the TOML config with <code>dir</code> required; <code>rotate-bytes</code>, <code>compact-when-deltas-exceed</code> and <code>compact-min-bytes</code> tune it there</td></tr>
           </tbody>
         </table></div>
 
@@ -2123,7 +2121,9 @@ fluent-cli journal-rebuild &lt;journal-dir&gt; &lt;dest-dir&gt;</pre></div>
 
         <div class="codeblock"><pre>fluent-server &lt;db-dir&gt; [<span class="w">--config</span> FILE] [<span class="w">--store-name</span> NAME]
               [<span class="w">--graphql</span> ADDR:PORT] [<span class="w">--replication</span> ADDR:PORT]
-              [<span class="w">--sync</span> always|never|periodic:&lt;ms&gt;] [<span class="w">--max-body-bytes</span> N]</pre></div>
+              [<span class="w">--sync</span> always|never|periodic:&lt;ms&gt;] [<span class="w">--max-body-bytes</span> N]
+              [<span class="w">--journal</span> DIR]
+fluent-server <span class="w">--print-schema</span>                   <span class="c"># the base SDL (built-ins only)</span></pre></div>
         <div class="tablewrap"><table>
           <thead><tr><th>Plane</th><th>Default</th><th>Purpose</th></tr></thead>
           <tbody>
@@ -2171,13 +2171,6 @@ compression = <span class="s">"none"</span>          <span class="c"># none | lz
 memtable-size = 8388608
 <span class="c"># … every Options field from the Embedded API page, kebab-case</span></pre></div>
 
-        <h2>Standalone planes</h2>
-        <p>Each plane also runs on its own, with the same defaults:</p>
-        <div class="codeblock"><pre>fluent-graphql &lt;db-dir&gt; [<span class="w">--listen</span> ADDR:PORT] [<span class="w">--sync</span> ..] [<span class="w">--max-body-bytes</span> N] [<span class="w">--journal</span> DIR ...] [<span class="w">--stats-every-secs</span> N]
-fluent-graphql <span class="w">--print-schema</span>                 <span class="c"># the base SDL (built-ins only)</span>
-fluent-replication &lt;db-dir&gt; [<span class="w">--store-name</span> NAME] [<span class="w">--listen</span> ADDR:PORT]</pre></div>
-        <p>Only one of them can hold the store at a time. <code>fluent-graphql</code> refuses <code>--journal-*</code> tuning flags without <code>--journal DIR</code>.</p>
-
         <h2>Embedding the server</h2>
         <div class="codeblock"><pre><span class="k">use</span> fluent_server::{Server, ServerConfig};
 
@@ -2187,7 +2180,7 @@ server.graphql_addr; server.replication_addr;   <span class="c">// replication_a
 server.db();
 server.shutdown().<span class="k">await</span>;</pre></div>
         <p><code>ServerConfig</code> holds <code>graphql_addr</code>, <code>replication_addr</code>, <code>max_body_bytes</code>, <code>registry: RegistryConfig { max_open, idle_ttl }</code>, <code>replication: ReplServerConfig { max_frame, ping_every }</code> and <code>stats_every</code> (the heartbeat period; 60 s, zero = off). Nothing is served unless every bind succeeds; failures come back as <code>StartError::{Engine, Bind}</code>. The TOML loader is public too (<code>FileConfig::load</code>, <code>overlay</code>, <code>server_config</code>, <code>engine_options</code>, <code>parse_sync</code>).</p>
-        <p>For the GraphQL plane alone: <code>SchemaManager::new(db)</code>, then <code>InstanceRegistry::new(..)</code>, then <code>fluent_graphql::router(registry, max_body)</code>, which is an <code>axum::Router</code>. Call <code>registry.evict_idle()</code> periodically; the binaries tick every 60 seconds. The stats heartbeat is <code>fluent_graphql::stats_heartbeat(registry, every)</code>, a future to spawn. For replication: <code>ReplServer::new(db, cfg)?</code> fails with <code>InvalidArgument</code> on an unnamed store; then <code>.serve(listener)</code>.</p>
+        <p>For the GraphQL plane alone: <code>SchemaManager::new(db)</code>, then <code>InstanceRegistry::new(..)</code>, then <code>fluent_graphql::router(registry, max_body)</code>, which is an <code>axum::Router</code>. Call <code>registry.evict_idle()</code> periodically; the server ticks every 60 seconds. The stats heartbeat is <code>fluent_graphql::stats_heartbeat(registry, every)</code>, a future to spawn. For replication: <code>ReplServer::new(db, cfg)?</code> fails with <code>InvalidArgument</code> on an unnamed store; then <code>.serve(listener)</code>.</p>
       </article>
       <!-- ============================================================ -->
       <article data-page="replication">
@@ -2195,8 +2188,8 @@ server.shutdown().<span class="k">await</span>;</pre></div>
         <p class="lead">Read-only replicas that attach to a running master's join point and hold the slice of the tree overlapping their key scope.</p>
 
         <p>The scope is unbounded for a full replica and narrow for an edge cache. The overlapping index fragments are copied locally, values are fetched lazily and cached, and committed in-scope writes stream in. The replica is a library component: the process that needs the scoped reads embeds an <code>EdgeReplica</code> and reads through its store (<code>get</code> and <code>scan</code>, clamped to the scope). <a href="https://github.com/orthory/fluent31/blob/master/REPLICATION.md">REPLICATION.md</a> is the spec.</p>
-        <div class="codeblock"><pre><span class="c"># master: fluent-server on a named store (join point :8428), or the plane alone</span>
-fluent-replication ./data <span class="w">--store-name</span> prod [<span class="w">--listen</span> 127.0.0.1:8428]</pre></div>
+        <div class="codeblock"><pre><span class="c"># master: fluent-server on a named store opens the join point (:8428)</span>
+fluent-server ./data <span class="w">--store-name</span> prod [<span class="w">--replication</span> 127.0.0.1:8428]</pre></div>
 
         <h2>How it behaves</h2>
         <ul>
@@ -2277,7 +2270,7 @@ replica.master();                            <span class="c">// StoreIdentity</s
           </tbody>
         </table></div>
         <p>GraphQL requests are not logged.</p>
-        <p>The <strong>stats heartbeat</strong> is the <code>stats</code> snapshot as one <code>info</code> line per open store (the primary and every fork the server holds open) plus the fork registry's occupancy, every 60 s by default — <code>[log] stats-every-secs</code> in the server config, <code>--stats-every-secs</code> on <code>fluent-graphql</code>, <code>0</code> turns it off; an embedder gets the same line from <code>Db::log_stats()</code>. When memory grows, the heartbeat says which it was: <code>imms</code> climbing (flush not keeping up — a stall follows), subscriptions, snapshots pinning history, or fork instances.</p>
+        <p>The <strong>stats heartbeat</strong> is the <code>stats</code> snapshot as one <code>info</code> line per open store (the primary and every fork the server holds open) plus the fork registry's occupancy, every 60 s by default — <code>[log] stats-every-secs</code> in the server config, <code>0</code> turns it off; an embedder gets the same line from <code>Db::log_stats()</code>. When memory grows, the heartbeat says which it was: <code>imms</code> climbing (flush not keeping up — a stall follows), subscriptions, snapshots pinning history, or fork instances.</p>
         <p>Guest <code>log</code> output is a <code>debug</code> event under its own target, enabled alone with <code>RUST_LOG=fluent31::wasm::guest=debug</code>.</p>
 
         <h2>Limits</h2>

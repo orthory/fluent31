@@ -58,7 +58,6 @@ Subscriptions stream committed changes, raw or typed, and every item carries the
 | `fluent-guest` crate | The SDK for writing WASM modules. |
 | `fluent-cli` | An interactive shell. Also the journal rebuild tool. |
 | `fluent-server` | One process serving one store on two planes: GraphQL (typed and admin operations, subscriptions) and replication (the join point for replicas). |
-| `fluent-graphql`, `fluent-replication` | Each plane as a standalone binary, with the same defaults. |
 
 ## What it is not
 

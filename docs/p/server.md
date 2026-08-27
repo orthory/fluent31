@@ -10,6 +10,8 @@
 fluent-server <db-dir> [--config FILE] [--store-name NAME]
               [--graphql ADDR:PORT] [--replication ADDR:PORT]
               [--sync always|never|periodic:<ms>] [--max-body-bytes N]
+              [--journal DIR]
+fluent-server --print-schema                   # the base SDL (built-ins only)
 ```
 
 | Plane | Default | Purpose |
@@ -64,18 +66,6 @@ memtable-size = 8388608
 # … every Options field from the Embedded API page, kebab-case
 ```
 
-## Standalone planes
-
-Each plane also runs on its own, with the same defaults:
-
-```
-fluent-graphql <db-dir> [--listen ADDR:PORT] [--sync ..] [--max-body-bytes N] [--journal DIR ...] [--stats-every-secs N]
-fluent-graphql --print-schema                 # the base SDL (built-ins only)
-fluent-replication <db-dir> [--store-name NAME] [--listen ADDR:PORT]
-```
-
-Only one of them can hold the store at a time. `fluent-graphql` refuses `--journal-*` tuning flags without `--journal DIR`.
-
 ## Embedding the server
 
 ```
@@ -90,7 +80,7 @@ server.shutdown().await;
 
 `ServerConfig` holds `graphql_addr`, `replication_addr`, `max_body_bytes`, `registry: RegistryConfig { max_open, idle_ttl }`, `replication: ReplServerConfig { max_frame, ping_every }` and `stats_every` (the heartbeat period; 60 s, zero = off). Nothing is served unless every bind succeeds; failures come back as `StartError::{Engine, Bind}`. The TOML loader is public too (`FileConfig::load`, `overlay`, `server_config`, `engine_options`, `parse_sync`).
 
-For the GraphQL plane alone: `SchemaManager::new(db)`, then `InstanceRegistry::new(..)`, then `fluent_graphql::router(registry, max_body)`, which is an `axum::Router`. Call `registry.evict_idle()` periodically; the binaries tick every 60 seconds. The stats heartbeat is `fluent_graphql::stats_heartbeat(registry, every)`, a future to spawn. For replication: `ReplServer::new(db, cfg)?` fails with `InvalidArgument` on an unnamed store; then `.serve(listener)`.
+For the GraphQL plane alone: `SchemaManager::new(db)`, then `InstanceRegistry::new(..)`, then `fluent_graphql::router(registry, max_body)`, which is an `axum::Router`. Call `registry.evict_idle()` periodically; the server ticks every 60 seconds. The stats heartbeat is `fluent_graphql::stats_heartbeat(registry, every)`, a future to spawn. For replication: `ReplServer::new(db, cfg)?` fails with `InvalidArgument` on an unnamed store; then `.serve(listener)`.
 
 ---
 
