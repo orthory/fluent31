@@ -668,10 +668,18 @@ fn prune_files_below(dir: &Path, keep_from: u64) -> Result<u64> {
 /// shipped or archived segments is therefore refused loudly when incomplete,
 /// never rebuilt with a hole.
 ///
-/// `dest` must not already be an open/live database; a fresh directory is
-/// expected. Returns what was reconstructed.
+/// `dest` must be absent or an empty directory: the rebuilt store is a new
+/// lineage and is never merged into whatever already lives there. Returns
+/// what was reconstructed.
 pub fn rebuild(journal_dir: impl AsRef<Path>, dest: impl AsRef<Path>, opts: Options) -> Result<RebuildReport> {
     let journal_dir = journal_dir.as_ref();
+    let dest = dest.as_ref();
+    if !destination_is_fresh(dest)? {
+        return Err(Error::InvalidArgument(format!(
+            "{} is not an empty destination",
+            dest.display()
+        )));
+    }
     let records = read_all_records(journal_dir)?;
     if records.is_empty() {
         return Err(corrupt("journal is empty"));
@@ -754,6 +762,16 @@ pub fn rebuild(journal_dir: impl AsRef<Path>, dest: impl AsRef<Path>, opts: Opti
         deltas_applied,
         last_seqno,
     })
+}
+
+/// A rebuild destination is fresh when nothing lives there yet: the path is
+/// absent, or it is a directory with no entries.
+fn destination_is_fresh(dest: &Path) -> Result<bool> {
+    if !dest.exists() {
+        return Ok(true);
+    }
+    let mut entries = std::fs::read_dir(dest)?;
+    Ok(entries.next().is_none())
 }
 
 struct Anchor {

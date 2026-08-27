@@ -65,7 +65,7 @@ fluent-cli journal-rebuild <journal-dir> <dest-dir>
 # prints: source instance, base keys, deltas applied, last seqno
 ```
 
-Or `fluent31::journal::rebuild(journal_dir, dest, opts)`, where `opts` are the rebuilt store's `Options` (give it a `store_name` for a fresh root identity). `dest` must be a fresh directory. The rebuilt store holds all user data as of the journal's last durable record, as a new lineage: seqnos are renumbered, the instance id is fresh, and modules, triggers, pins and forks are not restored, so redeploy them. A missing middle segment is refused (`JournalGap`), never rebuilt around.
+Or `fluent31::journal::rebuild(journal_dir, dest, opts)`, where `opts` are the rebuilt store's `Options` (give it a `store_name` for a fresh root identity). `dest` must be absent or an empty directory; a directory that already holds anything is refused (`InvalidArgument`), never merged into. The rebuilt store holds all user data as of the journal's last durable record, as a new lineage: seqnos are renumbered, the instance id is fresh, and modules, triggers, pins and forks are not restored, so redeploy them. A missing middle segment is refused (`JournalGap`), never rebuilt around.
 
 The tail is approximate in both directions. The journal's last few unsynced records can be lost. And under `Periodic` or `Never`, the journal, which is fed from the in-memory commit stream, can hold writes the crashed store lost, so a rebuild is slightly ahead of what the store would have recovered. Both are acceptable. You reach for the journal only when the store itself is gone, and the rebuild replaces it.
 
