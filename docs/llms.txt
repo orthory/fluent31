@@ -1,0 +1,81 @@
+# fluent31
+
+> fluent31 is an embedded key-value database engine in Rust whose query surface is WebAssembly. You install code into the database, and the engine runs it as reads, as transactions, and as triggers — against an LSM store built to move as few bytes as possible.
+
+Every page of the documentation, one file each, in reading order.
+The HTML site at https://orthory.github.io/fluent31 is the same content for humans; its
+per-page URLs are fragments, so fetch the files below instead.
+
+Read `SKILL.md` first if you are about to write fluent31 code — it is
+the dense primer, and it names the assumptions carried over from other
+databases that are wrong here.
+
+## Primer
+
+- [SKILL.md](https://raw.githubusercontent.com/orthory/fluent31/master/SKILL.md): the model in twelve lines, exact signatures, every trap, and the priors that do not transfer.
+
+## Specs
+
+- [WASM.md](https://raw.githubusercontent.com/orthory/fluent31/master/WASM.md): module authoring manual and the normative host ABI.
+- [DESIGN.md](https://raw.githubusercontent.com/orthory/fluent31/master/DESIGN.md): the architecture as implemented, section by section.
+- [REPLICATION.md](https://raw.githubusercontent.com/orthory/fluent31/master/REPLICATION.md): the replica protocol.
+
+## Start here
+
+- [Introduction](https://orthory.github.io/fluent31/p/introduction.md): fluent31 is an embedded key-value database engine in Rust whose query surface is WebAssembly. You install code into the database, and the engine runs it as reads, as transactions, and as triggers — against an LSM store built to move as few bytes as possible.
+- [Install](https://orthory.github.io/fluent31/p/installation.md): Stable Rust, one optional wasm target, two cargo features.
+
+## Tutorial
+
+- [Your first store](https://orthory.github.io/fluent31/p/first-store.md): One command, no code: a running database you can write to and read back.
+- [Serve it over GraphQL](https://orthory.github.io/fluent31/p/first-graphql.md): The same store on a network surface, with a schema, an explorer and live subscriptions — no code yet.
+- [Your first module](https://orthory.github.io/fluent31/p/first-module.md): Install code into the database and call it by name. This is the feature the rest of the engine is arranged around.
+- [Your first trigger](https://orthory.github.io/fluent31/p/first-trigger.md): Bind a module to a key range and the engine invokes it after every committed write into that range. Derived data stops being the writer's problem.
+- [Embed it in Rust](https://orthory.github.io/fluent31/p/embed.md): The shell and the server are wrappers around a library. This is the library.
+
+## Concepts
+
+- [Snapshots and seqnos](https://orthory.github.io/fluent31/p/snapshots.md): Every write gets a sequence number; every read happens at one. That single idea is the engine's whole notion of time.
+- [The consistency contract](https://orthory.github.io/fluent31/p/consistency.md): MVCC is how the engine gives you consistent reads and optimistic transactions. It is not an application-level version store, and the rules below follow from that.
+- [Transactions](https://orthory.github.io/fluent31/p/transactions.md): Optimistic, snapshot isolation, first committer wins.
+- [Branching the database](https://orthory.github.io/fluent31/p/concept-forks.md): `fork("name")` publishes a complete, consistent copy of the whole database — at a cost proportional to the number of files, not the amount of data.
+- [Reactive derived state](https://orthory.github.io/fluent31/p/concept-triggers.md): Bind a module to a key range and the engine invokes it after every committed write into that range. Derived data maintains itself, whoever did the writing.
+
+## Extending with WASM
+
+- [Code in the database](https://orthory.github.io/fluent31/p/wasm-overview.md): The query surface is WebAssembly. You install modules into the database and call them by name — as reads, as transactions, or as the consumers behind a trigger.
+- [Roles and lifecycles](https://orthory.github.io/fluent31/p/wasm-roles.md): A module's exports decide what it is. Each role has its own input, its own execution context, and its own rules about what happens when it fails.
+- [What to build with it](https://orthory.github.io/fluent31/p/wasm-uses.md): The shapes a module takes, grouped by the role that carries them — and an honest account of what a module cannot do.
+- [The guest SDK](https://orthory.github.io/fluent31/p/wasm-sdk.md): `fluent-guest` is the Rust crate you write modules against. It wraps the host ABI in safe functions, and its macros generate the exports.
+- [The host ABI](https://orthory.github.io/fluent31/p/wasm-abi.md): The raw interface between the engine and a guest: thirteen imported functions and a handful of exports. The guest SDK wraps all of it — this page is what you need to write a module in another language, to hand-write WAT, or to reason about a limit precisely.
+- [Typed GraphQL fields](https://orthory.github.io/fluent31/p/wasm-typed.md): A module that exports `describe` becomes its own root field the moment it is installed. No schema file, no resolver, no server restart.
+- [Invoking and debugging](https://orthory.github.io/fluent31/p/wasm-invoking.md): Every surface reaches the same modules, installed or not, with the same limits and the same failures.
+
+## Reference
+
+- [Embedded API](https://orthory.github.io/fluent31/p/embedded-api.md): The `fluent31` crate, embedded in a Rust process: open, read, write, scan, snapshot, transact, maintain.
+- [Triggers](https://orthory.github.io/fluent31/p/triggers.md): Bind a module to a key range and the engine invokes it after every committed write into the range: indexes, views, feeds, cascades.
+- [Forks, pins, clones](https://orthory.github.io/fluent31/p/forks.md): A fork is a named, consistent branch of the whole database, published as a complete database directory.
+- [Durability & recovery](https://orthory.github.io/fluent31/p/durability.md): What an ack means, what survives a crash, and the journal for the day the store directory itself is lost.
+- [GraphQL API](https://orthory.github.io/fluent31/p/graphql.md): `POST /graphql` for the primary, `POST /graphql/<instanceId>` for a fork. A `GET` serves GraphiQL; a WebSocket upgrade with the graphql-ws subprotocol serves subscriptions.
+- [The shell](https://orthory.github.io/fluent31/p/shell.md): An interactive prompt over one store, and the journal rebuild tool.
+- [Server mode](https://orthory.github.io/fluent31/p/server.md): One process, one `Db`, two planes.
+- [Replication](https://orthory.github.io/fluent31/p/replication.md): Read-only replicas that attach to a running master's join point and hold the slice of the tree overlapping their key scope.
+- [Operations](https://orthory.github.io/fluent31/p/operations.md): The directory on disk, the knobs that matter, what to watch, and the hard limits.
+- [Testing](https://orthory.github.io/fluent31/p/testing.md): One workspace suite, plus fault injection, endurance and benches.
+- [Architecture](https://orthory.github.io/fluent31/p/internals.md): The engine as implemented: the write path, the storage layout, the concurrency-control machinery, recovery, and the subsystems built on top of them. The behaviour documented elsewhere on this site follows from the mechanisms described here.
+- [Glossary](https://orthory.github.io/fluent31/p/glossary.md): The words the docs lean on, in one place.
+
+## Recipes
+
+- [Choosing the shape](https://orthory.github.io/fluent31/p/choosing.md): Six shapes cover the work. Start from the category of database work you have, not from the tool.
+- [Queries in the database](https://orthory.github.io/fluent31/p/ex-queries.md): The category: report-shaped reads — count, sum, rank, filter, limit — where the answer is small and the data it summarizes is not.
+- [Invariants & procedures](https://orthory.github.io/fluent31/p/ex-executors.md): The category: writes whose correctness depends on what was read — transfers, unique claims, id allocation, multi-record updates that must land together.
+- [Secondary indexes](https://orthory.github.io/fluent31/p/ex-indexes.md): The category: finding records by something other than their key — a trigger plus a key convention.
+- [Views, feeds, cascades](https://orthory.github.io/fluent31/p/ex-views-feeds.md): The category: derived data that must be exact and ordered — live aggregate tables, audit logs and event streams, referential cleanup. All changes mode.
+- [Migrations & one-shots](https://orthory.github.io/fluent31/p/ex-oneshot.md): The category: changes you make once — format migrations, backfills, data repair, ad-hoc admin jobs. An ordinary executor, invoked without being installed.
+- [Forks in practice](https://orthory.github.io/fluent31/p/ex-forks.md): The category: everything you'd want a copy of production for — rehearsal, staging, rollback anchors, backups — priced at hard-link cost.
+
+## Coming from SQL
+
+- [Translation guide](https://orthory.github.io/fluent31/p/sql-mapping.md): A complete translation of the relational vocabulary into fluent31: what each construct becomes, what it costs, and what has no equivalent at all.

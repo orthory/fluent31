@@ -196,8 +196,9 @@ rotation-vs-GC data-loss window found in design review.
   retention of old versions is its side effect, and seqnos survive
   neither journal rebuild (replayed as fresh writes — seqnos renumber,
   pre-base history collapses) nor identity re-mint (§14). Applications that need per-entity history
-  materialize it as user keys via a changes-mode trigger (§9); GUIDE.md
-  "The consistency contract" (§4.3) is the user-facing statement.
+  materialize it as user keys via a changes-mode trigger (§9);
+  "The consistency contract" in the usage docs is the user-facing
+  statement.
 
 ## 7. IO backends
 
@@ -488,7 +489,7 @@ profile blocks io_uring — run with `--security-opt seccomp=unconfined`.
   span. Write stalls are logged per episode (a gauge counts parked
   writers; the first in and the last out log), and `set_bg_error` logs
   every failure even though its slot keeps only the first. Level policy
-  and the heartbeat: GUIDE §14.3.
+  and the heartbeat: "Monitoring" in the usage docs.
 - Cargo features: `wasm` (default) gates wasmtime; `--no-default-features`
   builds the pure storage engine (used to cross-check the uring backend).
 - Group commit (committer-thread pipeline): `SyncMode::Always` batch

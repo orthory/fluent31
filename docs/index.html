@@ -747,12 +747,12 @@ subscription { orderFeed { seqno event { id record } query { snapshotSeqno } } }
         </ul>
 
         <h2>The documents</h2>
-        <p>This site is the usage documentation, built from the repository's <code>GUIDE.md</code>. The specs behind it live in the repo — when a detail matters, they win, and when the docs and the code disagree, the code wins.</p>
+        <p>This site is the usage documentation and its source. The same pages are generated as one markdown file each, under <code>docs/p/</code>, indexed by <a href="https://orthory.github.io/fluent31/llms.txt">llms.txt</a> — that is the copy to point an agent at, because a fetcher cannot address a page here. The specs below go beneath what this site describes; when a detail matters they win, and when the docs and the code disagree, the code wins.</p>
         <div class="tablewrap"><table>
           <thead><tr><th>Document</th><th>Covers</th></tr></thead>
           <tbody>
-            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/GUIDE.md">GUIDE.md</a></td><td>The usage document this site is built from.</td></tr>
-            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/SKILL.md">SKILL.md</a></td><td>The short entry point for agents: the model in twelve lines, commands, traps.</td></tr>
+            <tr><td><a href="https://orthory.github.io/fluent31/llms.txt">llms.txt</a></td><td>Every page here as one fetchable markdown file, in reading order. The index an agent should start from.</td></tr>
+            <tr><td><a href="https://github.com/orthory/fluent31/blob/master/SKILL.md">SKILL.md</a></td><td>The primer for agents: the model in twelve lines, exact signatures, the traps, and the assumptions carried in from other databases that are wrong here.</td></tr>
             <tr><td><a href="https://github.com/orthory/fluent31/blob/master/WASM.md">WASM.md</a></td><td>The module authoring manual and ABI spec.</td></tr>
             <tr><td><a href="https://github.com/orthory/fluent31/blob/master/DESIGN.md">DESIGN.md</a></td><td>The architecture as implemented, section by section.</td></tr>
             <tr><td><a href="https://github.com/orthory/fluent31/blob/master/REPLICATION.md">REPLICATION.md</a></td><td>The replica protocol spec.</td></tr>
@@ -1487,7 +1487,7 @@ scan_close      : (h: i32) -&gt; i32   <span class="c">// free the handle</span>
   "output": "PlacedOrder!",
   "feed": {"prefix": "feed/", "event": "OrderFeedEntry!"}
 }"#</span>);</pre></div>
-        <p>It is a static string, evaluated by running the export with an empty input, so it cannot depend on the data.</p>
+        <p>It is a static string, evaluated by running the export with an empty input, so it cannot depend on the data. Read one back with <code>db.describe_module("name")</code>, or with <code>db.describe_wasm(&amp;bytes)</code> to inspect a module before installing it; both return <code>None</code> when the module does not export <code>describe</code>.</p>
 
         <h2>The type grammar</h2>
         <ul>
@@ -1648,6 +1648,7 @@ db.delete(key)?;               <span class="c">// succeeds whether or not the ke
 b.put(<span class="s">"a"</span>, <span class="s">"1"</span>); b.delete(<span class="s">"b"</span>);
 b.len(); b.is_empty(); b.byte_size();
 db.write(b)?;                  <span class="c">// atomic, one contiguous seqno range</span></pre></div>
+        <p>Point writes and batches carry no read set. <code>put</code>, <code>delete</code> and <code>write</code> are never conflict-checked and can never return <code>Error::Conflict</code> — a batch is atomic, not isolated. If what you write depends on what you read, that is a <a href="#transactions">transaction</a>, not a batch.</p>
 
         <h2>Scans</h2>
         <div class="codeblock"><pre><span class="c">// [lo, hi); None = open end; reverse = descending</span>
@@ -1685,6 +1686,7 @@ txn.commit()?;                               <span class="c">// or txn.rollback(
 db.flush()?;         <span class="c">// freeze the memtable and wait until it is in tables</span>
 db.compact_all()?;   <span class="c">// compact until no trigger fires</span>
 db.gc_vlog()?;       <span class="c">// one value-log GC pass; Ok(Some(file_id)) if a file was retired</span>
+db.log_stats();      <span class="c">// the stats() snapshot as one info log line (the heartbeat calls this)</span>
 <span class="k">let</span> s: DbStats = db.stats();</pre></div>
         <p><code>DbStats</code> has <code>backend</code> (<code>"io_uring"</code> or <code>"std"</code>), <code>visible_seqno</code>, <code>memtable_bytes</code>, <code>immutable_memtables</code>, <code>levels</code> as a <code>Vec&lt;(runs, files, bytes)&gt;</code>, <code>vlog_files</code>, <code>vlog_retired</code> (retired files waiting on the deletion gates), <code>discard_bytes</code> (value-log bytes known to be dead), <code>cache_hits</code>, <code>cache_misses</code>, <code>commit_groups</code>, <code>commit_batches</code> (the difference from <code>commit_groups</code> is how many fsyncs group commit saved), <code>wal_syncs</code>, <code>subscriptions</code> (live stream subscriptions, each buffering up to <code>sub_queue_bytes</code>) and <code>snapshots</code> (registered snapshots — explicit, transactions, pins and subscription holds — every one a GC hold).</p>
         <p>Compaction and value-log GC run on their own on background threads. The manual calls exist for tests, benchmarks and "reclaim now".</p>
@@ -1698,6 +1700,9 @@ db.list_modules()?;                        <span class="c">// Vec&lt;ModuleInfo&
 <span class="k">let</span> out: Vec&lt;u8&gt; = db.execute(<span class="s">"name"</span>, input)?;   <span class="c">// requires `execute`; OCC-retried</span>
 db.query_wasm(&amp;wasm, input)?;              <span class="c">// one-shot: bytes never installed</span>
 db.execute_wasm(&amp;wasm, input)?;
+
+db.describe_module(<span class="s">"name"</span>)?;                <span class="c">// Option&lt;Vec&lt;u8&gt;&gt;: the `describe` output, None if not exported</span>
+db.describe_wasm(&amp;wasm)?;                  <span class="c">// the same, on bytes you have not installed</span>
 
 db.create_trigger(<span class="s">"name"</span>, <span class="s">"module"</span>, Some(<span class="s">b"orders/"</span>), Some(<span class="s">b"orders0"</span>))?;
 db.delete_trigger(<span class="s">"name"</span>)?;
@@ -2528,7 +2533,7 @@ mktrig orderFeed order_feed orders/ orders0      <span class="c"># mode auto-det
         <p>Walk a prefix, skip already-migrated records, rewrite the rest:</p>
         <div class="codeblock"><div class="bar">user_v2.rs (a one-shot migration)</div><pre><span class="w">#[fluent_guest::execute]</span>
 <span class="k">fn</span> user_v2(_input: Vec&lt;u8&gt;) -&gt; Result&lt;String, Fail&gt; {
-    <span class="k">let</span> scan = fluent_guest::scan_prefix(<span class="s">b"user/"</span>).map_err(|e| Fail::new(2, <span class="s">"scan"</span>))?;
+    <span class="k">let</span> scan = fluent_guest::scan_prefix(<span class="s">b"user/"</span>).map_err(|_| Fail::new(2, <span class="s">"scan"</span>))?;
     <span class="k">let mut</span> migrated = 0u64;
     <span class="k">for</span> (key, value) <span class="k">in</span> scan {
         <span class="k">let</span> old: serde_json::Value = serde_json::from_slice(&amp;value)
@@ -2538,7 +2543,7 @@ mktrig orderFeed order_feed orders/ orders0      <span class="c"># mode auto-det
         }
         <span class="k">let</span> new = serde_json::json!({ <span class="s">"v"</span>: 2, <span class="s">"name"</span>: old });
         fluent_guest::put(&amp;key, new.to_string().as_bytes())
-            .map_err(|e| Fail::new(4, <span class="s">"put"</span>))?;
+            .map_err(|_| Fail::new(4, <span class="s">"put"</span>))?;
         migrated += 1;
     }
     Ok(format!(<span class="s">"migrated {migrated}"</span>))
