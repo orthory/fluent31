@@ -128,6 +128,7 @@ db.sync_wal()?;      // barrier: everything acked before this is durable on retu
 db.flush()?;         // freeze the memtable and wait until it is in tables
 db.compact_all()?;   // compact until no trigger fires
 db.gc_vlog()?;       // one value-log GC pass; Ok(Some(file_id)) if a file was retired
+db.log_stats();      // the stats() snapshot as one info log line (the heartbeat calls this)
 let s: DbStats = db.stats();
 ```
 

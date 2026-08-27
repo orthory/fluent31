@@ -269,6 +269,7 @@ db.pins() -> Vec<PinInfo>
 db.sync_wal() / db.flush() / db.compact_all() -> Result<()>
 db.gc_vlog() -> Result<Option<u64>>
 db.stats() -> DbStats
+db.log_stats()                            // the stats() snapshot as one info log line
 db.identity() -> Option<StoreIdentity>
 ```
 
