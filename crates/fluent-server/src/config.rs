@@ -11,6 +11,16 @@
 //! built-in default. Unknown keys are an error — a typo must not
 //! silently fall back.
 //!
+//! The `[edge]` section flips the process's role: present, the binary is
+//! an **edge server** — it attaches an edge replica to a master's
+//! replication plane and serves the read-only edge GraphQL surface
+//! (`get`/`scan`, scope-clamped) on `[listen].graphql`; `dir` is then the
+//! replica's local cache directory (wiped on attach). Settings that
+//! configure a store of record (`store-name`, `sync`, `[engine]`,
+//! `[journal]`, `[replication]`, `[listen].replication`, the `[graphql]`
+//! fork tuning) are refused in edge mode — an edge has no store to apply
+//! them to.
+//!
 //! ```toml
 //! dir = "./data"
 //! store-name = "prod"
@@ -37,6 +47,14 @@
 //!
 //! [log]
 //! stats-every-secs = 60         # engine stats line per open store; 0 = off
+//!
+//! [edge]                        # present = the process is an edge server
+//! master-addr = "10.0.0.5:8428" # the master's replication plane
+//! scope-lo = { text = "user/" } # bytes as text or hex; omitted = unbounded
+//! scope-hi = { hex = "7573657230" }
+//! refresh-every-secs = 300      # periodic slice refresh; 0 = only on re-sync
+//! value-cache-bytes = 268435456
+//! block-cache-size = 33554432
 //!
 //! [engine]
 //! create-if-missing = true
@@ -77,6 +95,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use fluent31::{Compression, IoBackend, JournalConfig, Options, SyncMode};
+use fluent_replication::EdgeReplicaConfig;
 use serde::Deserialize;
 
 /// One optional slot per setting the binary accepts. Doubles as the
@@ -97,6 +116,7 @@ pub struct FileConfig {
     pub journal: Option<JournalSection>,
     pub engine: Option<EngineSection>,
     pub log: Option<LogSection>,
+    pub edge: Option<EdgeSection>,
 }
 
 #[derive(Debug, Default, PartialEq, Deserialize)]
@@ -165,6 +185,87 @@ impl JournalSection {
             c.compact_min_bytes = v;
         }
         c
+    }
+}
+
+/// Bytes in exactly one encoding — the config-file twin of the GraphQL
+/// `BytesInput` oneof.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum BytesSpec {
+    Text { text: String },
+    Hex { hex: String },
+}
+
+impl BytesSpec {
+    pub fn decode(&self) -> Result<Vec<u8>, String> {
+        match self {
+            BytesSpec::Text { text } => Ok(text.clone().into_bytes()),
+            BytesSpec::Hex { hex } => decode_hex(hex),
+        }
+    }
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+    let well_formed = s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit());
+    if !well_formed {
+        return Err(format!(
+            "invalid hex bytes {s:?} (even number of hex digits required)"
+        ));
+    }
+    Ok((0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("validated hex"))
+        .collect())
+}
+
+/// The edge server role ([`fluent_replication::EdgeReplica`] + the
+/// read-only edge GraphQL plane): the section being present selects it.
+/// Tuning fields mirror [`EdgeReplicaConfig`]; an absent field keeps its
+/// default.
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct EdgeSection {
+    /// The master's replication plane address. Required once the section
+    /// exists — an `[edge]` that names no master is refused at startup.
+    pub master_addr: Option<String>,
+    /// Scope `[lo, hi)`; an omitted bound is unbounded on that side.
+    pub scope_lo: Option<BytesSpec>,
+    pub scope_hi: Option<BytesSpec>,
+    /// Periodic slice refresh in seconds (prunes the stream overlay);
+    /// `0` refreshes only on re-sync.
+    pub refresh_every_secs: Option<u64>,
+    pub value_cache_bytes: Option<u64>,
+    pub block_cache_size: Option<usize>,
+}
+
+impl EdgeSection {
+    /// The replica attachment this section describes, over
+    /// [`EdgeReplicaConfig::new`]'s defaults. `dir` is the top-level `dir`
+    /// (the replica's local cache directory).
+    pub fn replica_config(&self, dir: &str) -> Result<EdgeReplicaConfig, String> {
+        let Some(master) = &self.master_addr else {
+            return Err("[edge] section needs master-addr".into());
+        };
+        let lo = match &self.scope_lo {
+            Some(b) => b.decode().map_err(|e| format!("edge scope-lo: {e}"))?,
+            None => Vec::new(),
+        };
+        let hi = match &self.scope_hi {
+            Some(b) => Some(b.decode().map_err(|e| format!("edge scope-hi: {e}"))?),
+            None => None,
+        };
+        let mut cfg = EdgeReplicaConfig::new(master.clone(), dir, lo, hi);
+        if let Some(secs) = self.refresh_every_secs {
+            cfg.refresh_every = (secs > 0).then(|| Duration::from_secs(secs));
+        }
+        if let Some(v) = self.value_cache_bytes {
+            cfg.value_cache_bytes = v;
+        }
+        if let Some(v) = self.block_cache_size {
+            cfg.block_cache_size = v;
+        }
+        Ok(cfg)
     }
 }
 
@@ -312,7 +413,65 @@ impl FileConfig {
             }),
             engine: self.engine.or(file.engine),
             log: self.log.or(file.log),
+            edge: merge(self.edge, file.edge, |a, b| EdgeSection {
+                master_addr: a.master_addr.or(b.master_addr),
+                scope_lo: a.scope_lo.or(b.scope_lo),
+                scope_hi: a.scope_hi.or(b.scope_hi),
+                refresh_every_secs: a.refresh_every_secs.or(b.refresh_every_secs),
+                value_cache_bytes: a.value_cache_bytes.or(b.value_cache_bytes),
+                block_cache_size: a.block_cache_size.or(b.block_cache_size),
+            }),
         }
+    }
+
+    /// Settings that configure a store of record, present although `[edge]`
+    /// selected the edge role — an edge has no store to apply them to, and
+    /// a setting that silently does nothing is a config error here like
+    /// everywhere else. Empty = no conflict.
+    pub fn edge_conflicts(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.store_name.is_some() {
+            out.push("store-name");
+        }
+        if self.sync.is_some() {
+            out.push("sync");
+        }
+        if self.engine.is_some() {
+            out.push("[engine]");
+        }
+        if self.journal.is_some() {
+            out.push("[journal]");
+        }
+        if self.replication.is_some() {
+            out.push("[replication]");
+        }
+        if self.listen.as_ref().is_some_and(|l| l.replication.is_some()) {
+            out.push("listen.replication");
+        }
+        let fork_tuning_set = self
+            .graphql
+            .as_ref()
+            .is_some_and(|g| g.fork_max_open.is_some() || g.fork_idle_ttl_secs.is_some());
+        if fork_tuning_set {
+            out.push("[graphql] fork tuning");
+        }
+        out
+    }
+
+    /// The edge plane's listen address and limits, applied over
+    /// [`crate::EdgeServerConfig::default`].
+    pub fn edge_server_config(&self) -> crate::EdgeServerConfig {
+        let mut c = crate::EdgeServerConfig::default();
+        if let Some(v) = self.listen.as_ref().and_then(|l| l.graphql.as_ref()) {
+            c.graphql_addr = v.clone();
+        }
+        if let Some(v) = self.graphql.as_ref().and_then(|g| g.max_body_bytes) {
+            c.max_body_bytes = v;
+        }
+        if let Some(v) = self.log.as_ref().and_then(|l| l.stats_every_secs) {
+            c.stats_every = Duration::from_secs(v);
+        }
+        c
     }
 
     /// The listen addresses and per-plane limits, applied over
@@ -561,6 +720,106 @@ mod tests {
         assert_eq!(c.replication.ping_every, Duration::from_millis(500));
         assert_eq!(c.replication.max_frame, d.replication.max_frame);
         assert_eq!(c.max_body_bytes, d.max_body_bytes);
+    }
+
+    #[test]
+    fn edge_section_builds_the_replica_config() {
+        let cfg: FileConfig = toml::from_str(
+            r#"
+            dir = "./cache"
+            [edge]
+            master-addr = "10.0.0.5:8428"
+            scope-lo = { text = "user/" }
+            scope-hi = { hex = "7573657230" }
+            refresh-every-secs = 0
+            value-cache-bytes = 1024
+            "#,
+        )
+        .unwrap();
+        let r = cfg.edge.as_ref().unwrap().replica_config("./cache").unwrap();
+        assert_eq!(r.master_addr, "10.0.0.5:8428");
+        assert_eq!(r.scope_lo, b"user/".to_vec());
+        assert_eq!(r.scope_hi.as_deref(), Some(b"user0".as_slice()));
+        assert_eq!(r.refresh_every, None);
+        assert_eq!(r.value_cache_bytes, 1024);
+        let d = EdgeReplicaConfig::new("x", "y", Vec::new(), None);
+        assert_eq!(r.block_cache_size, d.block_cache_size);
+    }
+
+    #[test]
+    fn edge_section_without_master_is_refused() {
+        let cfg: FileConfig = toml::from_str("[edge]\nvalue-cache-bytes = 1").unwrap();
+        let err = cfg.edge.as_ref().unwrap().replica_config("./c").unwrap_err();
+        assert!(err.contains("master-addr"), "{err}");
+    }
+
+    #[test]
+    fn edge_bytes_are_exactly_one_encoding() {
+        let both = "[edge]\nscope-lo = { text = \"a\", hex = \"61\" }";
+        assert!(toml::from_str::<FileConfig>(both).is_err());
+        let neither = "[edge]\nscope-lo = { txt = \"a\" }";
+        assert!(toml::from_str::<FileConfig>(neither).is_err());
+        let bad_hex: FileConfig =
+            toml::from_str("[edge]\nmaster-addr = \"m\"\nscope-lo = { hex = \"6\" }").unwrap();
+        assert!(bad_hex.edge.unwrap().replica_config("./c").is_err());
+    }
+
+    #[test]
+    fn edge_conflicts_name_store_only_settings() {
+        let cfg: FileConfig = toml::from_str(
+            r#"
+            store-name = "prod"
+            sync = "always"
+            [listen]
+            graphql = "127.0.0.1:1"
+            replication = "127.0.0.1:2"
+            [graphql]
+            max-body-bytes = 1024
+            fork-max-open = 2
+            [engine]
+            memtable-size = 65536
+            [edge]
+            master-addr = "m:1"
+            "#,
+        )
+        .unwrap();
+        let conflicts = cfg.edge_conflicts();
+        for name in [
+            "store-name",
+            "sync",
+            "[engine]",
+            "listen.replication",
+            "[graphql] fork tuning",
+        ] {
+            assert!(conflicts.contains(&name), "{name} missing from {conflicts:?}");
+        }
+        // the settings the edge role does serve are not conflicts
+        assert!(!conflicts.iter().any(|c| *c == "[graphql]"));
+        let clean: FileConfig =
+            toml::from_str("[edge]\nmaster-addr = \"m:1\"\n[graphql]\nmax-body-bytes = 1")
+                .unwrap();
+        assert!(clean.edge_conflicts().is_empty());
+    }
+
+    #[test]
+    fn edge_server_config_applies_sections() {
+        let cfg: FileConfig = toml::from_str(
+            r#"
+            [listen]
+            graphql = "127.0.0.1:7"
+            [graphql]
+            max-body-bytes = 2048
+            [log]
+            stats-every-secs = 0
+            [edge]
+            master-addr = "m:1"
+            "#,
+        )
+        .unwrap();
+        let c = cfg.edge_server_config();
+        assert_eq!(c.graphql_addr, "127.0.0.1:7");
+        assert_eq!(c.max_body_bytes, 2048);
+        assert_eq!(c.stats_every, Duration::ZERO);
     }
 
     #[test]

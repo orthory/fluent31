@@ -4,9 +4,12 @@ The replication channel for fluent31: a small **ephemeral edge replica**
 holds the slice of one master's tree that overlaps its key scope
 `[lo, hi)`, serves reads locally, and reaches back for what it doesn't
 have. Server: `fluent-server` on a named store (join point default
-`127.0.0.1:8428`). Edge replicas are embedded: the process that needs
+`127.0.0.1:8428`). Edge replicas are embedded — the process that needs
 the scoped reads drives one with `fluent_replication::EdgeReplica` and
-reads through `EdgeReplica::store()`. Library types:
+reads through `EdgeReplica::store()` — or served: `fluent-server
+<cache-dir> --edge-master ADDR` runs the same driver and serves the
+read-only edge GraphQL surface over it (`get`/`scan` in the primary
+plane's grammar, scope-clamped, no mutation root). Library types:
 `fluent_replication::{ReplServer, ReplClient, EdgeReplica}`, engine-side
 `fluent31::edge::EdgeStore`.
 
@@ -142,8 +145,11 @@ Reads: overlay → fragments; values: inline → local value cache →
 `FETCH_VALUE`. The local value cache is an append-only file of verbatim
 records, reset wholesale when it exceeds its cap. The replica is read
 through `EdgeReplica::store()`: `get` and `scan`, clamped to the scope;
-an out-of-scope `get` answers `InvalidArgument`. It serves no network
-protocol of its own — the embedding process owns any onward surface.
+an out-of-scope `get` answers `InvalidArgument`. The driver serves no
+network protocol of its own — the embedding process owns any onward
+surface. `fluent-server`'s edge role is that surface as a binary: the
+read-only edge GraphQL plane over the replica (each field reads the
+edge's current frontier — an edge has no MVCC snapshots to pin).
 The driver logs (`tracing`) its attach, each slice pull and each
 re-sync at `info`, and a `LAGGED` cut, a broken stream or a provenance
 mismatch at `warn`; the server logs each subscription and why it ended.

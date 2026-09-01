@@ -6,7 +6,7 @@
 
 > Read-only replicas that attach to a running master's join point and hold the slice of the tree overlapping their key scope.
 
-The scope is unbounded for a full replica and narrow for an edge cache. The overlapping index fragments are copied locally, values are fetched lazily and cached, and committed in-scope writes stream in. The replica is a library component: the process that needs the scoped reads embeds an `EdgeReplica` and reads through its store (`get` and `scan`, clamped to the scope). [REPLICATION.md](https://github.com/orthory/fluent31/blob/master/REPLICATION.md) is the spec.
+The scope is unbounded for a full replica and narrow for an edge cache. The overlapping index fragments are copied locally, values are fetched lazily and cached, and committed in-scope writes stream in. The replica is a library component — the process that needs the scoped reads embeds an `EdgeReplica` and reads through its store (`get` and `scan`, clamped to the scope) — or the server binary serves it: the edge role ([Server mode](server.md)) is the same driver behind the read-only edge GraphQL surface. [REPLICATION.md](https://github.com/orthory/fluent31/blob/master/REPLICATION.md) is the spec.
 
 ```
 # master: fluent-server on a named store opens the join point (:8428)
@@ -22,7 +22,7 @@ fluent-server ./data --store-name prod [--replication 127.0.0.1:8428]
 - **Lag.** A slow edge is cut off (`LAGGED`) rather than stalling the master. It re-syncs and keeps its caches.
 - **Scope.** An out-of-scope `get` is refused (`InvalidArgument`), scans clamp to the scope, and the reserved keyspace is never copied or streamed.
 
-The limits are deliberate: one contiguous scope per replica, read-only, embedded (a replica serves no network protocol of its own), a memory-only stream overlay (a restart re-attaches), and no WASM at the edge.
+The limits are deliberate: one contiguous scope per replica, read-only, a library driver that serves no network protocol of its own (the server binary's edge role is the onward surface), a memory-only stream overlay (a restart re-attaches), and no WASM at the edge.
 
 ## Embedding a replica
 

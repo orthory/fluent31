@@ -23,10 +23,14 @@
 //! resolvers hop onto the blocking thread pool via
 //! [`tokio::task::spawn_blocking`] — gated by [`EnginePermits`] so stalled
 //! writers cannot exhaust the pool and starve reads (or vice versa).
+//!
+//! A second, read-only schema serves edge replicas: the same `get`/`scan`
+//! grammar over an `EdgeStore`, with no mutation root (see `edge.rs`).
 
 mod builtins;
 mod bytes;
 mod descriptor;
+mod edge;
 mod error;
 mod modules;
 mod registry;
@@ -43,6 +47,7 @@ use fluent31::{Db, Snapshot};
 use tokio::sync::Semaphore;
 
 pub use descriptor::{parse_descriptor, ModuleSchema};
+pub use edge::{edge_router, edge_schema, edge_sdl, EdgeStoreProvider};
 pub use error::engine_err;
 pub use registry::{InstanceRegistry, RegistryConfig, ResolveError};
 pub use router::router;

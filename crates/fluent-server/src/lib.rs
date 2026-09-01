@@ -1,6 +1,6 @@
-//! Server mode for fluent31: every network plane over one store, in one
-//! process.
+//! Server mode for fluent31: one process, one of two roles.
 //!
+//! **Store server** ([`Server`]) — every network plane over one store.
 //! The engine flocks its directory, so GraphQL and the replication master
 //! cannot run as separate processes against the same data. This crate is
 //! the one-process composition: a single [`Db`] handle shared by
@@ -14,6 +14,12 @@
 //!   identity, so this plane is served only when the store is named
 //!   (`Options::store_name`, persisted after first adoption).
 //!
+//! **Edge server** ([`EdgeServer`]) — a networked edge: one
+//! [`EdgeReplica`] attached to a master's replication plane, serving the
+//! read-only edge GraphQL surface (`get`/`scan`, scope-clamped — see
+//! `fluent_graphql::edge_router`) over HTTP. No store of record, no
+//! replication join point, no journal.
+//!
 //! Each plane keeps its own blocking-pool gate (GraphQL 128 read + 32
 //! write, replication 64); the combined worst case of 224 parked engine
 //! calls stays under tokio's default 512 blocking threads.
@@ -24,16 +30,17 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use fluent31::edge::EdgeStore;
 use fluent31::{Db, Options};
 use fluent_graphql::{InstanceRegistry, RegistryConfig, SchemaManager};
-use fluent_replication::{ReplServer, ReplServerConfig};
+use fluent_replication::{EdgeReplica, ReplServer, ReplServerConfig};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tracing::error;
+use tracing::{error, info};
 
 pub use config::{
-    parse_sync, CompressionKey, ConfigError, EngineSection, FileConfig, GraphqlSection,
-    IoBackendKey, JournalSection, ListenSection, LogSection, ReplicationSection,
+    parse_sync, BytesSpec, CompressionKey, ConfigError, EdgeSection, EngineSection, FileConfig,
+    GraphqlSection, IoBackendKey, JournalSection, ListenSection, LogSection, ReplicationSection,
 };
 
 /// Listen addresses plus each composed plane's tunables. Every plane is
@@ -227,5 +234,132 @@ impl Server {
         }
         let _ = self.graphql_stop.send(());
         let _ = self.graphql_task.await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Edge role
+// ---------------------------------------------------------------------------
+
+/// The edge plane's listen address and limits — the edge role's
+/// counterpart to [`ServerConfig`], carrying only what an edge serves
+/// (one GraphQL plane; no replication join point, no fork registry).
+pub struct EdgeServerConfig {
+    pub graphql_addr: String,
+    /// GraphQL HTTP request body cap in bytes.
+    pub max_body_bytes: usize,
+    /// Period of the stats heartbeat (an INFO line with the replica's
+    /// [`fluent31::edge::EdgeStats`]); zero turns it off.
+    pub stats_every: std::time::Duration,
+}
+
+impl Default for EdgeServerConfig {
+    fn default() -> Self {
+        EdgeServerConfig {
+            graphql_addr: "127.0.0.1:8317".into(),
+            max_body_bytes: 32 << 20,
+            stats_every: std::time::Duration::from_secs(60),
+        }
+    }
+}
+
+/// fluent-graphql reads through this so every request sees the replica's
+/// CURRENT store — a re-sync (lag cutoff, master swap) replaces the
+/// [`EdgeStore`] under a live server.
+struct ReplicaStores(Arc<EdgeReplica>);
+
+impl fluent_graphql::EdgeStoreProvider for ReplicaStores {
+    fn store(&self) -> Arc<EdgeStore> {
+        self.0.store()
+    }
+}
+
+/// A running edge server: the read-only edge GraphQL plane over one
+/// replica attachment (see `fluent_graphql::edge_router` for what the
+/// plane serves and refuses).
+pub struct EdgeServer {
+    replica: Arc<EdgeReplica>,
+    pub graphql_addr: SocketAddr,
+    graphql_task: JoinHandle<()>,
+    graphql_stop: tokio::sync::oneshot::Sender<()>,
+    stats_task: Option<JoinHandle<()>>,
+}
+
+impl EdgeServer {
+    /// Bind and start serving on the current runtime. The replica is
+    /// attached (and its initial sync complete) before this is called —
+    /// nothing binds until the edge can answer with a complete scoped
+    /// view.
+    pub async fn start(
+        replica: Arc<EdgeReplica>,
+        cfg: EdgeServerConfig,
+    ) -> Result<EdgeServer, StartError> {
+        let listener = bind("graphql", &cfg.graphql_addr).await?;
+        let graphql_addr = listener.local_addr().map_err(|err| StartError::Bind {
+            plane: "graphql",
+            addr: cfg.graphql_addr.clone(),
+            err,
+        })?;
+
+        let provider = Arc::new(ReplicaStores(replica.clone()));
+        let app = fluent_graphql::edge_router(provider, cfg.max_body_bytes);
+        let (graphql_stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let graphql_task = tokio::spawn(async move {
+            let shutdown = async move {
+                stop_rx.await.ok();
+            };
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown)
+                .await
+            {
+                error!(error = %e, "edge graphql plane failed");
+            }
+        });
+
+        let stats_task = (!cfg.stats_every.is_zero())
+            .then(|| tokio::spawn(edge_stats_heartbeat(replica.clone(), cfg.stats_every)));
+
+        Ok(EdgeServer {
+            replica,
+            graphql_addr,
+            graphql_task,
+            graphql_stop,
+            stats_task,
+        })
+    }
+
+    pub fn replica(&self) -> &Arc<EdgeReplica> {
+        &self.replica
+    }
+
+    /// Stop accepting and drain in-flight GraphQL requests. The replica
+    /// itself is stopped by dropping the last [`EdgeReplica`] handle.
+    pub async fn shutdown(self) {
+        if let Some(t) = &self.stats_task {
+            t.abort();
+        }
+        let _ = self.graphql_stop.send(());
+        let _ = self.graphql_task.await;
+    }
+}
+
+/// One INFO line with the replica's [`fluent31::edge::EdgeStats`] every
+/// `every` — the edge role's counterpart to
+/// [`fluent_graphql::stats_heartbeat`]. The first line comes after one
+/// period, not at start (the attach already reported the opening state).
+async fn edge_stats_heartbeat(replica: Arc<EdgeReplica>, every: std::time::Duration) {
+    let mut tick = tokio::time::interval(every);
+    tick.tick().await; // an interval's first tick is immediate
+    loop {
+        tick.tick().await;
+        let s = replica.store().stats();
+        info!(
+            frontier_seqno = s.frontier_seqno,
+            flushed_seqno = s.flushed_seqno,
+            fragments = s.fragments,
+            overlay_bytes = s.overlay_bytes,
+            value_cache_bytes = s.value_cache_bytes,
+            "edge stats"
+        );
     }
 }

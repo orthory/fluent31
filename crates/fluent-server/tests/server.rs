@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use fluent31::{journal, Db, Options, SyncMode};
 use fluent_replication::{EdgeReplica, EdgeReplicaConfig};
-use fluent_server::{Server, ServerConfig};
+use fluent_server::{EdgeServer, EdgeServerConfig, Server, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn ephemeral_cfg() -> ServerConfig {
@@ -121,6 +121,76 @@ async fn all_planes_over_one_store() {
     })
     .await;
 
+    server.shutdown().await;
+}
+
+/// A networked edge: the edge server speaks the primary plane's read
+/// grammar over HTTP, clamped to its scope, and refuses everything else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn edge_server_serves_scoped_read_only_graphql() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = Options {
+        sync: SyncMode::Never,
+        store_name: Some("srv-test".to_string()),
+        ..Options::default()
+    };
+    let db = Arc::new(Db::open(dir.path(), opts.clone()).unwrap());
+    let server = Server::start(db, dir.path(), opts, ephemeral_cfg())
+        .await
+        .unwrap();
+    let repl_addr = server.replication_addr.expect("named store");
+    server.db().put("user/1", "ada").unwrap();
+    server.db().put("admin/1", "root").unwrap();
+
+    let edir = tempfile::tempdir().unwrap();
+    let replica = attach(edge_cfg(repl_addr, &edir.path().join("e"), b"user/", Some(b"user0"))).await;
+    let edge = EdgeServer::start(
+        replica,
+        EdgeServerConfig {
+            graphql_addr: "127.0.0.1:0".into(),
+            stats_every: Duration::ZERO,
+            ..EdgeServerConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // in-scope get answers with the master's value
+    let resp = graphql_post(
+        edge.graphql_addr,
+        r#"{"query":"{ get(key: {text: \"user/1\"}) { text } }"}"#,
+    )
+    .await;
+    assert!(resp.contains(r#""text":"ada""#), "{resp}");
+
+    // out-of-scope get refuses loudly (field error, null data)
+    let resp = graphql_post(
+        edge.graphql_addr,
+        r#"{"query":"{ get(key: {text: \"admin/1\"}) { text } }"}"#,
+    )
+    .await;
+    assert!(resp.contains("scope"), "{resp}");
+    assert!(!resp.contains("root"), "{resp}");
+
+    // an unbounded scan clamps into the scope: edge-visible keys only
+    let resp = graphql_post(
+        edge.graphql_addr,
+        r#"{"query":"{ scan { pairs { key { text } } hasMore } }"}"#,
+    )
+    .await;
+    assert!(resp.contains(r#""text":"user/1""#), "{resp}");
+    assert!(!resp.contains("admin/1"), "{resp}");
+
+    // the surface is read-only: there is no mutation root to invoke
+    let resp = graphql_post(
+        edge.graphql_addr,
+        r#"{"query":"mutation { put(key: {text: \"user/9\"}, value: {text: \"x\"}) }"}"#,
+    )
+    .await;
+    assert!(resp.contains("errors"), "{resp}");
+    assert!(!resp.contains(r#""put":true"#), "{resp}");
+
+    edge.shutdown().await;
     server.shutdown().await;
 }
 
