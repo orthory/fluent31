@@ -20,7 +20,7 @@ log · §9 WASM layer · §10 forks · §11 concurrency & locks ·
 
 ```
 <dir>/
-  LOCK                 # flock'd exclusively for the process lifetime
+  LOCK                 # flock'd exclusively while the store is open; unlocked explicitly at close
   CURRENT              # "MANIFEST-<gen>\n" (tmp + fsync + rename + dir fsync)
   MANIFEST-<gen>       # full metadata snapshot (§5)
   wal-<id>.log         # write-ahead logs, one per memtable generation
