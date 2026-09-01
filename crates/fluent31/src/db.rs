@@ -214,6 +214,43 @@ impl Drop for StallHold<'_> {
     }
 }
 
+/// Exclusive ownership of a store directory (a held `flock`). Release is
+/// an explicit act of the close path, not a side effect of closing the
+/// descriptor: a flock survives its holder's close while ANY duplicate of
+/// the descriptor exists, and every fd in the process is transiently
+/// duplicated into a concurrently forked child until that child execs.
+/// Unlocking explicitly is what makes "close, then reopen the same
+/// directory" synchronous whatever else the process is doing.
+pub(crate) struct DirLock {
+    file: std::fs::File,
+}
+
+impl DirLock {
+    /// Take the directory's exclusive lock, refusing if another live store
+    /// — in this process or any other — holds it.
+    fn acquire(dir: &Path) -> Result<DirLock> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("LOCK"))?;
+        if file.try_lock().is_err() {
+            return Err(Error::InvalidArgument(format!(
+                "{} is locked by another process",
+                dir.display()
+            )));
+        }
+        Ok(DirLock { file })
+    }
+}
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        // failure leaves release to the descriptor's last close
+        let _ = self.file.unlock();
+    }
+}
+
 pub(crate) struct DbInner {
     pub opts: Options,
     pub paths: DbPaths,
@@ -278,8 +315,11 @@ pub(crate) struct DbInner {
     #[cfg(feature = "wasm")]
     pub triggers: crate::trigger::TriggerState,
 
-    /// Held for the process lifetime to exclude concurrent opens.
-    _lock_file: std::fs::File,
+    /// Held while the store is open to exclude concurrent opens; released
+    /// explicitly when the last handle drops (see `DirLock`), so a reopen
+    /// of the directory may begin the moment that drop returns. Last field:
+    /// the lock outlives the rest of the teardown.
+    _lock: DirLock,
 }
 
 impl DbInner {
@@ -1296,7 +1336,9 @@ fn parse_file_id(name: &str, prefix: &str, suffix: &str) -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 /// An open database. Dropping it shuts down background work and joins the
-/// maintenance threads.
+/// maintenance threads; once the last outstanding handle (snapshot,
+/// transaction, subscription) is gone with it, the directory lock is
+/// released and a reopen of the same directory may begin immediately.
 pub struct Db {
     pub(crate) inner: Arc<DbInner>,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -2144,19 +2186,8 @@ fn open_inner_with(
         }
     }
 
-    // exclusive directory lock for the process lifetime
-    let lock_path = dir.join("LOCK");
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    if lock_file.try_lock().is_err() {
-        return Err(Error::InvalidArgument(format!(
-            "{} is locked by another process",
-            dir.display()
-        )));
-    }
+    // exclusive directory lock, held until the close path releases it
+    let lock = DirLock::acquire(dir)?;
 
     let (io_backend, backend_name) = match io_override {
         Some(pair) => pair,
@@ -2444,7 +2475,7 @@ fn open_inner_with(
         wasm,
         #[cfg(feature = "wasm")]
         triggers: crate::trigger::TriggerState::new(),
-        _lock_file: lock_file,
+        _lock: lock,
     });
 
     // Re-register durable pins as snapshots BEFORE any background thread
@@ -3345,5 +3376,37 @@ mod group_commit_tests {
             inner.visible_seqno.load(Ordering::Acquire),
             MAX_SEQNO - 2
         );
+    }
+}
+
+#[cfg(test)]
+mod dir_lock_tests {
+    use super::*;
+
+    /// A concurrently forked child transiently inherits every fd in the
+    /// process, keeping the lock's file description alive past our close —
+    /// modeled here by a duplicated lock fd held across the drop. The
+    /// reopen must succeed anyway: release is the close path's explicit
+    /// act, never a side effect of the description's last close.
+    #[test]
+    fn close_then_reopen_succeeds_while_inherited_lock_fd_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path(), Options::default()).unwrap();
+        let inherited_fd = db.inner._lock.file.try_clone().unwrap();
+        drop(db);
+        let reopened = crate::Db::open(dir.path(), Options::default());
+        drop(inherited_fd);
+        reopened.unwrap();
+    }
+
+    /// The lock still excludes a second open while the store is live.
+    #[test]
+    fn second_open_of_a_live_store_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let _db = crate::Db::open(dir.path(), Options::default()).unwrap();
+        let second = crate::Db::open(dir.path(), Options::default());
+        let refused_as_locked =
+            matches!(&second, Err(Error::InvalidArgument(m)) if m.contains("locked"));
+        assert!(refused_as_locked);
     }
 }
