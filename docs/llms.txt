@@ -60,7 +60,7 @@ databases that are wrong here.
 - [Durability & recovery](https://orthory.github.io/fluent31/p/durability.md): What an ack means, what survives a crash, and the journal for the day the store directory itself is lost.
 - [GraphQL API](https://orthory.github.io/fluent31/p/graphql.md): `POST /graphql` for the primary, `POST /graphql/<instanceId>` for a fork. A `GET` serves GraphiQL; a WebSocket upgrade with the graphql-ws subprotocol serves subscriptions.
 - [The shell](https://orthory.github.io/fluent31/p/shell.md): An interactive prompt over one store, and the journal rebuild tool.
-- [Server mode](https://orthory.github.io/fluent31/p/server.md): One process, one `Db`, two planes.
+- [Server mode](https://orthory.github.io/fluent31/p/server.md): One process, one `Db`, two planes — or, in the edge role, one replica served read-only.
 - [Replication](https://orthory.github.io/fluent31/p/replication.md): Read-only replicas that attach to a running master's join point and hold the slice of the tree overlapping their key scope.
 - [Operations](https://orthory.github.io/fluent31/p/operations.md): The directory on disk, the knobs that matter, what to watch, and the hard limits.
 - [Testing](https://orthory.github.io/fluent31/p/testing.md): One workspace suite, plus fault injection, endurance and benches.

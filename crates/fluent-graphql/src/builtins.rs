@@ -25,11 +25,8 @@ use async_graphql::{Error, Name, Value};
 use fluent31::WriteBatch;
 
 use crate::bytes::decode_bytes_input;
-use crate::schema::{manager, pinned_snap, BytesVal, ScanPageVal, TriggerVal};
+use crate::schema::{manager, pinned_snap, BytesVal, ScanArgs, ScanPageVal, TriggerVal};
 use crate::ModuleStatus;
-
-const DEFAULT_SCAN_LIMIT: i64 = 100;
-const MAX_SCAN_LIMIT: i64 = 10_000;
 
 /// Smallest key strictly greater than every key with this prefix, or None
 /// when the prefix is all 0xFF (the range is unbounded above).
@@ -46,7 +43,7 @@ pub(crate) fn prefix_end(p: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-fn arg_bytes(ctx: &ResolverContext<'_>, name: &str) -> Result<Vec<u8>, Error> {
+pub(crate) fn arg_bytes(ctx: &ResolverContext<'_>, name: &str) -> Result<Vec<u8>, Error> {
     decode_bytes_input(&ctx.args.try_get(name)?.object()?)
 }
 
@@ -123,61 +120,29 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
             .description("Point lookup at this operation's snapshot. Null when the key is absent."),
         )
         .field(
+            // the argument list is declared per plane (the docs checker
+            // reads it here); the edge plane's SDL-equality test pins the
+            // two declarations to each other, and ScanArgs::parse is the
+            // one implementation of the grammar
             Field::new("scan", TypeRef::named("ScanPage"), |ctx| {
                 FieldFuture::new(async move {
-                    let reverse = match ctx.args.get("reverse") {
-                        Some(v) if !v.is_null() => v.boolean()?,
-                        _ => false,
-                    };
-                    let limit = match ctx.args.get("limit") {
-                        Some(v) if !v.is_null() => v.i64()?,
-                        _ => DEFAULT_SCAN_LIMIT,
-                    };
-                    if !(1..=MAX_SCAN_LIMIT).contains(&limit) {
-                        return Err(format!("limit must be in 1..={MAX_SCAN_LIMIT}").into());
-                    }
-                    let prefix = opt_arg_bytes(&ctx, "prefix")?;
-                    let lo_arg = opt_arg_bytes(&ctx, "lo")?;
-                    let hi_arg = opt_arg_bytes(&ctx, "hi")?;
-                    let (mut lo, mut hi) = match prefix {
-                        Some(p) => {
-                            if lo_arg.is_some() || hi_arg.is_some() {
-                                return Err("prefix cannot be combined with lo/hi".into());
-                            }
-                            let end = prefix_end(&p);
-                            (Some(p), end)
-                        }
-                        None => (lo_arg, hi_arg),
-                    };
-                    // `after` restarts strictly past the cursor in iteration order
-                    if let Some(a) = opt_arg_bytes(&ctx, "after")? {
-                        if reverse {
-                            hi = Some(match hi {
-                                Some(h) if h < a => h,
-                                _ => a,
-                            });
-                        } else {
-                            let mut succ = a;
-                            succ.push(0);
-                            lo = Some(match lo {
-                                Some(l) if l > succ => l,
-                                _ => succ,
-                            });
-                        }
-                    }
+                    let args = ScanArgs::parse(&ctx)?;
                     let mgr = manager(&ctx)?;
                     let snap = pinned_snap(&ctx, &mgr.db)?;
                     let db = mgr.db.clone();
-                    let take = limit as usize;
                     let (pairs, has_more) = mgr
                         .blocking_read(move || {
-                            let it =
-                                db.iter_at(lo.as_deref(), hi.as_deref(), reverse, &snap)?;
+                            let it = db.iter_at(
+                                args.lo.as_deref(),
+                                args.hi.as_deref(),
+                                args.reverse,
+                                &snap,
+                            )?;
                             let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
                             let mut has_more = false;
                             for item in it {
                                 let (k, v) = item?;
-                                if pairs.len() == take {
+                                if pairs.len() == args.limit {
                                     has_more = true;
                                     break;
                                 }
@@ -186,14 +151,9 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
                             Ok((pairs, has_more))
                         })
                         .await?;
-                    let next_after = has_more
-                        .then(|| pairs.last().map(|(k, _)| k.clone()))
-                        .flatten();
-                    Ok(Some(FieldValue::owned_any(ScanPageVal {
-                        pairs,
-                        has_more,
-                        next_after,
-                    })))
+                    Ok(Some(FieldValue::owned_any(ScanPageVal::new(
+                        pairs, has_more,
+                    ))))
                 })
             })
             .argument(InputValue::new("lo", TypeRef::named("BytesInput")))

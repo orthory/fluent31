@@ -2133,13 +2133,16 @@ fluent-cli journal-rebuild &lt;journal-dir&gt; &lt;dest-dir&gt;</pre></div>
       <!-- ============================================================ -->
       <article data-page="server">
         <h1>Server mode</h1>
-        <p class="lead">One process, one <code>Db</code>, two planes.</p>
+        <p class="lead">One process, one <code>Db</code>, two planes — or, in the edge role, one replica served read-only.</p>
 
         <div class="codeblock"><pre>fluent-server &lt;db-dir&gt; [<span class="w">--config</span> FILE] [<span class="w">--store-name</span> NAME]
               [<span class="w">--graphql</span> ADDR:PORT] [<span class="w">--replication</span> ADDR:PORT]
               [<span class="w">--sync</span> always|never|periodic:&lt;ms&gt;] [<span class="w">--max-body-bytes</span> N]
               [<span class="w">--journal</span> DIR]
-fluent-server <span class="w">--print-schema</span>                   <span class="c"># the base SDL (built-ins only)</span></pre></div>
+fluent-server &lt;cache-dir&gt; <span class="w">--edge-master</span> ADDR:PORT
+              [<span class="w">--edge-scope-lo</span> TEXT] [<span class="w">--edge-scope-hi</span> TEXT]
+fluent-server <span class="w">--print-schema</span>                   <span class="c"># the base SDL (built-ins only)</span>
+fluent-server <span class="w">--print-edge-schema</span>              <span class="c"># the edge surface's SDL</span></pre></div>
         <div class="tablewrap"><table>
           <thead><tr><th>Plane</th><th>Default</th><th>Purpose</th></tr></thead>
           <tbody>
@@ -2187,6 +2190,22 @@ compression = <span class="s">"none"</span>          <span class="c"># none | lz
 memtable-size = 8388608
 <span class="c"># … every Options field from the Embedded API page, kebab-case</span></pre></div>
 
+        <h2>Edge role</h2>
+        <p><code>--edge-master ADDR</code> (or an <code>[edge]</code> config section) flips the binary's role: instead of opening a store it attaches an edge replica (<a href="#replication">Replication</a>) to the master's join point and serves the read-only edge GraphQL surface over it — <code>get</code> and <code>scan</code> in the primary plane's exact grammar, clamped to the replica's scope, at the edge's current replication frontier (an edge has no snapshots to pin). No mutation root, no admin fields, no WASM, no subscriptions, no fork instances. <code>&lt;cache-dir&gt;</code> is the replica's local cache, wiped on attach. <code>--edge-scope-lo</code>/<code>--edge-scope-hi</code> take text keys; hex keys go in the file. Settings that configure a store of record (<code>store-name</code>, <code>sync</code>, <code>[engine]</code>, <code>[journal]</code>, <code>[replication]</code>, the fork tuning) are refused in this role. <code>--print-edge-schema</code> prints the surface's SDL.</p>
+        <div class="codeblock"><div class="bar">edge.toml</div><pre>dir = <span class="s">"./cache"</span>                <span class="c"># the replica's local cache (wiped on attach)</span>
+
+[listen]
+graphql = <span class="s">"127.0.0.1:8317"</span>
+
+[edge]                        <span class="c"># present = the process is an edge server</span>
+master-addr = <span class="s">"10.0.0.5:8428"</span>
+scope-lo = { text = <span class="s">"user/"</span> } <span class="c"># bytes as text or hex; omitted = unbounded</span>
+scope-hi = { hex = <span class="s">"7573657230"</span> }
+refresh-every-secs = 300      <span class="c"># slice refresh; 0 = only on re-sync</span>
+value-cache-bytes = 268435456
+block-cache-size = 33554432</pre></div>
+        <p>Embedding it: start an <code>EdgeReplica</code>, then <code>EdgeServer::start(replica, EdgeServerConfig { graphql_addr, max_body_bytes, stats_every }).await?</code>; <code>shutdown()</code> drains like the store server, and the heartbeat logs the replica's <code>EdgeStats</code>. The GraphQL plane alone is <code>fluent_graphql::edge_router(provider, max_body)</code> over anything implementing <code>EdgeStoreProvider</code>.</p>
+
         <h2>Embedding the server</h2>
         <div class="codeblock"><pre><span class="k">use</span> fluent_server::{Server, ServerConfig};
 
@@ -2203,7 +2222,7 @@ server.shutdown().<span class="k">await</span>;</pre></div>
         <h1>Replication</h1>
         <p class="lead">Read-only replicas that attach to a running master's join point and hold the slice of the tree overlapping their key scope.</p>
 
-        <p>The scope is unbounded for a full replica and narrow for an edge cache. The overlapping index fragments are copied locally, values are fetched lazily and cached, and committed in-scope writes stream in. The replica is a library component: the process that needs the scoped reads embeds an <code>EdgeReplica</code> and reads through its store (<code>get</code> and <code>scan</code>, clamped to the scope). <a href="https://github.com/orthory/fluent31/blob/master/REPLICATION.md">REPLICATION.md</a> is the spec.</p>
+        <p>The scope is unbounded for a full replica and narrow for an edge cache. The overlapping index fragments are copied locally, values are fetched lazily and cached, and committed in-scope writes stream in. The replica is a library component — the process that needs the scoped reads embeds an <code>EdgeReplica</code> and reads through its store (<code>get</code> and <code>scan</code>, clamped to the scope) — or the server binary serves it: the edge role (<a href="#server">Server mode</a>) is the same driver behind the read-only edge GraphQL surface. <a href="https://github.com/orthory/fluent31/blob/master/REPLICATION.md">REPLICATION.md</a> is the spec.</p>
         <div class="codeblock"><pre><span class="c"># master: fluent-server on a named store opens the join point (:8428)</span>
 fluent-server ./data <span class="w">--store-name</span> prod [<span class="w">--replication</span> 127.0.0.1:8428]</pre></div>
 
@@ -2216,7 +2235,7 @@ fluent-server ./data <span class="w">--store-name</span> prod [<span class="w">-
           <li><strong>Lag.</strong> A slow edge is cut off (<code>LAGGED</code>) rather than stalling the master. It re-syncs and keeps its caches.</li>
           <li><strong>Scope.</strong> An out-of-scope <code>get</code> is refused (<code>InvalidArgument</code>), scans clamp to the scope, and the reserved keyspace is never copied or streamed.</li>
         </ul>
-        <p>The limits are deliberate: one contiguous scope per replica, read-only, embedded (a replica serves no network protocol of its own), a memory-only stream overlay (a restart re-attaches), and no WASM at the edge.</p>
+        <p>The limits are deliberate: one contiguous scope per replica, read-only, a library driver that serves no network protocol of its own (the server binary's edge role is the onward surface), a memory-only stream overlay (a restart re-attaches), and no WASM at the edge.</p>
 
         <h2>Embedding a replica</h2>
         <div class="codeblock"><pre><span class="k">let mut</span> cfg = EdgeReplicaConfig::new(<span class="s">"127.0.0.1:8428"</span>, <span class="s">"/tmp/edge"</span>,

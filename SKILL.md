@@ -206,7 +206,7 @@ forks are not restored, and seqnos are renumbered. Redeploy them.
 9. If you need history, materialize it with a changes-mode trigger under your own keys. MVCC is not a version store.
 10. Forks are hard-linked complete database directories; opening one gives a writable copy-on-write clone. Pins make a seqno fork-able later. Both are coarse, named, and few.
 11. `SyncMode::Always` means acked implies fsynced (group-committed). `Periodic` and `Never` trade a loss window, never corruption. The journal is opt-in, off the commit path, and rebuilds user data only.
-12. One process per store directory (flock). Server mode is one process with GraphQL and replication. Replication needs a `store_name`. Forks are instances at `/graphql/<instanceId>`, and the id is an address, not a credential.
+12. One process per store directory (flock). Server mode is one process with GraphQL and replication (`--edge-master` turns the binary into a networked edge instead: read-only GraphQL over an edge replica). Replication needs a `store_name`. Forks are instances at `/graphql/<instanceId>`, and the id is an address, not a credential.
 
 ## Exact signatures
 
@@ -330,7 +330,7 @@ scripts/build-agent-docs.py --check                                       # agen
 - Migration: a one-shot executor (`execonce`, `wasmExecuteOnce`, `db.execute_wasm`), idempotent by inspection, rehearsed on a fork.
 - Backup, staging, rollback: `fork(name)`; `pin` then `fork_at`; `restore_to`.
 - Disaster recovery: attach a journal (`--journal DIR`, or a `[journal]` section in the server TOML); rebuild with `fluent-cli journal-rebuild`. Mirror it off-box from Rust with `Journal::attach_observed` and a `JournalObserver` (`attached`/`appended`/`rotated`/`pruned`/`stopped` — every reported length is fsynced, facts arrive in order, a compaction reports the new base durable before the superseded files gone); `journal::log_file_name`/`log_file_id` are the segment naming contract.
-- Replica: a named master, then embed `fluent_replication::EdgeReplica` in the reading process.
+- Replica: a named master, then embed `fluent_replication::EdgeReplica` in the reading process — or serve it: `fluent-server <cache-dir> --edge-master ADDR` is the networked edge, read-only GraphQL `get`/`scan` clamped to the scope.
 - Wait for a trigger: there is no synchronous drain. Poll `list_triggers()` until every `pending == 0` and `last_error` is `None`, with a deadline. The reference loop is `crates/fluent31/examples/util/mod.rs::drain`.
 - Diagnose: the binaries log to stderr (`RUST_LOG`; default `info`, `fluent-cli` `warn`). Store open/close, every flush, compaction and value-log GC, forks, modules, triggers, journal and replication lifecycle at `info`; stalls, lag cuts, trigger failures and WASM traps at `warn`; every background failure at `error`; a per-store stats heartbeat every 60 s (`[log] stats-every-secs`). GraphQL requests are not logged.
 

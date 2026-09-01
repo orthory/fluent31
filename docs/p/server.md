@@ -4,14 +4,17 @@
 
 # Server mode
 
-> One process, one `Db`, two planes.
+> One process, one `Db`, two planes — or, in the edge role, one replica served read-only.
 
 ```
 fluent-server <db-dir> [--config FILE] [--store-name NAME]
               [--graphql ADDR:PORT] [--replication ADDR:PORT]
               [--sync always|never|periodic:<ms>] [--max-body-bytes N]
               [--journal DIR]
+fluent-server <cache-dir> --edge-master ADDR:PORT
+              [--edge-scope-lo TEXT] [--edge-scope-hi TEXT]
 fluent-server --print-schema                   # the base SDL (built-ins only)
+fluent-server --print-edge-schema              # the edge surface's SDL
 ```
 
 | Plane | Default | Purpose |
@@ -65,6 +68,28 @@ compression = "none"          # none | lz4
 memtable-size = 8388608
 # … every Options field from the Embedded API page, kebab-case
 ```
+
+## Edge role
+
+`--edge-master ADDR` (or an `[edge]` config section) flips the binary's role: instead of opening a store it attaches an edge replica ([Replication](replication.md)) to the master's join point and serves the read-only edge GraphQL surface over it — `get` and `scan` in the primary plane's exact grammar, clamped to the replica's scope, at the edge's current replication frontier (an edge has no snapshots to pin). No mutation root, no admin fields, no WASM, no subscriptions, no fork instances. `<cache-dir>` is the replica's local cache, wiped on attach. `--edge-scope-lo`/`--edge-scope-hi` take text keys; hex keys go in the file. Settings that configure a store of record (`store-name`, `sync`, `[engine]`, `[journal]`, `[replication]`, the fork tuning) are refused in this role. `--print-edge-schema` prints the surface's SDL.
+
+<!-- edge.toml -->
+```
+dir = "./cache"                # the replica's local cache (wiped on attach)
+
+[listen]
+graphql = "127.0.0.1:8317"
+
+[edge]                        # present = the process is an edge server
+master-addr = "10.0.0.5:8428"
+scope-lo = { text = "user/" } # bytes as text or hex; omitted = unbounded
+scope-hi = { hex = "7573657230" }
+refresh-every-secs = 300      # slice refresh; 0 = only on re-sync
+value-cache-bytes = 268435456
+block-cache-size = 33554432
+```
+
+Embedding it: start an `EdgeReplica`, then `EdgeServer::start(replica, EdgeServerConfig { graphql_addr, max_body_bytes, stats_every }).await?`; `shutdown()` drains like the store server, and the heartbeat logs the replica's `EdgeStats`. The GraphQL plane alone is `fluent_graphql::edge_router(provider, max_body)` over anything implementing `EdgeStoreProvider`.
 
 ## Embedding the server
 

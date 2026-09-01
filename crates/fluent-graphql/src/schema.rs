@@ -29,9 +29,124 @@ pub(crate) struct ScanPageVal {
     pub next_after: Option<Vec<u8>>,
 }
 
+impl ScanPageVal {
+    /// `nextAfter` is the page's last key exactly when more entries remain —
+    /// derived here so every plane's scan pages paginate identically.
+    pub(crate) fn new(pairs: Vec<(Vec<u8>, Vec<u8>)>, has_more: bool) -> ScanPageVal {
+        let next_after = has_more
+            .then(|| pairs.last().map(|(k, _)| k.clone()))
+            .flatten();
+        ScanPageVal {
+            pairs,
+            has_more,
+            next_after,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// resolver plumbing shared by builtins.rs / modules.rs
+// resolver plumbing shared by builtins.rs / modules.rs / edge.rs
 // ---------------------------------------------------------------------------
+
+pub(crate) const DEFAULT_SCAN_LIMIT: i64 = 100;
+pub(crate) const MAX_SCAN_LIMIT: i64 = 10_000;
+
+/// Permit semaphores are the primary defense against alias amplification;
+/// these just reject absurd documents while leaving room for GraphiQL's
+/// introspection query. Shared by every served schema (primary and edge).
+pub(crate) const LIMIT_DEPTH: usize = 32;
+pub(crate) const LIMIT_COMPLEXITY: usize = 5_000;
+
+/// The scan argument grammar, shared by every plane that serves `scan`
+/// (primary and edge): `prefix` XOR `lo`/`hi`, an `after` cursor that
+/// restarts strictly past its key in iteration order, `reverse`, and a
+/// validated `limit`. Parsing normalizes everything down to one range +
+/// direction + page size, so resolvers differ only in which store they
+/// read.
+pub(crate) struct ScanArgs {
+    pub lo: Option<Vec<u8>>,
+    pub hi: Option<Vec<u8>>,
+    pub reverse: bool,
+    pub limit: usize,
+}
+
+impl ScanArgs {
+    pub(crate) fn parse(ctx: &ResolverContext<'_>) -> Result<ScanArgs, Error> {
+        let reverse = match ctx.args.get("reverse") {
+            Some(v) if !v.is_null() => v.boolean()?,
+            _ => false,
+        };
+        let limit = match ctx.args.get("limit") {
+            Some(v) if !v.is_null() => v.i64()?,
+            _ => DEFAULT_SCAN_LIMIT,
+        };
+        if !(1..=MAX_SCAN_LIMIT).contains(&limit) {
+            return Err(format!("limit must be in 1..={MAX_SCAN_LIMIT}").into());
+        }
+        let prefix = crate::builtins::opt_arg_bytes(ctx, "prefix")?;
+        let lo_arg = crate::builtins::opt_arg_bytes(ctx, "lo")?;
+        let hi_arg = crate::builtins::opt_arg_bytes(ctx, "hi")?;
+        let (mut lo, mut hi) = match prefix {
+            Some(p) => {
+                if lo_arg.is_some() || hi_arg.is_some() {
+                    return Err("prefix cannot be combined with lo/hi".into());
+                }
+                let end = crate::builtins::prefix_end(&p);
+                (Some(p), end)
+            }
+            None => (lo_arg, hi_arg),
+        };
+        // `after` restarts strictly past the cursor in iteration order
+        if let Some(a) = crate::builtins::opt_arg_bytes(ctx, "after")? {
+            if reverse {
+                hi = Some(match hi {
+                    Some(h) if h < a => h,
+                    _ => a,
+                });
+            } else {
+                let mut succ = a;
+                succ.push(0);
+                lo = Some(match lo {
+                    Some(l) if l > succ => l,
+                    _ => succ,
+                });
+            }
+        }
+        Ok(ScanArgs {
+            lo,
+            hi,
+            reverse,
+            limit: limit as usize,
+        })
+    }
+}
+
+/// A blocking engine call behind a permit gate: the permit moves INTO the
+/// blocking closure, so a request cancelled mid-call keeps its pool slot
+/// accounted for until the detached engine work actually finishes.
+pub(crate) async fn gated_blocking<T, F>(
+    sem: &Arc<tokio::sync::Semaphore>,
+    f: F,
+) -> Result<T, Error>
+where
+    F: FnOnce() -> fluent31::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = sem
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|e| Error::new(format!("engine gate closed: {e}")))?;
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        f()
+    })
+    .await
+    {
+        Ok(r) => r.map_err(crate::engine_err),
+        Err(e) => Err(Error::new(format!("engine worker failed: {e}"))),
+    }
+}
 
 pub(crate) fn manager(ctx: &ResolverContext<'_>) -> Result<Arc<SchemaManager>, Error> {
     ctx.data::<Weak<SchemaManager>>()?
@@ -76,23 +191,7 @@ impl SchemaManager {
         F: FnOnce() -> fluent31::Result<T> + Send + 'static,
         T: Send + 'static,
     {
-        let permit = sem
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| Error::new(format!("engine gate closed: {e}")))?;
-        // the permit moves INTO the blocking closure: if the request is
-        // cancelled mid-call the detached engine work keeps its pool slot
-        // accounted for until it actually finishes
-        match tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            f()
-        })
-        .await
-        {
-            Ok(r) => r.map_err(crate::engine_err),
-            Err(e) => Err(Error::new(format!("engine worker failed: {e}"))),
-        }
+        gated_blocking(sem, f).await
     }
 }
 
@@ -264,7 +363,7 @@ fn scalar_json() -> Scalar {
     Scalar::new("Json").description("Opaque JSON value, passed through unvalidated.")
 }
 
-fn bytes_object() -> Object {
+pub(crate) fn bytes_object() -> Object {
     Object::new("Bytes")
         .description("Raw bytes; request whichever representations you need.")
         .field(Field::new("text", TypeRef::named(TypeRef::STRING), |ctx| {
@@ -303,7 +402,7 @@ fn bytes_object() -> Object {
         }))
 }
 
-fn bytes_input() -> InputObject {
+pub(crate) fn bytes_input() -> InputObject {
     InputObject::new("BytesInput")
         .description("Raw bytes in exactly one encoding.")
         .oneof()
@@ -312,7 +411,7 @@ fn bytes_input() -> InputObject {
         .field(InputValue::new("hex", TypeRef::named(TypeRef::STRING)))
 }
 
-fn pair_object() -> Object {
+pub(crate) fn pair_object() -> Object {
     Object::new("Pair")
         .field(Field::new("key", TypeRef::named_nn("Bytes"), |ctx| {
             FieldFuture::new(async move {
@@ -328,7 +427,7 @@ fn pair_object() -> Object {
         }))
 }
 
-fn scan_page_object() -> Object {
+pub(crate) fn scan_page_object() -> Object {
     Object::new("ScanPage")
         .field(Field::new(
             "pairs",
@@ -564,11 +663,8 @@ pub(crate) fn build(
         .register(query)
         .register(mutation)
         .register(subscription)
-        // permit semaphores are the primary defense against alias
-        // amplification; these just reject absurd documents while leaving
-        // room for GraphiQL's introspection query
-        .limit_depth(32)
-        .limit_complexity(5_000)
+        .limit_depth(LIMIT_DEPTH)
+        .limit_complexity(LIMIT_COMPLEXITY)
         .data(weak);
     for t in module_types {
         builder = builder.register(t);
