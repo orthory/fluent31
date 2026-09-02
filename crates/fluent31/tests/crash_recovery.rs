@@ -154,8 +154,8 @@ fn periodic_mode_recovers_consistent_gapless_prefix() {
     let n = db
         .iter(None, None, false)
         .unwrap()
-        .map(|r| r.unwrap())
-        .count();
+        .try_fold(0usize, |n, r| r.map(|_| n + 1))
+        .unwrap();
     assert!(n > 0);
     db.put(b"post".to_vec(), b"1".to_vec()).unwrap();
 }
@@ -170,7 +170,7 @@ fn never_mode_recovers_consistent_gapless_prefix() {
     let n = db
         .iter(None, None, false)
         .unwrap()
-        .map(|r| r.unwrap())
-        .count();
+        .try_fold(0usize, |n, r| r.map(|_| n + 1))
+        .unwrap();
     assert!(n > 0);
 }

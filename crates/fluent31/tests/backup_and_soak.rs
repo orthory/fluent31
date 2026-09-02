@@ -91,8 +91,8 @@ fn fork_backup_under_load_restores_to_an_independent_store() {
     let n = restored
         .iter(None, None, false)
         .unwrap()
-        .map(|r| r.unwrap())
-        .count();
+        .try_fold(0usize, |n, r| r.map(|_| n + 1))
+        .unwrap();
     assert!(n >= 500);
 
     // the restore is independently writable and isolated from the parent

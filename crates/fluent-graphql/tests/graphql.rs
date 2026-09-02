@@ -1242,7 +1242,7 @@ async fn descriptor_kind_must_match_role_entry() {
     let errs = run_err(
         &schema,
         r#"mutation I($w: BytesInput!) { installModule(name: "mismatch", wasm: $w) { name } }"#,
-        json!({"w": {"text": wat.clone()}}),
+        json!({"w": {"text": wat}}),
     )
     .await;
     assert!(

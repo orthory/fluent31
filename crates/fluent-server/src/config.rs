@@ -207,7 +207,7 @@ impl BytesSpec {
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    let well_formed = s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit());
+    let well_formed = s.len().is_multiple_of(2) && s.chars().all(|c| c.is_ascii_hexdigit());
     if !well_formed {
         return Err(format!(
             "invalid hex bytes {s:?} (even number of hex digits required)"
@@ -663,7 +663,6 @@ mod tests {
             listen: Some(ListenSection {
                 graphql: Some("file:2".into()),
                 replication: Some("file:1".into()),
-                ..ListenSection::default()
             }),
             engine: Some(EngineSection {
                 tier_width: Some(2),
@@ -818,7 +817,7 @@ mod tests {
             );
         }
         // the settings the edge role does serve are not conflicts
-        assert!(!conflicts.iter().any(|c| *c == "[graphql]"));
+        assert!(!conflicts.contains(&"[graphql]"));
         let clean: FileConfig =
             toml::from_str("[edge]\nmaster-addr = \"m:1\"\n[graphql]\nmax-body-bytes = 1").unwrap();
         assert!(clean.edge_conflicts().is_empty());

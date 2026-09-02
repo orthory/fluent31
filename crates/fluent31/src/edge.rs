@@ -200,6 +200,10 @@ impl ValueCache {
     }
 }
 
+/// One page of a scoped scan: up to `limit` visible `(key, value)` pairs,
+/// and whether more follow past the last one.
+pub type ScanPage = (Vec<(Vec<u8>, Vec<u8>)>, bool);
+
 /// A scoped, read-only replica cache. See the module docs for the model.
 pub struct EdgeStore {
     cfg: EdgeConfig,
@@ -435,7 +439,7 @@ impl EdgeStore {
         hi: Option<&[u8]>,
         reverse: bool,
         limit: usize,
-    ) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, bool)> {
+    ) -> Result<ScanPage> {
         let lo: Vec<u8> = match lo {
             Some(l) if l > self.cfg.scope_lo.as_slice() => l.to_vec(),
             _ => self.cfg.scope_lo.clone(),
