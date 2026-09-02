@@ -19,9 +19,7 @@ fn opts() -> Options {
     }
 }
 
-fn open_registry_with(
-    cfg: RegistryConfig,
-) -> (Arc<InstanceRegistry>, tempfile::TempDir) {
+fn open_registry_with(cfg: RegistryConfig) -> (Arc<InstanceRegistry>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts()).unwrap();
     let mgr = SchemaManager::new(Arc::new(db)).unwrap();
@@ -45,7 +43,11 @@ async fn run(mgr: &SchemaManager, query: &str) -> Value {
 }
 
 async fn get_text(mgr: &SchemaManager, key: &str) -> Option<String> {
-    let d = run(mgr, &format!(r#"{{ get(key: {{text: "{key}"}}) {{ text }} }}"#)).await;
+    let d = run(
+        mgr,
+        &format!(r#"{{ get(key: {{text: "{key}"}}) {{ text }} }}"#),
+    )
+    .await;
     d["get"]["text"].as_str().map(|s| s.to_string())
 }
 
@@ -293,7 +295,10 @@ mod http {
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{v}");
-        let id = v["data"]["fork"]["instanceId"].as_str().unwrap().to_string();
+        let id = v["data"]["fork"]["instanceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // the fork answers on its own path
         let (st, v) = post(

@@ -27,7 +27,9 @@ fn ephemeral_cfg() -> ServerConfig {
 /// so the event's field is the last occurrence.
 fn log_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let at = line.rfind(&format!(" {key}="))? + key.len() + 2;
-    line[at..].split(|c: char| c.is_whitespace() || c == '}').next()
+    line[at..]
+        .split(|c: char| c.is_whitespace() || c == '}')
+        .next()
 }
 
 async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
@@ -52,7 +54,12 @@ async fn graphql_post(addr: SocketAddr, body: &str) -> String {
     String::from_utf8_lossy(&resp).into_owned()
 }
 
-fn edge_cfg(addr: SocketAddr, dir: &std::path::Path, lo: &[u8], hi: Option<&[u8]>) -> EdgeReplicaConfig {
+fn edge_cfg(
+    addr: SocketAddr,
+    dir: &std::path::Path,
+    lo: &[u8],
+    hi: Option<&[u8]>,
+) -> EdgeReplicaConfig {
     EdgeReplicaConfig::new(addr.to_string(), dir, lo.to_vec(), hi.map(<[u8]>::to_vec))
 }
 
@@ -104,7 +111,13 @@ async fn all_planes_over_one_store() {
 
     // an edge cache joins the replication plane with a key-range scope
     let edir = tempfile::tempdir().unwrap();
-    let edge = attach(edge_cfg(repl_addr, &edir.path().join("e"), b"user/", Some(b"user0"))).await;
+    let edge = attach(edge_cfg(
+        repl_addr,
+        &edir.path().join("e"),
+        b"user/",
+        Some(b"user0"),
+    ))
+    .await;
     assert_eq!(edge.master().name, "srv-test");
     assert_eq!(edge.store().get(b"user/1").unwrap().unwrap(), b"ada");
 
@@ -122,9 +135,15 @@ async fn all_planes_over_one_store() {
     assert!(resp.contains(r#""put":true"#), "{resp}");
     let committed = server.db().seqno();
     wait_frontier(edge.store(), committed).await;
-    assert_eq!(edge.store().get(b"user/2").unwrap(), Some(b"grace".to_vec()));
+    assert_eq!(
+        edge.store().get(b"user/2").unwrap(),
+        Some(b"grace".to_vec())
+    );
     wait_frontier(replica.store(), committed).await;
-    assert_eq!(replica.store().get(b"user/2").unwrap(), Some(b"grace".to_vec()));
+    assert_eq!(
+        replica.store().get(b"user/2").unwrap(),
+        Some(b"grace".to_vec())
+    );
 
     server.shutdown().await;
 }
@@ -148,7 +167,13 @@ async fn edge_server_serves_scoped_read_only_graphql() {
     server.db().put("admin/1", "root").unwrap();
 
     let edir = tempfile::tempdir().unwrap();
-    let replica = attach(edge_cfg(repl_addr, &edir.path().join("e"), b"user/", Some(b"user0"))).await;
+    let replica = attach(edge_cfg(
+        repl_addr,
+        &edir.path().join("e"),
+        b"user/",
+        Some(b"user0"),
+    ))
+    .await;
     let edge = EdgeServer::start(
         replica,
         EdgeServerConfig {

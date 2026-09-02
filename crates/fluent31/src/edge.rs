@@ -186,7 +186,8 @@ impl ValueCache {
         }
         let local_off = self.handle.append(record)?;
         self.written = local_off + record.len() as u64;
-        self.index.insert((file, offset), (local_off, record.len() as u32));
+        self.index
+            .insert((file, offset), (local_off, record.len() as u32));
         Ok(())
     }
 
@@ -493,23 +494,14 @@ impl EdgeStore {
         EdgeStats {
             flushed_seqno: s.flushed,
             frontier_seqno: self.frontier.get(),
-            fragments: s
-                .version
-                .runs_newest_first()
-                .map(|r| r.tables.len())
-                .sum(),
+            fragments: s.version.runs_newest_first().map(|r| r.tables.len()).sum(),
             overlay_bytes: s.overlay.approximate_bytes(),
             value_cache_bytes: self.vcache.lock().written,
         }
     }
 
     fn in_scope(&self, key: &[u8]) -> bool {
-        key >= self.cfg.scope_lo.as_slice()
-            && self
-                .cfg
-                .scope_hi
-                .as_deref()
-                .is_none_or(|h| key < h)
+        key >= self.cfg.scope_lo.as_slice() && self.cfg.scope_hi.as_deref().is_none_or(|h| key < h)
     }
 
     fn resolve(&self, key: &[u8], repr: &[u8]) -> Result<Vec<u8>> {

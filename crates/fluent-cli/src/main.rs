@@ -54,11 +54,7 @@ fn fmt_bytes(v: &[u8]) -> String {
     let body = if printable && !v.is_empty() {
         format!("\"{}\"", String::from_utf8_lossy(&v[..v.len().min(MAX)]))
     } else {
-        let hexed: String = v
-            .iter()
-            .take(MAX / 2)
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let hexed: String = v.iter().take(MAX / 2).map(|b| format!("{b:02x}")).collect();
         format!("hex:{hexed}")
     };
     if v.len() > MAX {
@@ -589,8 +585,7 @@ fn main() {
         };
         match rl.readline(prompt) {
             Ok(line) => {
-                let tokens: Vec<String> =
-                    line.split_whitespace().map(|s| s.to_string()).collect();
+                let tokens: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
                 if tokens.is_empty() {
                     continue;
                 }

@@ -716,7 +716,15 @@ fn pack_changes(db: &Arc<DbInner>, def: &TriggerDef) -> Result<(Vec<u8>, Vec<Vec
             .map_err(|_| corrupt("change event key is not a seqno"))?;
         let seqno = u64::from_be_bytes(seq_bytes);
         let (kind, ukey, uval) = decode_change_record(&v)?;
-        let packed = 8 + 1 + 4 + ukey.len() + if kind == CHANGE_PUT { 4 + uval.len() } else { 0 };
+        let packed = 8
+            + 1
+            + 4
+            + ukey.len()
+            + if kind == CHANGE_PUT {
+                4 + uval.len()
+            } else {
+                0
+            };
         if input.len() + packed > db.opts.max_wasm_input {
             if consume.is_empty() {
                 return Err(Error::InvalidArgument(
@@ -789,7 +797,10 @@ mod tests {
             let (kind, k, v) = decode_change_record(&enc).unwrap();
             (kind, k.to_vec(), v.to_vec())
         };
-        assert_eq!((kind, k.as_slice(), v.as_slice()), (CHANGE_PUT, &b"orders/1"[..], &b"hello"[..]));
+        assert_eq!(
+            (kind, k.as_slice(), v.as_slice()),
+            (CHANGE_PUT, &b"orders/1"[..], &b"hello"[..])
+        );
 
         // a value above the inline cap is elided, key retained
         let enc = encode_change_record(&put, 4);
@@ -809,7 +820,10 @@ mod tests {
 
         assert!(decode_change_record(&[7u8, 0, 0]).is_err(), "bad version");
         assert!(decode_change_record(&[1u8, 9, 0]).is_err(), "bad kind");
-        assert!(decode_change_record(&[1u8, 1, 5, b'a']).is_err(), "truncated");
+        assert!(
+            decode_change_record(&[1u8, 1, 5, b'a']).is_err(),
+            "truncated"
+        );
     }
 
     #[test]
@@ -850,7 +864,10 @@ mod tests {
                 BatchOp::Delete { key } => key.as_slice(),
             })
             .collect();
-        assert_eq!(keys[0], sys_trigger_event_key("idx", b"orders/1").as_slice());
+        assert_eq!(
+            keys[0],
+            sys_trigger_event_key("idx", b"orders/1").as_slice()
+        );
         assert_eq!(keys[1], sys_trigger_change_key("feed", 100).as_slice());
         assert_eq!(keys[2], sys_trigger_change_key("feed", 102).as_slice());
         assert_eq!(keys[3], sys_trigger_change_key("feed", 103).as_slice());

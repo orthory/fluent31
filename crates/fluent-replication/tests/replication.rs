@@ -53,15 +53,10 @@ impl MasterHarness {
         .unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let bind = addr.unwrap_or("127.0.0.1:0").to_string();
-        let listener = rt
-            .block_on(tokio::net::TcpListener::bind(&bind))
-            .unwrap();
+        let listener = rt.block_on(tokio::net::TcpListener::bind(&bind)).unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         rt.spawn(srv.serve(listener));
-        MasterHarness {
-            rt: Some(rt),
-            addr,
-        }
+        MasterHarness { rt: Some(rt), addr }
     }
 }
 
@@ -114,15 +109,23 @@ fn edge_replica_over_tcp() {
     }
     let harness = MasterHarness::serve(master.clone(), None);
 
-    let replica =
-        Arc::new(EdgeReplica::start(edge_cfg(&harness.addr, &edir.path().join("c"), 100, 200)).unwrap());
+    let replica = Arc::new(
+        EdgeReplica::start(edge_cfg(&harness.addr, &edir.path().join("c"), 100, 200)).unwrap(),
+    );
     let store = replica.store();
 
     // scoped equality (values fetched lazily over TCP as needed)
     for i in 100..200u32 {
-        assert_eq!(store.get(&k(i)).unwrap(), master.get(&k(i)).unwrap(), "key {i}");
+        assert_eq!(
+            store.get(&k(i)).unwrap(),
+            master.get(&k(i)).unwrap(),
+            "key {i}"
+        );
     }
-    assert!(store.stats().value_cache_bytes > 0, "no lazy fetch happened");
+    assert!(
+        store.stats().value_cache_bytes > 0,
+        "no lazy fetch happened"
+    );
 
     // streamed syncs become visible without any slice refresh
     for i in 100..140u32 {
@@ -133,11 +136,17 @@ fn edge_replica_over_tcp() {
     assert_eq!(store.get(&k(139)).unwrap(), Some(v(139, "live")));
     assert_eq!(store.get(&k(150)).unwrap(), None);
     for i in 100..200u32 {
-        assert_eq!(store.get(&k(i)).unwrap(), master.get(&k(i)).unwrap(), "post-stream {i}");
+        assert_eq!(
+            store.get(&k(i)).unwrap(),
+            master.get(&k(i)).unwrap(),
+            "post-stream {i}"
+        );
     }
 
     // the edge's read surface: scoped scans work, out-of-scope reads refuse
-    let (pairs, _has_more) = store.scan(Some(&k(100)), Some(&k(110)), false, 100).unwrap();
+    let (pairs, _has_more) = store
+        .scan(Some(&k(100)), Some(&k(110)), false, 100)
+        .unwrap();
     assert_eq!(pairs.len(), 10);
     assert!(store.get(&k(250)).is_err(), "out-of-scope get must refuse");
 }
@@ -175,10 +184,17 @@ fn master_restart_same_instance_resyncs() {
     // catches up, caches and all
     store.wait_frontier(master.seqno());
     assert_eq!(replica.master().instance_id, instance_before);
-    assert!(Arc::ptr_eq(&store, &replica.store()), "re-sync must keep the store");
+    assert!(
+        Arc::ptr_eq(&store, &replica.store()),
+        "re-sync must keep the store"
+    );
     assert_eq!(store.get(&k(5)).unwrap(), Some(v(5, "two")));
     for i in 0..200u32 {
-        assert_eq!(store.get(&k(i)).unwrap(), master.get(&k(i)).unwrap(), "key {i}");
+        assert_eq!(
+            store.get(&k(i)).unwrap(),
+            master.get(&k(i)).unwrap(),
+            "key {i}"
+        );
     }
 }
 
@@ -220,7 +236,10 @@ fn replaced_master_forces_full_reattach() {
         },
     );
     let _harness2 = MasterHarness::serve(fork.clone(), Some(&addr));
-    let fork_instance = fork.identity().expect("a restored fork is named").instance_id;
+    let fork_instance = fork
+        .identity()
+        .expect("a restored fork is named")
+        .instance_id;
     assert_ne!(fork_instance, instance_before);
 
     // the edge must converge onto the fork: new identity, pre-cut data only
@@ -229,6 +248,10 @@ fn replaced_master_forces_full_reattach() {
     assert_eq!(store.master().name, "prov-fork");
     assert_eq!(store.get(&k(1)).unwrap(), Some(v(1, "orig")));
     for i in 0..100u32 {
-        assert_eq!(store.get(&k(i)).unwrap(), fork.get(&k(i)).unwrap(), "key {i}");
+        assert_eq!(
+            store.get(&k(i)).unwrap(),
+            fork.get(&k(i)).unwrap(),
+            "key {i}"
+        );
     }
 }

@@ -366,15 +366,17 @@ fn scalar_json() -> Scalar {
 pub(crate) fn bytes_object() -> Object {
     Object::new("Bytes")
         .description("Raw bytes; request whichever representations you need.")
-        .field(Field::new("text", TypeRef::named(TypeRef::STRING), |ctx| {
-            FieldFuture::new(async move {
-                let b = ctx.parent_value.try_downcast_ref::<BytesVal>()?;
-                Ok(std::str::from_utf8(&b.0)
-                    .ok()
-                    .map(|s| FieldValue::value(s.to_string())))
+        .field(
+            Field::new("text", TypeRef::named(TypeRef::STRING), |ctx| {
+                FieldFuture::new(async move {
+                    let b = ctx.parent_value.try_downcast_ref::<BytesVal>()?;
+                    Ok(std::str::from_utf8(&b.0)
+                        .ok()
+                        .map(|s| FieldValue::value(s.to_string())))
+                })
             })
-        })
-        .description("The bytes decoded as UTF-8; null when not valid UTF-8."))
+            .description("The bytes decoded as UTF-8; null when not valid UTF-8."),
+        )
         .field(Field::new(
             "base64",
             TypeRef::named_nn(TypeRef::STRING),
@@ -385,12 +387,16 @@ pub(crate) fn bytes_object() -> Object {
                 })
             },
         ))
-        .field(Field::new("hex", TypeRef::named_nn(TypeRef::STRING), |ctx| {
-            FieldFuture::new(async move {
-                let b = ctx.parent_value.try_downcast_ref::<BytesVal>()?;
-                Ok(Some(FieldValue::value(encode_hex(&b.0))))
-            })
-        }))
+        .field(Field::new(
+            "hex",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let b = ctx.parent_value.try_downcast_ref::<BytesVal>()?;
+                    Ok(Some(FieldValue::value(encode_hex(&b.0))))
+                })
+            },
+        ))
         .field(Field::new("len", TypeRef::named_nn(TypeRef::INT), |ctx| {
             FieldFuture::new(async move {
                 let b = ctx.parent_value.try_downcast_ref::<BytesVal>()?;
@@ -441,27 +447,27 @@ pub(crate) fn scan_page_object() -> Object {
                 })
             },
         ))
-        .field(Field::new(
-            "hasMore",
-            TypeRef::named_nn(TypeRef::BOOLEAN),
-            |ctx| {
+        .field(
+            Field::new("hasMore", TypeRef::named_nn(TypeRef::BOOLEAN), |ctx| {
                 FieldFuture::new(async move {
                     let page = ctx.parent_value.try_downcast_ref::<ScanPageVal>()?;
                     Ok(Some(FieldValue::value(page.has_more)))
                 })
-            },
-        )
-        .description("True when the range has more entries past this page."))
-        .field(Field::new("nextAfter", TypeRef::named("Bytes"), |ctx| {
-            FieldFuture::new(async move {
-                let page = ctx.parent_value.try_downcast_ref::<ScanPageVal>()?;
-                Ok(page
-                    .next_after
-                    .clone()
-                    .map(|k| FieldValue::owned_any(BytesVal(k))))
             })
-        })
-        .description("Pass back as `after` to fetch the next page; null on the last page."))
+            .description("True when the range has more entries past this page."),
+        )
+        .field(
+            Field::new("nextAfter", TypeRef::named("Bytes"), |ctx| {
+                FieldFuture::new(async move {
+                    let page = ctx.parent_value.try_downcast_ref::<ScanPageVal>()?;
+                    Ok(page
+                        .next_after
+                        .clone()
+                        .map(|k| FieldValue::owned_any(BytesVal(k))))
+                })
+            })
+            .description("Pass back as `after` to fetch the next page; null on the last page."),
+        )
 }
 
 fn module_object() -> Object {
@@ -475,7 +481,10 @@ fn module_object() -> Object {
 fn fork_object() -> Object {
     Object::new("Fork")
         .field(value_field("name", TypeRef::named_nn(TypeRef::STRING)))
-        .field(value_field("instanceId", TypeRef::named_nn(TypeRef::STRING)))
+        .field(value_field(
+            "instanceId",
+            TypeRef::named_nn(TypeRef::STRING),
+        ))
         .field(value_field("createdUnixMs", TypeRef::named_nn("U64")))
         .field(value_field("lastSeqno", TypeRef::named_nn("U64")))
         .field(value_field("path", TypeRef::named_nn(TypeRef::STRING)))
@@ -497,12 +506,16 @@ fn pin_object() -> Object {
 fn trigger_object() -> Object {
     Object::new("Trigger")
         .description("A write-range trigger binding a key range to a WASM executor module.")
-        .field(Field::new("name", TypeRef::named_nn(TypeRef::STRING), |ctx| {
-            FieldFuture::new(async move {
-                let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
-                Ok(Some(FieldValue::value(t.0.name.clone())))
-            })
-        }))
+        .field(Field::new(
+            "name",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                    Ok(Some(FieldValue::value(t.0.name.clone())))
+                })
+            },
+        ))
         .field(Field::new(
             "module",
             TypeRef::named_nn(TypeRef::STRING),
@@ -513,56 +526,58 @@ fn trigger_object() -> Object {
                 })
             },
         ))
-        .field(Field::new("lo", TypeRef::named("Bytes"), |ctx| {
-            FieldFuture::new(async move {
-                let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
-                Ok((!t.0.lo.is_empty())
-                    .then(|| FieldValue::owned_any(BytesVal(t.0.lo.clone()))))
+        .field(
+            Field::new("lo", TypeRef::named("Bytes"), |ctx| {
+                FieldFuture::new(async move {
+                    let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                    Ok((!t.0.lo.is_empty())
+                        .then(|| FieldValue::owned_any(BytesVal(t.0.lo.clone()))))
+                })
             })
-        })
-        .description("Inclusive range start; null = from the start of the keyspace."))
-        .field(Field::new("hi", TypeRef::named("Bytes"), |ctx| {
-            FieldFuture::new(async move {
-                let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
-                Ok((!t.0.hi.is_empty())
-                    .then(|| FieldValue::owned_any(BytesVal(t.0.hi.clone()))))
+            .description("Inclusive range start; null = from the start of the keyspace."),
+        )
+        .field(
+            Field::new("hi", TypeRef::named("Bytes"), |ctx| {
+                FieldFuture::new(async move {
+                    let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                    Ok((!t.0.hi.is_empty())
+                        .then(|| FieldValue::owned_any(BytesVal(t.0.hi.clone()))))
+                })
             })
-        })
-        .description("Exclusive range end; null = unbounded."))
-        .field(Field::new(
-            "mode",
-            TypeRef::named_nn(TypeRef::STRING),
-            |ctx| {
+            .description("Exclusive range end; null = unbounded."),
+        )
+        .field(
+            Field::new("mode", TypeRef::named_nn(TypeRef::STRING), |ctx| {
                 FieldFuture::new(async move {
                     let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
                     Ok(Some(FieldValue::value(t.0.mode.as_str())))
                 })
-            },
-        )
-        .description(
-            "How the trigger consumes committed writes: \"keys\" (coalesced \
+            })
+            .description(
+                "How the trigger consumes committed writes: \"keys\" (coalesced \
              touched keys to the module's `on_touch`) or \"changes\" (the ordered \
              per-op change feed to its `on_apply`). Detected from the \
              module's exports at registration.",
-        ))
-        .field(Field::new("pending", TypeRef::named_nn("U64"), |ctx| {
-            FieldFuture::new(async move {
-                let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
-                Ok(Some(FieldValue::value(t.0.pending.to_string())))
+            ),
+        )
+        .field(
+            Field::new("pending", TypeRef::named_nn("U64"), |ctx| {
+                FieldFuture::new(async move {
+                    let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
+                    Ok(Some(FieldValue::value(t.0.pending.to_string())))
+                })
             })
-        })
-        .description("Queued events not yet consumed by a successful invocation."))
-        .field(Field::new(
-            "lastError",
-            TypeRef::named(TypeRef::STRING),
-            |ctx| {
+            .description("Queued events not yet consumed by a successful invocation."),
+        )
+        .field(
+            Field::new("lastError", TypeRef::named(TypeRef::STRING), |ctx| {
                 FieldFuture::new(async move {
                     let t = ctx.parent_value.try_downcast_ref::<TriggerVal>()?;
                     Ok(t.0.last_error.clone().map(FieldValue::value))
                 })
-            },
+            })
+            .description("Why the most recent drain attempt failed; null when healthy."),
         )
-        .description("Why the most recent drain attempt failed; null when healthy."))
 }
 
 fn gc_result_object() -> Object {
@@ -585,7 +600,10 @@ fn stats_object() -> Object {
             "immutableMemtables",
             TypeRef::named_nn(TypeRef::INT),
         ))
-        .field(value_field("levels", TypeRef::named_nn_list_nn("LevelStats")))
+        .field(value_field(
+            "levels",
+            TypeRef::named_nn_list_nn("LevelStats"),
+        ))
         .field(value_field("vlogFiles", TypeRef::named_nn(TypeRef::INT)))
         .field(value_field("vlogRetired", TypeRef::named_nn(TypeRef::INT)))
         .field(value_field("discardBytes", TypeRef::named_nn("U64")))
@@ -594,7 +612,10 @@ fn stats_object() -> Object {
         .field(value_field("commitGroups", TypeRef::named_nn("U64")))
         .field(value_field("commitBatches", TypeRef::named_nn("U64")))
         .field(value_field("walSyncs", TypeRef::named_nn("U64")))
-        .field(value_field("subscriptions", TypeRef::named_nn(TypeRef::INT)))
+        .field(value_field(
+            "subscriptions",
+            TypeRef::named_nn(TypeRef::INT),
+        ))
         .field(value_field("snapshots", TypeRef::named_nn(TypeRef::INT)))
 }
 
@@ -687,10 +708,12 @@ mod tests {
     #[test]
     fn reserved_lists_cover_the_builtin_schema() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db = Arc::new(
-            fluent31::Db::open(dir.path(), fluent31::Options::default()).expect("open"),
-        );
-        let sdl = SchemaManager::new(db).expect("schema manager").schema().sdl();
+        let db =
+            Arc::new(fluent31::Db::open(dir.path(), fluent31::Options::default()).expect("open"));
+        let sdl = SchemaManager::new(db)
+            .expect("schema manager")
+            .schema()
+            .sdl();
         // block strings delimit with `"""`; the odd split segments are docs
         let sdl: String = sdl.split("\"\"\"").step_by(2).collect::<Vec<_>>().join("");
 
@@ -708,8 +731,8 @@ mod tests {
             let line = raw.trim();
             if let Some(rest) = line.strip_prefix("scalar ") {
                 let name = leading_name(rest).expect("scalar name");
-                let reserved = RESERVED_TYPES.contains(&name.as_str())
-                    || SCALARS.contains(&name.as_str());
+                let reserved =
+                    RESERVED_TYPES.contains(&name.as_str()) || SCALARS.contains(&name.as_str());
                 assert!(reserved, "built-in scalar {name:?} is not reserved");
                 continue;
             }
@@ -722,8 +745,8 @@ mod tests {
                     RESERVED_TYPES.contains(&name.as_str()),
                     "built-in type {name:?} is not reserved"
                 );
-                root = matches!(name.as_str(), "Query" | "Mutation" | "Subscription")
-                    .then_some(name);
+                root =
+                    matches!(name.as_str(), "Query" | "Mutation" | "Subscription").then_some(name);
                 continue;
             }
             if line == "}" {

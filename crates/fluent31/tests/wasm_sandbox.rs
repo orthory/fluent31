@@ -176,7 +176,8 @@ fn executor_write_set_cap_stops_runaway_writes() {
     let mut o = opts();
     o.max_txn_write_bytes = 8 << 10;
     let db = Db::open(dir.path(), o).unwrap();
-    db.install_module("wflood", WRITESET_FLOOD.as_bytes()).unwrap();
+    db.install_module("wflood", WRITESET_FLOOD.as_bytes())
+        .unwrap();
     match db.execute("wflood", b"") {
         Err(Error::GuestFailed { code: 45, .. }) => {}
         other => panic!("expected ENOSPC-driven exit 45, got {other:?}"),
@@ -202,7 +203,10 @@ fn garbage_and_truncated_modules_are_rejected_at_install() {
     ));
     // syntactically truncated WAT
     assert!(matches!(
-        db.install_module("t", b"(module (memory (export \"memory\") 1) (func (export \"query\""),
+        db.install_module(
+            "t",
+            b"(module (memory (export \"memory\") 1) (func (export \"query\""
+        ),
         Err(Error::Wasm(_))
     ));
     // valid module but missing the required exports
@@ -320,7 +324,8 @@ const DELETE_RESERVED: &str = r#"
 fn guest_cannot_delete_reserved_keys() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts()).unwrap();
-    db.install_module("delres", DELETE_RESERVED.as_bytes()).unwrap();
+    db.install_module("delres", DELETE_RESERVED.as_bytes())
+        .unwrap();
     // EINVAL is -3, reported by the guest as exit 3
     match db.execute("delres", b"") {
         Err(Error::GuestFailed { code: 3, .. }) => {}
@@ -373,7 +378,9 @@ fn store_integrity_survives_an_abuse_barrage() {
     let check = |db: &Db| {
         for i in 0..300u32 {
             assert_eq!(
-                db.get(&format!("data/{i:05}").into_bytes()).unwrap().unwrap(),
+                db.get(&format!("data/{i:05}").into_bytes())
+                    .unwrap()
+                    .unwrap(),
                 format!("value-{i}-{}", "p".repeat(60)).into_bytes(),
                 "key {i}"
             );

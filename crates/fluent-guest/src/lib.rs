@@ -535,8 +535,7 @@ impl Scan {
 
     fn refill(&mut self) -> bool {
         loop {
-            let r =
-                unsafe { sys::scan_next(self.h, self.buf.as_mut_ptr(), self.buf.len() as i32) };
+            let r = unsafe { sys::scan_next(self.h, self.buf.as_mut_ptr(), self.buf.len() as i32) };
             if r == errno::ENOSPC {
                 // one entry larger than the buffer: grow to the exact size
                 let hint = unsafe { sys::scan_entry_hint(self.h) };
@@ -585,10 +584,9 @@ impl Iterator for Scan {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.filled
-            && (self.done || !self.refill()) {
-                return None;
-            }
+        if self.pos >= self.filled && (self.done || !self.refill()) {
+            return None;
+        }
         let klen = self.read_varint()? as usize;
         let vlen = self.read_varint()? as usize;
         if self.pos + klen + vlen > self.filled {

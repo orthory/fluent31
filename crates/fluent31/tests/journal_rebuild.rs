@@ -39,7 +39,10 @@ fn dump(db: &Db) -> BTreeMap<Vec<u8>, Vec<u8>> {
 fn wait_until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while !f() {
-        assert!(Instant::now() < deadline, "not reached within {secs}s: {what}");
+        assert!(
+            Instant::now() < deadline,
+            "not reached within {secs}s: {what}"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -60,13 +63,20 @@ fn journal_disk(dir: &std::path::Path) -> (u64, usize, u64) {
     for e in std::fs::read_dir(dir).unwrap() {
         let e = e.unwrap();
         let name = e.file_name().to_string_lossy().into_owned();
-        if let Some(num) = name.strip_prefix("journal-").and_then(|r| r.strip_suffix(".log")) {
+        if let Some(num) = name
+            .strip_prefix("journal-")
+            .and_then(|r| r.strip_suffix(".log"))
+        {
             ids.push(num.parse::<u64>().unwrap());
             total += e.metadata().unwrap().len();
         }
     }
     ids.sort_unstable();
-    (*ids.first().expect("journal dir has no log files"), ids.len(), total)
+    (
+        *ids.first().expect("journal dir has no log files"),
+        ids.len(),
+        total,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -98,7 +108,9 @@ fn rebuild_from_journal_reconstructs_exact_state() {
         let expected = dump(&db);
         // let the journal drain everything we acked
         let target = db.stats().visible_seqno;
-        wait_until("journal catches up", 10, || journal.stats().last_seqno >= target);
+        wait_until("journal catches up", 10, || {
+            journal.stats().last_seqno >= target
+        });
         drop(journal); // clean stop + final flush
         expected
     };
@@ -113,7 +125,11 @@ fn rebuild_from_journal_reconstructs_exact_state() {
     assert!(report.deltas_applied > 0);
 
     let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
-    assert_eq!(dump(&rebuilt), expected, "rebuilt state diverged from original");
+    assert_eq!(
+        dump(&rebuilt),
+        expected,
+        "rebuilt state diverged from original"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +193,9 @@ fn journal_survives_write_pressure_and_still_rebuilds() {
         }
         let expected = dump(&db);
         let target = db.stats().visible_seqno;
-        wait_until("drain under pressure", 20, || journal.stats().last_seqno >= target);
+        wait_until("drain under pressure", 20, || {
+            journal.stats().last_seqno >= target
+        });
         drop(journal);
         expected
     };
@@ -299,7 +317,10 @@ fn torn_journal_tail_rebuilds_the_clean_prefix() {
         .unwrap();
     {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&newest).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&newest)
+            .unwrap();
         f.write_all(&[0xff; 40]).unwrap(); // partial/garbage frame
     }
 
@@ -311,7 +332,11 @@ fn torn_journal_tail_rebuilds_the_clean_prefix() {
     let got = dump(&rebuilt);
     assert!(report.deltas_applied > 0);
     for i in 0..300u32 {
-        assert_eq!(got.get(&k(i)).cloned(), Some(v(i, "a")), "key {i} after torn tail");
+        assert_eq!(
+            got.get(&k(i)).cloned(),
+            Some(v(i, "a")),
+            "key {i} after torn tail"
+        );
     }
 }
 
@@ -347,20 +372,34 @@ fn compaction_bounds_journal_disk_and_rebuilds_exact_state() {
         let target = db.stats().visible_seqno;
         wait_until("drain", 20, || journal.stats().last_seqno >= target);
         let stats = journal.stats();
-        assert!(stats.compactions >= 2, "expected repeated compaction, got {}", stats.compactions);
+        assert!(
+            stats.compactions >= 2,
+            "expected repeated compaction, got {}",
+            stats.compactions
+        );
         assert!(stats.files_pruned > 0, "compaction never pruned a file");
         drop(journal);
         expected
     };
 
     let (min_id, _, total) = journal_disk(jrn_dir.path());
-    assert!(min_id > 1, "file 1 should have been pruned, lowest id is {min_id}");
-    assert!(total < 160 << 10, "journal disk not bounded: {total} bytes on disk");
+    assert!(
+        min_id > 1,
+        "file 1 should have been pruned, lowest id is {min_id}"
+    );
+    assert!(
+        total < 160 << 10,
+        "journal disk not bounded: {total} bytes on disk"
+    );
 
     let rebuilt_dir = tempfile::tempdir().unwrap();
     journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
     let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
-    assert_eq!(dump(&rebuilt), expected, "rebuilt state diverged after compaction");
+    assert_eq!(
+        dump(&rebuilt),
+        expected,
+        "rebuilt state diverged after compaction"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +490,11 @@ fn manual_checkpoint_compacts_and_prunes() {
         let expected = dump(&db);
         let target = db.stats().visible_seqno;
         wait_until("drain", 20, || journal.stats().last_seqno >= target);
-        assert_eq!(journal.stats().compactions, 0, "auto-compaction must stay off");
+        assert_eq!(
+            journal.stats().compactions,
+            0,
+            "auto-compaction must stay off"
+        );
         let (min_id, files, _) = journal_disk(jrn_dir.path());
         assert_eq!(min_id, 1, "nothing may be pruned before the manual request");
         assert!(files > 1, "writes should have rotated into several files");
@@ -464,7 +507,10 @@ fn manual_checkpoint_compacts_and_prunes() {
     };
 
     let (min_id, _, _) = journal_disk(jrn_dir.path());
-    assert!(min_id > 1, "manual checkpoint should have pruned the old files");
+    assert!(
+        min_id > 1,
+        "manual checkpoint should have pruned the old files"
+    );
 
     let rebuilt_dir = tempfile::tempdir().unwrap();
     journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
@@ -500,7 +546,10 @@ fn reattach_after_torn_tail_still_captures_new_writes() {
         .unwrap();
     {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&newest).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&newest)
+            .unwrap();
         f.write_all(&[0xff; 40]).unwrap(); // partial/garbage frame
     }
 
@@ -522,7 +571,11 @@ fn reattach_after_torn_tail_still_captures_new_writes() {
     let rebuilt_dir = tempfile::tempdir().unwrap();
     journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
     let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
-    assert_eq!(dump(&rebuilt), expected, "post-reattach writes lost behind torn tail");
+    assert_eq!(
+        dump(&rebuilt),
+        expected,
+        "post-reattach writes lost behind torn tail"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -601,14 +654,26 @@ fn base_snapshot_larger_than_rotate_bytes_still_rebuilds() {
 
     // the whole base span stayed in file 1, which therefore outgrew the
     // rotation threshold instead of splitting
-    let f1 = std::fs::metadata(jrn_dir.path().join("journal-000001.log")).unwrap().len();
-    assert!(f1 > 4 << 10, "base span should keep file 1 oversized, got {f1} bytes");
+    let f1 = std::fs::metadata(jrn_dir.path().join("journal-000001.log"))
+        .unwrap()
+        .len();
+    assert!(
+        f1 > 4 << 10,
+        "base span should keep file 1 oversized, got {f1} bytes"
+    );
 
     let rebuilt_dir = tempfile::tempdir().unwrap();
     let report = journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
-    assert_eq!(report.base_keys, 300, "attach-time base must carry the pre-attach keys");
+    assert_eq!(
+        report.base_keys, 300,
+        "attach-time base must carry the pre-attach keys"
+    );
     let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
-    assert_eq!(dump(&rebuilt), expected, "rebuilt state diverged from original");
+    assert_eq!(
+        dump(&rebuilt),
+        expected,
+        "rebuilt state diverged from original"
+    );
 }
 
 #[test]
@@ -639,13 +704,23 @@ fn compaction_base_larger_than_rotate_bytes_still_rebuilds() {
     };
 
     let (min_id, _, _) = journal_disk(jrn_dir.path());
-    assert!(min_id > 1, "compaction should have pruned the pre-checkpoint files");
+    assert!(
+        min_id > 1,
+        "compaction should have pruned the pre-checkpoint files"
+    );
 
     let rebuilt_dir = tempfile::tempdir().unwrap();
     let report = journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
-    assert_eq!(report.base_keys, 300, "anchor base must carry the whole live set");
+    assert_eq!(
+        report.base_keys, 300,
+        "anchor base must carry the whole live set"
+    );
     let rebuilt = Db::open(rebuilt_dir.path(), opts()).unwrap();
-    assert_eq!(dump(&rebuilt), expected, "rebuilt state diverged after oversized compaction");
+    assert_eq!(
+        dump(&rebuilt),
+        expected,
+        "rebuilt state diverged after oversized compaction"
+    );
 }
 
 /// Frame one journal record the way the writer does: [len u32][crc u32][body].
@@ -714,7 +789,10 @@ fn split_base_span_from_prior_writer_still_rebuilds() {
 
     let rebuilt_dir = tempfile::tempdir().unwrap();
     let report = journal::rebuild(jrn_dir.path(), rebuilt_dir.path(), opts()).unwrap();
-    assert_eq!(report.base_keys, 3, "all base records across the split must apply");
+    assert_eq!(
+        report.base_keys, 3,
+        "all base records across the split must apply"
+    );
     assert_eq!(report.deltas_applied, 1);
     assert_eq!(report.last_seqno, 6);
 
@@ -759,14 +837,22 @@ fn missing_middle_file_is_a_loud_gap_error() {
     let min_id = build_multi_file_journal(db_dir.path(), jrn_dir.path());
 
     // a middle segment vanishes (bad disk, incomplete copy of shipped files)
-    std::fs::remove_file(jrn_dir.path().join(format!("journal-{:06}.log", min_id + 1))).unwrap();
+    std::fs::remove_file(
+        jrn_dir
+            .path()
+            .join(format!("journal-{:06}.log", min_id + 1)),
+    )
+    .unwrap();
 
     // rebuild must refuse — replaying across the hole would silently drop
     // every mutation the missing file held — and must say "gap", so a
     // caller can go fetch the missing segment rather than triage corruption
     let dest = tempfile::tempdir().unwrap();
     let err = journal::rebuild(jrn_dir.path(), dest.path(), opts()).unwrap_err();
-    assert!(matches!(err, Error::JournalGap(_)), "want JournalGap, got {err:?}");
+    assert!(
+        matches!(err, Error::JournalGap(_)),
+        "want JournalGap, got {err:?}"
+    );
 }
 
 #[test]
@@ -776,14 +862,19 @@ fn torn_middle_file_is_corruption_not_a_gap() {
     let min_id = build_multi_file_journal(db_dir.path(), jrn_dir.path());
 
     // a middle file is present but damaged: sealed files never end torn
-    let path = jrn_dir.path().join(format!("journal-{:06}.log", min_id + 1));
+    let path = jrn_dir
+        .path()
+        .join(format!("journal-{:06}.log", min_id + 1));
     let len = std::fs::metadata(&path).unwrap().len();
     let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
     f.set_len(len - 3).unwrap();
 
     let dest = tempfile::tempdir().unwrap();
     let err = journal::rebuild(jrn_dir.path(), dest.path(), opts()).unwrap_err();
-    assert!(matches!(err, Error::Corruption(_)), "want Corruption, got {err:?}");
+    assert!(
+        matches!(err, Error::Corruption(_)),
+        "want Corruption, got {err:?}"
+    );
 }
 
 #[test]
@@ -820,13 +911,19 @@ fn delta_seqno_regression_is_corruption() {
         .unwrap();
     {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&newest).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&newest)
+            .unwrap();
         f.write_all(&rec).unwrap();
     }
 
     let dest = tempfile::tempdir().unwrap();
     let err = journal::rebuild(jrn_dir.path(), dest.path(), opts()).unwrap_err();
-    assert!(matches!(err, Error::Corruption(_)), "want Corruption, got {err:?}");
+    assert!(
+        matches!(err, Error::Corruption(_)),
+        "want Corruption, got {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -100,7 +100,10 @@ fn reserved_keys_rejected() {
         db.put(vec![0u8, b'x'], b"v".to_vec()),
         Err(Error::InvalidArgument(_))
     ));
-    assert!(matches!(db.get(&[0u8, b'x']), Err(Error::InvalidArgument(_))));
+    assert!(matches!(
+        db.get(&[0u8, b'x']),
+        Err(Error::InvalidArgument(_))
+    ));
     assert!(matches!(
         db.put(Vec::new(), b"v".to_vec()),
         Err(Error::InvalidArgument(_))
@@ -273,7 +276,11 @@ fn recovery_after_flush_and_more_writes() {
     }
     let db = Db::open(dir.path(), small_opts()).unwrap();
     for i in 0..150u32 {
-        let expect = if i >= 50 { v(i, "wal2") } else { v(i, "flushed") };
+        let expect = if i >= 50 {
+            v(i, "wal2")
+        } else {
+            v(i, "flushed")
+        };
         assert_eq!(db.get(&k(i)).unwrap().unwrap(), expect, "key {i}");
     }
 }
@@ -351,9 +358,7 @@ fn vlog_gc_relocates_and_retires() {
     let mut opts = small_opts();
     opts.vlog_gc_ratio = 0.2;
     let db = Db::open(dir.path(), opts).unwrap();
-    let big = |i: u32, r: u32| {
-        format!("{:0>400}", format!("{i}-{r}")).into_bytes()
-    };
+    let big = |i: u32, r: u32| format!("{:0>400}", format!("{i}-{r}")).into_bytes();
     // several overwrite rounds → most of the older vlog files are garbage
     for round in 0..4u32 {
         for i in 0..40u32 {
@@ -445,7 +450,8 @@ fn get_for_update_defends_against_write_skew() {
     assert_eq!(c, b"ok");
     t1.put(b"target".to_vec(), b"based-on-ok".to_vec()).unwrap();
     // concurrent writer invalidates the premise
-    db.put(b"constraint".to_vec(), b"violated".to_vec()).unwrap();
+    db.put(b"constraint".to_vec(), b"violated".to_vec())
+        .unwrap();
     assert!(matches!(t1.commit(), Err(Error::Conflict)));
 
     // without get_for_update the same interleaving commits (snapshot
@@ -453,7 +459,8 @@ fn get_for_update_defends_against_write_skew() {
     let mut t2 = db.begin();
     let _ = t2.get(b"constraint").unwrap().unwrap();
     t2.put(b"target".to_vec(), b"unchecked".to_vec()).unwrap();
-    db.put(b"constraint".to_vec(), b"changed-again".to_vec()).unwrap();
+    db.put(b"constraint".to_vec(), b"changed-again".to_vec())
+        .unwrap();
     t2.commit().unwrap();
 }
 
@@ -470,7 +477,11 @@ fn txn_iterator_merges_overlay() {
     t.delete(b"c".to_vec()).unwrap(); // hide
     t.put(b"d".to_vec(), b"4".to_vec()).unwrap(); // add
 
-    let got: Vec<_> = t.iter(None, None, false).unwrap().map(|r| r.unwrap()).collect();
+    let got: Vec<_> = t
+        .iter(None, None, false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
     assert_eq!(
         got,
         vec![
@@ -479,7 +490,11 @@ fn txn_iterator_merges_overlay() {
             (b"d".to_vec(), b"4".to_vec()),
         ]
     );
-    let got_rev: Vec<_> = t.iter(None, None, true).unwrap().map(|r| r.unwrap()).collect();
+    let got_rev: Vec<_> = t
+        .iter(None, None, true)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
     assert_eq!(
         got_rev,
         vec![
@@ -499,7 +514,8 @@ fn fork_create_open_delete() {
     }
     // include some vlog-resident values
     for i in 0..10u32 {
-        db.put(format!("big{i}").into_bytes(), vec![7u8; 300]).unwrap();
+        db.put(format!("big{i}").into_bytes(), vec![7u8; 300])
+            .unwrap();
     }
     let info = db.fork("snap1").unwrap();
     assert_eq!(info.name, "snap1");
@@ -1330,7 +1346,11 @@ fn identity_forks_via_fork_and_restore() {
         fluent31::identity::derive_fork(&parent_id.instance_id, info.last_seqno, "edge-1")
     );
     for i in 0..50u32 {
-        assert_eq!(restored.get(&k(i)).unwrap().unwrap(), v(i, "pre"), "key {i}");
+        assert_eq!(
+            restored.get(&k(i)).unwrap().unwrap(),
+            v(i, "pre"),
+            "key {i}"
+        );
     }
 
     // in-place fork: first rw open mints child = H(parent ‖ cut ‖ "nightly")
@@ -1383,7 +1403,8 @@ fn subscription_streams_in_range_writes() {
     assert_eq!(sub.start_seqno(), 1);
 
     db.put(b"ka-1".to_vec(), b"small".to_vec()).unwrap();
-    db.put(b"zz-out-of-range".to_vec(), b"nope".to_vec()).unwrap();
+    db.put(b"zz-out-of-range".to_vec(), b"nope".to_vec())
+        .unwrap();
     // vlog-resident value (>= value_threshold of 64)
     db.put(b"kb-2".to_vec(), vec![7u8; 200]).unwrap();
     db.delete(b"ka-1".to_vec()).unwrap();
@@ -1443,8 +1464,14 @@ fn subscription_commit_boundaries_and_snapshot_at() {
     // snapshot_at the batch boundary: the WHOLE batch is visible (even for
     // the batch's first op), the later commit is not
     let snap = db.snapshot_at(got[0].commit_seqno).unwrap();
-    assert_eq!(db.get_at(b"k1", &snap).unwrap().as_deref(), Some(b"a".as_ref()));
-    assert_eq!(db.get_at(b"k2", &snap).unwrap().as_deref(), Some(b"b".as_ref()));
+    assert_eq!(
+        db.get_at(b"k1", &snap).unwrap().as_deref(),
+        Some(b"a".as_ref())
+    );
+    assert_eq!(
+        db.get_at(b"k2", &snap).unwrap().as_deref(),
+        Some(b"b".as_ref())
+    );
     assert!(db.get_at(b"k3", &snap).unwrap().is_none());
 
     // uncommitted seqnos are refused
@@ -1493,7 +1520,11 @@ fn subscription_pointers_survive_vlog_gc() {
     for (n, e) in got.iter().enumerate() {
         let (round, i) = ((n / 20) as u32, (n % 20) as u32);
         assert_eq!(e.key, k(i), "entry {n}");
-        assert_eq!(e.value.as_deref(), Some(big(i, round).as_ref()), "entry {n}");
+        assert_eq!(
+            e.value.as_deref(),
+            Some(big(i, round).as_ref()),
+            "entry {n}"
+        );
     }
 }
 
@@ -1710,7 +1741,9 @@ fn edge_store_end_to_end() {
         master.put(k(i), v(i, "base")).unwrap();
     }
     for i in 0..30u32 {
-        master.put(k(i * 10), vec![(i % 250) as u8 + 1; 200]).unwrap();
+        master
+            .put(k(i * 10), vec![(i % 250) as u8 + 1; 200])
+            .unwrap();
     }
 
     // attach: subscribe FIRST, then slice — gap-free by construction
@@ -1742,10 +1775,7 @@ fn edge_store_end_to_end() {
         );
     }
     // out of scope: refused, not silently absent
-    assert!(matches!(
-        edge.get(&k(250)),
-        Err(Error::InvalidArgument(_))
-    ));
+    assert!(matches!(edge.get(&k(250)), Err(Error::InvalidArgument(_))));
 
     // laziness: big values were fetched on demand; repeat reads hit cache
     let after_first_pass = fetcher.calls.load(AtOrd::Relaxed);
@@ -1919,7 +1949,8 @@ fn trigger_fires_on_range_and_drains_queue() {
     )
     .unwrap();
     db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
-    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v"))
+        .unwrap();
 
     // plain put
     db.put(b"u/a".to_vec(), b"1".to_vec()).unwrap();
@@ -1935,7 +1966,9 @@ fn trigger_fires_on_range_and_drains_queue() {
     t.put(b"u/d".to_vec(), b"3".to_vec()).unwrap();
     t.commit().unwrap();
     for key in [b"m/u/b".as_ref(), b"m/u/c".as_ref(), b"m/u/d".as_ref()] {
-        wait_until("mirrors of batch/txn writes", || db.get(key).unwrap().is_some());
+        wait_until("mirrors of batch/txn writes", || {
+            db.get(key).unwrap().is_some()
+        });
     }
 
     // out-of-range writes fire nothing
@@ -1959,7 +1992,8 @@ fn trigger_backlog_coalesces_survives_reopen_and_clears_on_delete() {
     {
         let db = Db::open(dir.path(), small_opts()).unwrap();
         db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
-        db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+        db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v"))
+            .unwrap();
         // no module -> the runner cannot drain; events accumulate durably
         db.uninstall_module("mirror").unwrap();
         for _ in 0..3 {
@@ -1994,7 +2028,8 @@ fn trigger_backlog_coalesces_survives_reopen_and_clears_on_delete() {
     assert_eq!(pending(&db, "t"), 1);
     db.delete_trigger("t").unwrap();
     db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
-    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v"))
+        .unwrap();
     assert_eq!(pending(&db, "t"), 0, "recreate starts with an empty queue");
     // the discarded event's record is gone, so it can never fire
     assert!(db.get(b"m/u/fresh").unwrap().is_none());
@@ -2009,9 +2044,11 @@ fn trigger_writes_do_not_fire_other_triggers() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), small_opts()).unwrap();
     db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
-    db.create_trigger("a", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+    db.create_trigger("a", "mirror", Some(b"u/"), Some(b"v"))
+        .unwrap();
     // b watches the range a's module writes into
-    db.create_trigger("b", "mirror", Some(b"m/"), Some(b"n")).unwrap();
+    db.create_trigger("b", "mirror", Some(b"m/"), Some(b"n"))
+        .unwrap();
 
     db.put(b"u/1".to_vec(), b"x".to_vec()).unwrap();
     wait_until("a fires", || db.get(b"m/u/1").unwrap().is_some());

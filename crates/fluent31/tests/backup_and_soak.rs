@@ -7,9 +7,9 @@
 //! long overwrite/delete/GC workload and asserts correctness plus bounded
 //! space — the endurance properties unit tests are too short to reveal.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::collections::BTreeMap;
 
 use fluent31::{restore_to, Db, Options, SyncMode};
 
@@ -40,7 +40,11 @@ fn fork_backup_under_load_restores_to_an_independent_store() {
 
     // committed baseline that must appear in any later cut
     for i in 0..500u32 {
-        db.put(format!("base/{i:05}").into_bytes(), format!("b{i}").into_bytes()).unwrap();
+        db.put(
+            format!("base/{i:05}").into_bytes(),
+            format!("b{i}").into_bytes(),
+        )
+        .unwrap();
     }
 
     // background write load while we take the backup
@@ -51,7 +55,8 @@ fn fork_backup_under_load_restores_to_an_independent_store() {
         std::thread::spawn(move || {
             let mut i = 0u64;
             while !stop.load(Ordering::Acquire) {
-                db.put(format!("churn/{i:08}").into_bytes(), b"c".to_vec()).unwrap();
+                db.put(format!("churn/{i:08}").into_bytes(), b"c".to_vec())
+                    .unwrap();
                 i += 1;
             }
         })
@@ -74,17 +79,26 @@ fn fork_backup_under_load_restores_to_an_independent_store() {
     // the whole committed baseline (written before the cut) is present
     for i in 0..500u32 {
         assert_eq!(
-            restored.get(&format!("base/{i:05}").into_bytes()).unwrap().unwrap(),
+            restored
+                .get(&format!("base/{i:05}").into_bytes())
+                .unwrap()
+                .unwrap(),
             format!("b{i}").into_bytes(),
             "restored backup missing base/{i}"
         );
     }
     // a full scan of the restore parses cleanly (no torn values from the cut)
-    let n = restored.iter(None, None, false).unwrap().map(|r| r.unwrap()).count();
+    let n = restored
+        .iter(None, None, false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .count();
     assert!(n >= 500);
 
     // the restore is independently writable and isolated from the parent
-    restored.put(b"only/in/restore".to_vec(), b"1".to_vec()).unwrap();
+    restored
+        .put(b"only/in/restore".to_vec(), b"1".to_vec())
+        .unwrap();
     db.put(b"only/in/parent".to_vec(), b"1".to_vec()).unwrap();
     assert!(restored.get(b"only/in/parent").unwrap().is_none());
     assert!(db.get(b"only/in/restore").unwrap().is_none());
@@ -138,7 +152,10 @@ fn soak_overwrite_delete_gc_stays_correct_and_bounded() {
         }
         // the flush pipeline keeps up — no unbounded frozen-memtable backlog
         let s = db.stats();
-        assert!(s.immutable_memtables <= 3, "flush backlog grew unbounded (round {round})");
+        assert!(
+            s.immutable_memtables <= 3,
+            "flush backlog grew unbounded (round {round})"
+        );
     }
 
     db.flush().unwrap();
@@ -146,8 +163,11 @@ fn soak_overwrite_delete_gc_stays_correct_and_bounded() {
     while db.gc_vlog().unwrap().is_some() {}
 
     // full correctness against the model
-    let scanned: BTreeMap<Vec<u8>, Vec<u8>> =
-        db.iter(None, None, false).unwrap().map(|r| r.unwrap()).collect();
+    let scanned: BTreeMap<Vec<u8>, Vec<u8>> = db
+        .iter(None, None, false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
     assert_eq!(scanned, model, "soak diverged from reference");
 
     // bounded space: after GC the on-disk footprint is within a small multiple
@@ -162,8 +182,11 @@ fn soak_overwrite_delete_gc_stays_correct_and_bounded() {
     // survives a reopen with the full model intact
     drop(db);
     let db = Db::open(dir.path(), opts()).unwrap();
-    let after: BTreeMap<Vec<u8>, Vec<u8>> =
-        db.iter(None, None, false).unwrap().map(|r| r.unwrap()).collect();
+    let after: BTreeMap<Vec<u8>, Vec<u8>> = db
+        .iter(None, None, false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
     assert_eq!(after, model, "soak state lost across reopen");
 }
 

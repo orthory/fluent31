@@ -78,7 +78,10 @@ async fn alias_flood_exceeding_complexity_is_rejected() {
     assert!(!resp.errors.is_empty(), "alias flood should be rejected");
     assert!(resp.data.into_json().unwrap().is_null());
     let msg = resp.errors[0].message.to_lowercase();
-    assert!(msg.contains("complex"), "expected a complexity error, got: {msg}");
+    assert!(
+        msg.contains("complex"),
+        "expected a complexity error, got: {msg}"
+    );
 }
 
 /// A wide-but-legal fan-out (under the complexity budget) still executes: the
@@ -94,7 +97,11 @@ async fn moderate_alias_fan_out_still_executes() {
     q.push('}');
 
     let resp = exec(&schema, q).await;
-    assert!(resp.errors.is_empty(), "under-budget query errored: {:?}", resp.errors);
+    assert!(
+        resp.errors.is_empty(),
+        "under-budget query errored: {:?}",
+        resp.errors
+    );
     let data = resp.data.into_json().unwrap();
     assert_eq!(data.as_object().unwrap().len(), n, "all aliases resolved");
 }
@@ -123,7 +130,11 @@ async fn malformed_byte_inputs_are_rejected() {
         assert!(!resp.errors.is_empty(), "should reject: {q}");
     }
     // the store stayed empty — no half-applied writes from any rejected input
-    let resp = exec(&schema, r#"{ scan(limit: 10) { pairs { key { text } } } }"#.to_string()).await;
+    let resp = exec(
+        &schema,
+        r#"{ scan(limit: 10) { pairs { key { text } } } }"#.to_string(),
+    )
+    .await;
     let d = resp.data.into_json().unwrap();
     assert_eq!(d["scan"]["pairs"].as_array().unwrap().len(), 0);
 }
@@ -156,8 +167,15 @@ async fn large_legitimate_value_roundtrips() {
     let q = format!(r#"mutation {{ put(key: {{text: "big"}}, value: {{hex: "{big_hex}"}}) }}"#);
     let resp = exec(&schema, q).await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
-    let resp = exec(&schema, r#"{ get(key: {text: "big"}) { len } }"#.to_string()).await;
-    assert_eq!(resp.data.into_json().unwrap()["get"]["len"], json!(400 * 1024));
+    let resp = exec(
+        &schema,
+        r#"{ get(key: {text: "big"}) { len } }"#.to_string(),
+    )
+    .await;
+    assert_eq!(
+        resp.data.into_json().unwrap()["get"]["len"],
+        json!(400 * 1024)
+    );
 }
 
 /// A large `writeBatch` (thousands of ops) applies atomically — the batch API

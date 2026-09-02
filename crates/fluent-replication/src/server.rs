@@ -83,10 +83,15 @@ impl ReplServer {
         }
     }
 
-    async fn run_conn(self: Arc<Self>, mut sock: TcpStream, peer: SocketAddr) -> std::io::Result<()> {
+    async fn run_conn(
+        self: Arc<Self>,
+        mut sock: TcpStream,
+        peer: SocketAddr,
+    ) -> std::io::Result<()> {
         sock.set_nodelay(true)?;
         loop {
-            let Some((request_id, opcode, payload)) = read_frame(&mut sock, self.cfg.max_frame).await?
+            let Some((request_id, opcode, payload)) =
+                read_frame(&mut sock, self.cfg.max_frame).await?
             else {
                 return Ok(()); // clean EOF between frames
             };
@@ -94,7 +99,9 @@ impl ReplServer {
             if opcode == OP_SUBSCRIBE {
                 // reply then flip to push-only mode; this call never returns
                 // to request handling
-                return self.run_subscription(sock, peer, request_id, &payload).await;
+                return self
+                    .run_subscription(sock, peer, request_id, &payload)
+                    .await;
             }
 
             let (status, body) = self.handle(opcode, &payload).await;
@@ -173,19 +180,28 @@ impl ReplServer {
     ) -> std::io::Result<()> {
         let (lo, hi) = match range_args(payload) {
             Ok(r) => r,
-            Err(DispatchErr::Bad(m)) | Err(DispatchErr::Engine(fluent31::Error::InvalidArgument(m))) => {
+            Err(DispatchErr::Bad(m))
+            | Err(DispatchErr::Engine(fluent31::Error::InvalidArgument(m))) => {
                 sock.write_all(&response(request_id, ST_BAD_FRAME, m.as_bytes()))
                     .await?;
                 return Ok(());
             }
             Err(DispatchErr::Engine(e)) => {
-                sock.write_all(&response(request_id, status_for(&e), e.to_string().as_bytes()))
-                    .await?;
+                sock.write_all(&response(
+                    request_id,
+                    status_for(&e),
+                    e.to_string().as_bytes(),
+                ))
+                .await?;
                 return Ok(());
             }
         };
         let db = self.db.clone();
-        let range = format!("{}..{}", hex_prefix(&lo), hi.as_deref().map_or("".into(), hex_prefix));
+        let range = format!(
+            "{}..{}",
+            hex_prefix(&lo),
+            hi.as_deref().map_or("".into(), hex_prefix)
+        );
         let sub = match self
             .engine_call(move || db.subscribe(&lo, hi.as_deref()))
             .await
@@ -197,8 +213,12 @@ impl ReplServer {
                 return Ok(());
             }
             Err(DispatchErr::Engine(e)) => {
-                sock.write_all(&response(request_id, status_for(&e), e.to_string().as_bytes()))
-                    .await?;
+                sock.write_all(&response(
+                    request_id,
+                    status_for(&e),
+                    e.to_string().as_bytes(),
+                ))
+                .await?;
                 return Ok(());
             }
         };
@@ -247,9 +267,15 @@ impl ReplServer {
             return Ok(());
         };
         match end {
-            StreamEnd::PeerGone => info!(%peer, range, batches, "replication stream closed by peer"),
-            StreamEnd::Lagged => warn!(%peer, range, batches, "replication stream cut: edge lagged past the buffer"),
-            StreamEnd::Degraded(e) => warn!(%peer, range, batches, error = %e, "replication stream dropped: store degraded"),
+            StreamEnd::PeerGone => {
+                info!(%peer, range, batches, "replication stream closed by peer")
+            }
+            StreamEnd::Lagged => {
+                warn!(%peer, range, batches, "replication stream cut: edge lagged past the buffer")
+            }
+            StreamEnd::Degraded(e) => {
+                warn!(%peer, range, batches, error = %e, "replication stream dropped: store degraded")
+            }
         }
         Ok(())
     }

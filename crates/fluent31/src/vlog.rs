@@ -50,7 +50,9 @@ impl Drop for VlogFileHandle {
         if !self.obsolete.load(Ordering::Acquire) {
             return;
         }
-        let Err(e) = std::fs::remove_file(&self.path) else { return };
+        let Err(e) = std::fs::remove_file(&self.path) else {
+            return;
+        };
         tracing::warn!(path = %self.path.display(), error = %e, "could not delete obsolete value-log file");
     }
 }
@@ -313,8 +315,14 @@ mod tests {
         let p2 = vlog.append(b"b", &[2u8; 200]).unwrap();
         vlog.sync_head().unwrap();
 
-        assert_eq!(read_value(&handle, &p1, b"a", None).unwrap(), vec![1u8; 100]);
-        assert_eq!(read_value(&handle, &p2, b"b", None).unwrap(), vec![2u8; 200]);
+        assert_eq!(
+            read_value(&handle, &p1, b"a", None).unwrap(),
+            vec![1u8; 100]
+        );
+        assert_eq!(
+            read_value(&handle, &p2, b"b", None).unwrap(),
+            vec![2u8; 200]
+        );
         // wrong expected key must fail
         assert!(read_value(&handle, &p1, b"b", None).is_err());
 
@@ -324,8 +332,7 @@ mod tests {
         assert_eq!(recs[1].0, p2.offset);
         assert_eq!(valid, p2.offset + p2.len as u64);
 
-        let vals =
-            read_values_batch(&handle, &[(p2, b"b" as &[u8]), (p1, b"a" as &[u8])]).unwrap();
+        let vals = read_values_batch(&handle, &[(p2, b"b" as &[u8]), (p1, b"a" as &[u8])]).unwrap();
         assert_eq!(vals[0], vec![2u8; 200]);
         assert_eq!(vals[1], vec![1u8; 100]);
     }

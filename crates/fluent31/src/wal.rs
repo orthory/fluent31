@@ -67,7 +67,12 @@ pub(crate) fn read_wal(file: &dyn DbFile) -> Result<(Vec<Vec<u8>>, WalTail)> {
             return Ok((records, WalTail::Clean));
         }
         if buf.len() - pos < HEADER_LEN {
-            return Ok((records, WalTail::Torn { valid_len: pos as u64 }));
+            return Ok((
+                records,
+                WalTail::Torn {
+                    valid_len: pos as u64,
+                },
+            ));
         }
         let mut r = Reader::new(&buf[pos..pos + HEADER_LEN]);
         let rec_len = r.u32().expect("sized") as usize;
@@ -76,14 +81,29 @@ pub(crate) fn read_wal(file: &dyn DbFile) -> Result<(Vec<Vec<u8>>, WalTail)> {
         // payload is 0), but the engine never writes empty records — treat a
         // zero-filled region as a torn tail, not data
         if rec_len == 0 && crc == 0 {
-            return Ok((records, WalTail::Torn { valid_len: pos as u64 }));
+            return Ok((
+                records,
+                WalTail::Torn {
+                    valid_len: pos as u64,
+                },
+            ));
         }
         if rec_len as u32 > MAX_RECORD || buf.len() - pos - HEADER_LEN < rec_len {
-            return Ok((records, WalTail::Torn { valid_len: pos as u64 }));
+            return Ok((
+                records,
+                WalTail::Torn {
+                    valid_len: pos as u64,
+                },
+            ));
         }
         let payload = &buf[pos + HEADER_LEN..pos + HEADER_LEN + rec_len];
         if crc32(payload) != crc {
-            return Ok((records, WalTail::Torn { valid_len: pos as u64 }));
+            return Ok((
+                records,
+                WalTail::Torn {
+                    valid_len: pos as u64,
+                },
+            ));
         }
         records.push(payload.to_vec());
         pos += HEADER_LEN + rec_len;
@@ -134,7 +154,10 @@ mod tests {
         let valid = std::fs::metadata(&path).unwrap().len();
         {
             use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             f.write_all(&[0u8; 32]).unwrap();
         }
         let f = io.open_read(&path).unwrap();

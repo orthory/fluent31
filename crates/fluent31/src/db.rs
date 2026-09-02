@@ -20,9 +20,9 @@ use tracing::{debug, error, info, warn, Span};
 
 use crate::batch::{decode_batch, encode_batch, BatchOp, EncEntry, WriteBatch};
 use crate::cache::BlockCache;
-use crate::fork::ForkInfo;
 use crate::config::{DbPaths, Options, SyncMode};
 use crate::error::{corrupt, Error, Result};
+use crate::fork::ForkInfo;
 use crate::identity::StoreIdentity;
 use crate::io::{self, Io};
 use crate::iter::DbIterator;
@@ -342,18 +342,14 @@ impl DbInner {
         }
     }
 
-    pub fn resolve_repr(
-        &self,
-        view: &ReadView,
-        key: &[u8],
-        repr: &[u8],
-    ) -> Result<Vec<u8>> {
+    pub fn resolve_repr(&self, view: &ReadView, key: &[u8], repr: &[u8]) -> Result<Vec<u8>> {
         match decode_repr(repr)? {
             ReprRef::Inline(v) => Ok(v.to_vec()),
             ReprRef::Ptr(p) => {
-                let handle = view.version.vlogs.get(&p.file).ok_or_else(|| {
-                    corrupt(format!("pointer into unknown vlog file {}", p.file))
-                })?;
+                let handle =
+                    view.version.vlogs.get(&p.file).ok_or_else(|| {
+                        corrupt(format!("pointer into unknown vlog file {}", p.file))
+                    })?;
                 vlog::read_value(handle, &p, key, Some(&self.cache))
             }
         }
@@ -542,7 +538,8 @@ impl DbInner {
             self.check_bg_error()?;
             self.flush_signal.notify();
             self.compact_signal.notify();
-            self.progress_signal.wait_timeout(Duration::from_millis(100));
+            self.progress_signal
+                .wait_timeout(Duration::from_millis(100));
         }
         Ok(())
     }
@@ -892,9 +889,7 @@ impl DbInner {
             }
             let total = (ops.len() + events.len()) as u64;
             if next + total >= MAX_SEQNO {
-                results[i] = Some(Err(Error::InvalidArgument(
-                    "seqno space exhausted".into(),
-                )));
+                results[i] = Some(Err(Error::InvalidArgument("seqno space exhausted".into())));
                 continue;
             }
             accepted.push((i, next, events));
@@ -983,8 +978,7 @@ impl DbInner {
                 self.set_bg_error(format!("vlog sync failed: {msg}"));
                 let mut real = Some(e);
                 for (i, _, _) in &placed {
-                    results[*i] =
-                        Some(Err(real.take().unwrap_or_else(|| aborted(&msg))));
+                    results[*i] = Some(Err(real.take().unwrap_or_else(|| aborted(&msg))));
                 }
                 return results.into_iter().map(|r| r.expect("filled")).collect();
             }
@@ -1035,8 +1029,7 @@ impl DbInner {
                 self.set_bg_error(format!("wal sync failed: {msg}"));
                 let mut real = Some(e);
                 for (i, _, _) in &appended {
-                    results[*i] =
-                        Some(Err(real.take().unwrap_or_else(|| aborted(&msg))));
+                    results[*i] = Some(Err(real.take().unwrap_or_else(|| aborted(&msg))));
                 }
                 return results.into_iter().map(|r| r.expect("filled")).collect();
             }
@@ -1052,10 +1045,8 @@ impl DbInner {
                 }
                 results[*i] = Some(Ok(()));
             }
-            self.visible_seqno.store(
-                last_base + last_entries.len() as u64 - 1,
-                Ordering::Release,
-            );
+            self.visible_seqno
+                .store(last_base + last_entries.len() as u64 - 1, Ordering::Release);
             for (_, base, entries) in &appended {
                 self.publish_stream(*base, entries);
             }
@@ -1125,7 +1116,9 @@ impl DbInner {
     /// files with id >= the manifest's head id (young files).
     fn rotate_vlog_locked(&self) -> Result<()> {
         let id = self.alloc_file_id();
-        let (sealed, new_handle) = self.vlog.rotate(self.io.as_ref(), id, self.paths.vlog(id))?;
+        let (sealed, new_handle) = self
+            .vlog
+            .rotate(self.io.as_ref(), id, self.paths.vlog(id))?;
         io::sync_dir(&self.paths.dir)?;
         let mut s = self.state.write();
         let mut v = s.version.clone_shape();
@@ -1242,11 +1235,15 @@ impl DbInner {
     }
 
     fn delete_old_wals(&self, floor: u64) {
-        let Ok(rd) = std::fs::read_dir(&self.paths.dir) else { return };
+        let Ok(rd) = std::fs::read_dir(&self.paths.dir) else {
+            return;
+        };
         for entry in rd.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let Some(id) = parse_file_id(name, "wal-", ".log") else { continue };
+            let Some(id) = parse_file_id(name, "wal-", ".log") else {
+                continue;
+            };
             if id < floor {
                 self.remove_file("wal", entry.path());
             }
@@ -1257,7 +1254,9 @@ impl DbInner {
     /// error (the file is garbage either way) but must not be silent:
     /// leaked files are how a directory quietly outgrows its data.
     fn remove_file(&self, what: &'static str, path: std::path::PathBuf) {
-        let Err(e) = std::fs::remove_file(&path) else { return };
+        let Err(e) = std::fs::remove_file(&path) else {
+            return;
+        };
         warn!(parent: &self.span, what, path = %path.display(), error = %e, "could not delete obsolete file");
     }
 
@@ -1306,13 +1305,7 @@ impl DbInner {
             tables.push(self.finish_table(id, b)?);
         }
         io::sync_dir(&self.paths.dir)?;
-        Ok((
-            Run {
-                id: run_id,
-                tables,
-            },
-            max_seq,
-        ))
+        Ok((Run { id: run_id, tables }, max_seq))
     }
 
     pub(crate) fn finish_table(&self, id: u64, b: TableBuilder) -> Result<Arc<TableHandle>> {
@@ -1409,7 +1402,11 @@ impl Db {
         io: Arc<dyn io::Io>,
         backend_name: &'static str,
     ) -> Result<Db> {
-        Self::spawn_from_inner(open_inner_with(dir.as_ref(), opts, Some((io, backend_name)))?)
+        Self::spawn_from_inner(open_inner_with(
+            dir.as_ref(),
+            opts,
+            Some((io, backend_name)),
+        )?)
     }
 
     fn spawn_from_inner(inner: Arc<DbInner>) -> Result<Db> {
@@ -1516,12 +1513,7 @@ impl Db {
 
     /// Forward or reverse iterator over `[lo, hi)` at the current visible
     /// state.
-    pub fn iter(
-        &self,
-        lo: Option<&[u8]>,
-        hi: Option<&[u8]>,
-        reverse: bool,
-    ) -> Result<DbIterator> {
+    pub fn iter(&self, lo: Option<&[u8]>, hi: Option<&[u8]>, reverse: bool) -> Result<DbIterator> {
         self.inner
             .iter_at_seq(None, lo, hi.map(|h| h.to_vec()), reverse)
     }
@@ -1666,7 +1658,9 @@ impl Db {
         if self.inner.opts.wasm_enabled {
             Ok(())
         } else {
-            Err(Error::Wasm("wasm layer is disabled (Options::wasm_enabled = false)".into()))
+            Err(Error::Wasm(
+                "wasm layer is disabled (Options::wasm_enabled = false)".into(),
+            ))
         }
     }
 
@@ -1692,7 +1686,12 @@ impl Db {
     #[cfg(feature = "wasm")]
     pub fn query(&self, name: &str, input: &[u8]) -> Result<Vec<u8>> {
         self.wasm_gate()?;
-        crate::wasm::query(&self.inner, &crate::wasm::ModuleSource::Installed(name), input, None)
+        crate::wasm::query(
+            &self.inner,
+            &crate::wasm::ModuleSource::Installed(name),
+            input,
+            None,
+        )
     }
 
     #[cfg(feature = "wasm")]
@@ -1713,7 +1712,12 @@ impl Db {
     #[cfg(feature = "wasm")]
     pub fn query_wasm(&self, wasm: &[u8], input: &[u8]) -> Result<Vec<u8>> {
         self.wasm_gate()?;
-        crate::wasm::query(&self.inner, &crate::wasm::ModuleSource::Bytes(wasm), input, None)
+        crate::wasm::query(
+            &self.inner,
+            &crate::wasm::ModuleSource::Bytes(wasm),
+            input,
+            None,
+        )
     }
 
     /// One-shot [`Db::query_at`]: like [`Db::query_wasm`], but at a
@@ -1735,7 +1739,11 @@ impl Db {
     #[cfg(feature = "wasm")]
     pub fn execute(&self, name: &str, input: &[u8]) -> Result<Vec<u8>> {
         self.wasm_gate()?;
-        crate::wasm::execute(&self.inner, &crate::wasm::ModuleSource::Installed(name), input)
+        crate::wasm::execute(
+            &self.inner,
+            &crate::wasm::ModuleSource::Installed(name),
+            input,
+        )
     }
 
     /// One-shot [`Db::execute`]: run candidate module bytes' `execute`
@@ -1992,7 +2000,11 @@ fn commit_thread(db: Arc<DbInner>) {
                 return;
             }
             let idle = periodic
-                .map(|every| every.saturating_sub(last_sync.elapsed()).max(Duration::from_millis(1)))
+                .map(|every| {
+                    every
+                        .saturating_sub(last_sync.elapsed())
+                        .max(Duration::from_millis(1))
+                })
                 .unwrap_or(Duration::from_millis(100))
                 .min(Duration::from_millis(100));
             db.commit_signal.wait_timeout(idle);
@@ -2110,7 +2122,8 @@ fn commit_thread(db: Arc<DbInner>) {
                 }
             }
             db.commit_groups.fetch_add(1, Ordering::Relaxed);
-            db.commit_batches.fetch_add(group.len() as u64, Ordering::Relaxed);
+            db.commit_batches
+                .fetch_add(group.len() as u64, Ordering::Relaxed);
             for (w, r) in group.iter().zip(results) {
                 let mut g = w.inner.lock();
                 g.result = Some(r.expect("every group entry resolved"));
@@ -2235,10 +2248,7 @@ fn open_inner_with(
                 let table = Table::open(file, tid, cache.clone())?;
                 tables.push(Arc::new(TableHandle::new(tid, path, size, table)));
             }
-            version.levels[li].push(Run {
-                id: rm.id,
-                tables,
-            });
+            version.levels[li].push(Run { id: rm.id, tables });
         }
     }
 
@@ -2453,10 +2463,7 @@ fn open_inner_with(
         wal_syncs: AtomicU64::new(0),
         visible_seqno: AtomicU64::new(max_seq),
         next_file_id: AtomicU64::new(next_file_id),
-        manifest: Mutex::new(ManifestState {
-            gen,
-            data: mdata,
-        }),
+        manifest: Mutex::new(ManifestState { gen, data: mdata }),
         snapshots: Mutex::new(SnapshotList::default()),
         vlog,
         retired: Mutex::new(retired_list),
@@ -2546,8 +2553,12 @@ fn open_inner_with(
                 continue;
             }
             match std::fs::remove_dir_all(entry.path()) {
-                Ok(()) => warn!(parent: &inner.span, dir = %entry.path().display(), "removed a fork build that crashed mid-creation"),
-                Err(e) => warn!(parent: &inner.span, dir = %entry.path().display(), error = %e, "could not remove a crashed fork build"),
+                Ok(()) => {
+                    warn!(parent: &inner.span, dir = %entry.path().display(), "removed a fork build that crashed mid-creation")
+                }
+                Err(e) => {
+                    warn!(parent: &inner.span, dir = %entry.path().display(), error = %e, "could not remove a crashed fork build")
+                }
             }
         }
     }
@@ -2960,7 +2971,9 @@ impl Drop for Subscription {
         self.shared.dropped.store(true, Ordering::Release);
         let mut subs = self.db.subs.lock();
         subs.retain(|s| !Arc::ptr_eq(s, &self.shared));
-        self.db.subs_active.store(!subs.is_empty(), Ordering::Release);
+        self.db
+            .subs_active
+            .store(!subs.is_empty(), Ordering::Release);
         debug!(parent: &self.db.span, lo = %hex_prefix(&self.shared.lo), active = subs.len(), "subscription closed");
         drop(subs);
         self.db.deregister_snapshot(self.pinned);
@@ -3261,7 +3274,11 @@ mod group_commit_tests {
 
         drop(ws); // committer proceeds
         let result = writer.join().unwrap();
-        let present = db.inner.get_at_seq(b"inflight", MAX_SEQNO).unwrap().is_some();
+        let present = db
+            .inner
+            .get_at_seq(b"inflight", MAX_SEQNO)
+            .unwrap()
+            .is_some();
         // either outcome is legal here (the committer's degradation gate
         // may or may not have seen bg_error before this chunk) — but ack
         // and state must AGREE:
@@ -3337,9 +3354,7 @@ mod group_commit_tests {
 
         // park visible_seqno so close to MAX_SEQNO that a 3-op batch fails
         // the seqno-space check while 1-op batches still fit
-        inner
-            .visible_seqno
-            .store(MAX_SEQNO - 4, Ordering::Release);
+        inner.visible_seqno.store(MAX_SEQNO - 4, Ordering::Release);
 
         let mk = |n: usize| -> Vec<BatchOp> {
             let mut b = WriteBatch::new();
@@ -3370,12 +3385,13 @@ mod group_commit_tests {
             "{:?}",
             results[1]
         );
-        assert!(results[2].is_ok(), "validation skip is batch-local: {:?}", results[2]);
-        // the skipped batch consumed no seqnos: exactly 2 were used
-        assert_eq!(
-            inner.visible_seqno.load(Ordering::Acquire),
-            MAX_SEQNO - 2
+        assert!(
+            results[2].is_ok(),
+            "validation skip is batch-local: {:?}",
+            results[2]
         );
+        // the skipped batch consumed no seqnos: exactly 2 were used
+        assert_eq!(inner.visible_seqno.load(Ordering::Acquire), MAX_SEQNO - 2);
     }
 }
 

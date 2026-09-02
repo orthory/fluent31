@@ -35,7 +35,9 @@ fn rebuilt_value(jrn: &Path, key: &[u8]) -> Option<Vec<u8>> {
 
 /// `journal-*.log` files currently in the journal directory.
 fn log_file_count(jrn: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(jrn) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(jrn) else {
+        return 0;
+    };
     entries
         .filter_map(|e| e.ok())
         .filter(|e| {
@@ -170,7 +172,9 @@ fn journal_tuning_from_config_merges_with_the_dir_flag() {
     let val = "x".repeat(4 << 10);
     let resp = graphql_post(
         &addr,
-        &format!(r#"{{"query":"mutation {{ put(key: {{text: \"big\"}}, value: {{text: \"{val}\"}}) }}"}}"#),
+        &format!(
+            r#"{{"query":"mutation {{ put(key: {{text: \"big\"}}, value: {{text: \"{val}\"}}) }}"}}"#
+        ),
     );
     assert!(resp.contains(r#""put":true"#), "{resp}");
     wait_for("rotation to a second journal file", || {
@@ -197,7 +201,10 @@ fn journal_tuning_without_a_dir_is_refused() {
         .arg(&cfg_path)
         .output()
         .unwrap();
-    assert!(!out.status.success(), "a journal with no dir must be refused");
+    assert!(
+        !out.status.success(),
+        "a journal with no dir must be refused"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("[journal] section needs dir"), "{stderr}");
 }

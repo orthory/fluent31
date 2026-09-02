@@ -86,9 +86,7 @@ impl MemIter {
     /// borrow of `self`, letting callers assign it into `self.cur`.
     /// SAFETY: see struct docs.
     fn grab(e: Option<Entry<'_, InternalKey, Vec<u8>>>) -> Option<StaticEntry> {
-        e.map(|e| unsafe {
-            std::mem::transmute::<Entry<'_, InternalKey, Vec<u8>>, StaticEntry>(e)
-        })
+        e.map(|e| unsafe { std::mem::transmute::<Entry<'_, InternalKey, Vec<u8>>, StaticEntry>(e) })
     }
 }
 
@@ -190,11 +188,7 @@ mod tests {
         }
         assert_eq!(
             seen,
-            vec![
-                (b"a".to_vec(), 1),
-                (b"b".to_vec(), 5),
-                (b"b".to_vec(), 2)
-            ]
+            vec![(b"a".to_vec(), 1), (b"b".to_vec(), 5), (b"b".to_vec(), 2)]
         );
         // reverse from the end
         it.seek_to_last().unwrap();

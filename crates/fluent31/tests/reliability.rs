@@ -251,13 +251,20 @@ fn torn_tail_reopen_loop_is_stable() {
     // append junk that can't form a valid record
     {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(newest).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(newest)
+            .unwrap();
         f.write_all(&[0xab; 24]).unwrap();
     }
     for round in 0..5 {
         let db = Db::open(dir.path(), small_opts()).unwrap();
         for i in 0..12u32 {
-            assert_eq!(db.get(&k(i)).unwrap().unwrap(), val(i), "round {round} key {i}");
+            assert_eq!(
+                db.get(&k(i)).unwrap().unwrap(),
+                val(i),
+                "round {round} key {i}"
+            );
         }
         db.put(k(100 + round), val(round)).unwrap();
         drop(db);
@@ -437,7 +444,8 @@ fn concurrent_transfers_conserve_total() {
                     if fb < 5 {
                         break; // insufficient funds; skip
                     }
-                    txn.put(acct(from), (fb - 5).to_le_bytes().to_vec()).unwrap();
+                    txn.put(acct(from), (fb - 5).to_le_bytes().to_vec())
+                        .unwrap();
                     txn.put(acct(to), (tb + 5).to_le_bytes().to_vec()).unwrap();
                     match txn.commit() {
                         Ok(()) => {
@@ -454,12 +462,19 @@ fn concurrent_transfers_conserve_total() {
     for h in handles {
         h.join().unwrap();
     }
-    assert!(committed.load(Ordering::Relaxed) > 0, "no transfer committed");
+    assert!(
+        committed.load(Ordering::Relaxed) > 0,
+        "no transfer committed"
+    );
 
     let total: u64 = (0..ACCOUNTS)
         .map(|a| read_u64(db.get(&acct(a)).unwrap()))
         .sum();
-    assert_eq!(total, START * ACCOUNTS as u64, "money was created or destroyed");
+    assert_eq!(
+        total,
+        START * ACCOUNTS as u64,
+        "money was created or destroyed"
+    );
 
     // survives a reopen with the invariant intact
     drop(db);
@@ -589,7 +604,11 @@ fn randomized_ops_match_btreemap_reference_with_reopen() {
                 model.remove(&key);
             }
             7 => {
-                assert_eq!(db.get(&key).unwrap(), model.get(&key).cloned(), "get step {step}");
+                assert_eq!(
+                    db.get(&key).unwrap(),
+                    model.get(&key).cloned(),
+                    "get step {step}"
+                );
             }
             8 => {
                 let _ = db.flush();

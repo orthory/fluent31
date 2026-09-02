@@ -171,7 +171,11 @@ fn main() -> ExitCode {
     if let Some(s) = &file.sync {
         if parse_sync(s).is_none() {
             let path = config_path.as_deref().unwrap_or_default();
-            error!(config = path, sync = s, "invalid sync mode (always | never | periodic:<ms>)");
+            error!(
+                config = path,
+                sync = s,
+                "invalid sync mode (always | never | periodic:<ms>)"
+            );
             return ExitCode::FAILURE;
         }
     }
@@ -243,7 +247,10 @@ fn edge_main(eff: FileConfig) -> ExitCode {
         eprintln!("fluent-server: missing <cache-dir> (positional argument, or `dir` in the --config file)\n");
         return usage();
     };
-    let section = eff.edge.as_ref().expect("edge_main called with [edge] present");
+    let section = eff
+        .edge
+        .as_ref()
+        .expect("edge_main called with [edge] present");
     let rcfg = match section.replica_config(&dir) {
         Ok(c) => c,
         Err(e) => {

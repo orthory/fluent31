@@ -20,7 +20,10 @@ use fluent31::{Db, Options, SyncMode};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dir = args.get(1).expect("usage: crash_writer <dir> [mode] [threads]").clone();
+    let dir = args
+        .get(1)
+        .expect("usage: crash_writer <dir> [mode] [threads]")
+        .clone();
     let mode = args.get(2).map(|s| s.as_str()).unwrap_or("always");
     let threads: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
 

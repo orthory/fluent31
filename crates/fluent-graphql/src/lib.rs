@@ -168,7 +168,11 @@ impl SchemaManager {
     }
 
     pub(crate) fn registry_shared(&self) -> Option<Arc<registry::RegistryShared>> {
-        self.registry.read().unwrap().as_ref().and_then(Weak::upgrade)
+        self.registry
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(Weak::upgrade)
     }
 
     /// The underlying database handle (tests and embedders; GraphQL-side

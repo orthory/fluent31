@@ -307,7 +307,12 @@ pub struct EdgeReplicaConfig {
 }
 
 impl EdgeReplicaConfig {
-    pub fn new(master_addr: impl Into<String>, dir: impl Into<PathBuf>, lo: Vec<u8>, hi: Option<Vec<u8>>) -> Self {
+    pub fn new(
+        master_addr: impl Into<String>,
+        dir: impl Into<PathBuf>,
+        lo: Vec<u8>,
+        hi: Option<Vec<u8>>,
+    ) -> Self {
         EdgeReplicaConfig {
             master_addr: master_addr.into(),
             dir: dir.into(),
@@ -449,12 +454,7 @@ fn attach_store(
         instance_id: info.instance_id,
         parent: None,
     };
-    let mut ecfg = EdgeConfig::new(
-        &cfg.dir,
-        master,
-        cfg.scope_lo.clone(),
-        cfg.scope_hi.clone(),
-    );
+    let mut ecfg = EdgeConfig::new(&cfg.dir, master, cfg.scope_lo.clone(), cfg.scope_hi.clone());
     ecfg.value_cache_bytes = cfg.value_cache_bytes;
     ecfg.block_cache_size = cfg.block_cache_size;
     Ok(Arc::new(EdgeStore::attach(ecfg, fetcher)?))
@@ -524,7 +524,10 @@ fn pull_slice_with_retries(
         match pull_slice(client, store, cfg) {
             Ok(()) => return Ok(()),
             Err(Error::Gone(_)) => {
-                debug!(attempt, "slice pull raced a master compaction; taking a fresh snapshot");
+                debug!(
+                    attempt,
+                    "slice pull raced a master compaction; taking a fresh snapshot"
+                );
                 continue;
             }
             Err(e) => {

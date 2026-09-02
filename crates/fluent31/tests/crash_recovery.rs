@@ -151,7 +151,11 @@ fn periodic_mode_recovers_consistent_gapless_prefix() {
     let db = Db::open(dir.path(), reopen_opts()).unwrap();
     assert_gapless(&survivors(&db));
     // full scan parses cleanly (no corruption anywhere in the tree)
-    let n = db.iter(None, None, false).unwrap().map(|r| r.unwrap()).count();
+    let n = db
+        .iter(None, None, false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .count();
     assert!(n > 0);
     db.put(b"post".to_vec(), b"1".to_vec()).unwrap();
 }
@@ -163,6 +167,10 @@ fn never_mode_recovers_consistent_gapless_prefix() {
     let (dir, _) = run_and_kill("never");
     let db = Db::open(dir.path(), reopen_opts()).unwrap();
     assert_gapless(&survivors(&db));
-    let n = db.iter(None, None, false).unwrap().map(|r| r.unwrap()).count();
+    let n = db
+        .iter(None, None, false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .count();
     assert!(n > 0);
 }

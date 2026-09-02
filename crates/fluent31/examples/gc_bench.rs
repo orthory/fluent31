@@ -1,22 +1,38 @@
 //! Concurrent sync-write benchmark: THREADS writers x PER ops, SyncMode::Always.
+use fluent31::{Db, Options, SyncMode};
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
-use fluent31::{Db, Options, SyncMode};
 
 fn main() {
-    let threads: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(8);
+    let threads: usize = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
     let sync = match std::env::args().nth(2).as_deref() {
         Some("never") => SyncMode::Never,
         _ => SyncMode::Always,
     };
-    let per: usize = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(50);
+    let per: usize = std::env::args()
+        .nth(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
     let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(Db::open(dir.path(), Options { sync, ..Options::default() }).unwrap());
+    let db = Arc::new(
+        Db::open(
+            dir.path(),
+            Options {
+                sync,
+                ..Options::default()
+            },
+        )
+        .unwrap(),
+    );
     let barrier = Arc::new(Barrier::new(threads));
     let start = Instant::now();
     std::thread::scope(|s| {
         for t in 0..threads {
-            let db = db.clone(); let barrier = barrier.clone();
+            let db = db.clone();
+            let barrier = barrier.clone();
             let txn_mode = std::env::args().nth(4).as_deref() == Some("txn");
             s.spawn(move || {
                 barrier.wait();
@@ -30,7 +46,8 @@ fn main() {
                                 .unwrap()
                                 .map(|v| u64::from_le_bytes(v[..8].try_into().unwrap()))
                                 .unwrap_or(0);
-                            txn.put(format!("t/{t}"), (cur + 1).to_le_bytes().to_vec()).unwrap();
+                            txn.put(format!("t/{t}"), (cur + 1).to_le_bytes().to_vec())
+                                .unwrap();
                             match txn.commit() {
                                 Ok(()) => break,
                                 Err(fluent31::Error::Conflict) => continue,
@@ -38,7 +55,11 @@ fn main() {
                             }
                         }
                     } else {
-                        db.put(format!("b/{t}/{i}"), "value-payload-64-bytes-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").unwrap();
+                        db.put(
+                            format!("b/{t}/{i}"),
+                            "value-payload-64-bytes-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                        )
+                        .unwrap();
                     }
                 }
             });

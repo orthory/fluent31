@@ -51,7 +51,8 @@ fn failed_create_cleans_tmp_and_name_stays_usable() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), small_opts()).unwrap();
     for i in 0..5u32 {
-        db.put(format!("k{i}").into_bytes(), vec![b'v'; 200]).unwrap();
+        db.put(format!("k{i}").into_bytes(), vec![b'v'; 200])
+            .unwrap();
     }
     db.flush().unwrap();
 
@@ -71,7 +72,10 @@ fn failed_create_cleans_tmp_and_name_stays_usable() {
     // the name is not poisoned: the retry reaches the same underlying
     // failure instead of "already being created"
     let retry = format!("{}", db.fork("snap").unwrap_err());
-    assert!(!retry.contains("already being created"), "poisoned: {retry}");
+    assert!(
+        !retry.contains("already being created"),
+        "poisoned: {retry}"
+    );
     assert!(!tmp_build_dir(dir.path(), "snap").exists());
     assert!(db.list_forks().unwrap().is_empty());
 
@@ -115,7 +119,10 @@ fn missing_sealed_vlog_fails_create_and_cleans_tmp() {
     db.fork("snap").unwrap_err();
     assert!(!tmp_build_dir(dir.path(), "snap").exists());
     let retry = format!("{}", db.fork("snap").unwrap_err());
-    assert!(!retry.contains("already being created"), "poisoned: {retry}");
+    assert!(
+        !retry.contains("already being created"),
+        "poisoned: {retry}"
+    );
     assert!(!tmp_build_dir(dir.path(), "snap").exists());
 
     // repair and fork for real
@@ -169,7 +176,8 @@ fn concurrent_same_name_forks_exactly_one_wins() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), small_opts()).unwrap();
     for i in 0..50u32 {
-        db.put(format!("k{i:03}").into_bytes(), vec![b'v'; 100]).unwrap();
+        db.put(format!("k{i:03}").into_bytes(), vec![b'v'; 100])
+            .unwrap();
     }
 
     for round in 0..5 {
@@ -185,7 +193,11 @@ fn concurrent_same_name_forks_exactly_one_wins() {
                     })
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count()
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .filter(|ok| *ok)
+                .count()
         });
         assert_eq!(wins, 1, "round {round}: expected exactly one winner");
         assert!(

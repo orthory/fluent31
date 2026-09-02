@@ -77,8 +77,7 @@ impl TableBuilder {
     pub fn add(&mut self, ikey: &[u8], repr: &[u8]) -> Result<()> {
         debug_assert!(
             !self.started
-                || crate::types::cmp_ikey(&self.stats.last_ikey, ikey)
-                    == std::cmp::Ordering::Less,
+                || crate::types::cmp_ikey(&self.stats.last_ikey, ikey) == std::cmp::Ordering::Less,
             "keys must be added in strictly increasing internal-key order"
         );
         if !self.started {

@@ -110,11 +110,13 @@ pub struct Server {
 }
 
 async fn bind(plane: &'static str, addr: &str) -> Result<TcpListener, StartError> {
-    TcpListener::bind(addr).await.map_err(|err| StartError::Bind {
-        plane,
-        addr: addr.to_string(),
-        err,
-    })
+    TcpListener::bind(addr)
+        .await
+        .map_err(|err| StartError::Bind {
+            plane,
+            addr: addr.to_string(),
+            err,
+        })
 }
 
 impl Server {
@@ -146,7 +148,9 @@ impl Server {
         let registry = InstanceRegistry::new(mgr, root_dir, fork_opts, cfg.registry.clone());
 
         let repl = match db.identity() {
-            Some(_) => Some(ReplServer::new(db.clone(), cfg.replication).map_err(StartError::Engine)?),
+            Some(_) => {
+                Some(ReplServer::new(db.clone(), cfg.replication).map_err(StartError::Engine)?)
+            }
             None => None,
         };
 

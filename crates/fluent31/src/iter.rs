@@ -225,12 +225,7 @@ pub(crate) struct MvccReverse {
 }
 
 impl MvccReverse {
-    pub fn new(
-        mut it: MergeIterator,
-        snap: SeqNo,
-        lo: Vec<u8>,
-        hi: Option<&[u8]>,
-    ) -> Result<Self> {
+    pub fn new(mut it: MergeIterator, snap: SeqNo, lo: Vec<u8>, hi: Option<&[u8]>) -> Result<Self> {
         match hi {
             // Seek target (hi, MAX) sorts before every real entry of `hi`,
             // so seek_for_prev lands on the last entry with ukey < hi.

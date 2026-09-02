@@ -108,8 +108,7 @@ impl WasmRuntime {
         // threads support is not compiled in (no `threads` feature);
         // relaxed-simd must be deterministic for re-execution to be sound
         config.relaxed_simd_deterministic(true);
-        let engine =
-            Engine::new(&config).map_err(|e| Error::Wasm(format!("engine init: {e}")))?;
+        let engine = Engine::new(&config).map_err(|e| Error::Wasm(format!("engine init: {e}")))?;
         let mut linker = Linker::new(&engine);
         abi::register(&mut linker).map_err(|e| Error::Wasm(format!("abi setup: {e}")))?;
         Ok(WasmRuntime {
@@ -211,7 +210,10 @@ pub(crate) fn install_module(db: &Arc<DbInner>, name: &str, wasm: &[u8]) -> Resu
 
 pub(crate) fn uninstall_module(db: &Arc<DbInner>, name: &str) -> Result<()> {
     validate_module_name(name)?;
-    if db.get_at_seq(&sys_wasm_key(name), crate::types::MAX_SEQNO)?.is_none() {
+    if db
+        .get_at_seq(&sys_wasm_key(name), crate::types::MAX_SEQNO)?
+        .is_none()
+    {
         return Err(Error::InvalidArgument(format!("no module named {name:?}")));
     }
     let mut b = WriteBatch::new();
@@ -285,7 +287,10 @@ fn run_instance(
         .map_err(|e| Error::Wasm(format!("missing {entry}(): {e}")))?;
     let outcome = run.call(&mut store, ());
     // what the invocation cost, whichever way it ended
-    let fuel_used = db.opts.wasm_fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+    let fuel_used = db
+        .opts
+        .wasm_fuel
+        .saturating_sub(store.get_fuel().unwrap_or(0));
     let memory_bytes = instance
         .get_memory(&mut store, "memory")
         .map_or(0, |m| m.data_size(&store));
@@ -318,7 +323,9 @@ pub(crate) fn query(
     at: Option<SeqNo>,
 ) -> Result<Vec<u8>> {
     if input.len() > db.opts.max_wasm_input {
-        return Err(Error::InvalidArgument("input exceeds max_wasm_input".into()));
+        return Err(Error::InvalidArgument(
+            "input exceeds max_wasm_input".into(),
+        ));
     }
     // pin a snapshot for the whole invocation so GC cannot outrun the guest
     let guard = match at {
@@ -404,7 +411,14 @@ pub(crate) fn execute_system(
     consume: &[Vec<u8>],
     entry: &str,
 ) -> Result<Vec<u8>> {
-    execute_impl(db, &ModuleSource::Installed(name), input, consume, true, entry)
+    execute_impl(
+        db,
+        &ModuleSource::Installed(name),
+        input,
+        consume,
+        true,
+        entry,
+    )
 }
 
 fn execute_impl(
@@ -416,7 +430,9 @@ fn execute_impl(
     entry: &str,
 ) -> Result<Vec<u8>> {
     if input.len() > db.opts.max_wasm_input {
-        return Err(Error::InvalidArgument("input exceeds max_wasm_input".into()));
+        return Err(Error::InvalidArgument(
+            "input exceeds max_wasm_input".into(),
+        ));
     }
     // installed modules re-resolve at each attempt's snapshot (each attempt
     // sees a consistent code version); one-shot bytes are pinned by the
@@ -511,7 +527,12 @@ pub(crate) fn describe_module(db: &Arc<DbInner>, name: &str) -> Result<Option<Ve
         registered: true,
     };
     let module = load_module_at(db, name, guard.seq)?;
-    describe_compiled(db, &module, guard.seq, &ModuleSource::Installed(name).ident())
+    describe_compiled(
+        db,
+        &module,
+        guard.seq,
+        &ModuleSource::Installed(name).ident(),
+    )
 }
 
 /// `describe` candidate module bytes without installing them (install-time

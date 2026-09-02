@@ -65,12 +65,24 @@ fn rebuild_mode_round_trips_and_reports() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for field in ["source instance", "base keys", "deltas applied", "last seqno"] {
-        assert!(stdout.contains(field), "report field {field:?} missing:\n{stdout}");
+    for field in [
+        "source instance",
+        "base keys",
+        "deltas applied",
+        "last seqno",
+    ] {
+        assert!(
+            stdout.contains(field),
+            "report field {field:?} missing:\n{stdout}"
+        );
     }
 
     let rebuilt = Db::open(&dest_dir, opts()).unwrap();
-    assert_eq!(dump(&rebuilt), expected, "rebuilt state diverged from original");
+    assert_eq!(
+        dump(&rebuilt),
+        expected,
+        "rebuilt state diverged from original"
+    );
 }
 
 #[test]

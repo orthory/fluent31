@@ -65,8 +65,12 @@ async fn instance_handler(
 /// `OptionalFromRequestParts`, which these types don't implement.)
 async fn ws_intent(req: axum::extract::Request) -> Option<(GraphQLProtocol, WebSocketUpgrade)> {
     let (mut parts, _body) = req.into_parts();
-    let protocol = GraphQLProtocol::from_request_parts(&mut parts, &()).await.ok()?;
-    let upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &()).await.ok()?;
+    let protocol = GraphQLProtocol::from_request_parts(&mut parts, &())
+        .await
+        .ok()?;
+    let upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &())
+        .await
+        .ok()?;
     Some((protocol, upgrade))
 }
 
@@ -94,7 +98,11 @@ async fn instance_get(
     }
 }
 
-fn serve_ws(mgr: Arc<SchemaManager>, upgrade: WebSocketUpgrade, protocol: GraphQLProtocol) -> Response {
+fn serve_ws(
+    mgr: Arc<SchemaManager>,
+    upgrade: WebSocketUpgrade,
+    protocol: GraphQLProtocol,
+) -> Response {
     upgrade
         .protocols(async_graphql::http::ALL_WEBSOCKET_PROTOCOLS)
         .on_upgrade(move |socket| {

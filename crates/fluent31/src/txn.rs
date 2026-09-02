@@ -123,12 +123,7 @@ impl Txn {
     /// Iterator over `[lo, hi)` merging the snapshot with this transaction's
     /// own writes. The overlay is captured at creation: writes made after
     /// the iterator is opened are not observed by it.
-    pub fn iter(
-        &self,
-        lo: Option<&[u8]>,
-        hi: Option<&[u8]>,
-        reverse: bool,
-    ) -> Result<TxnIter> {
+    pub fn iter(&self, lo: Option<&[u8]>, hi: Option<&[u8]>, reverse: bool) -> Result<TxnIter> {
         let base = self
             .db
             .iter_at_seq(Some(self.snap), lo, hi.map(|h| h.to_vec()), reverse)?;
@@ -138,8 +133,7 @@ impl Txn {
             .writes
             .iter()
             .filter(|(k, _)| {
-                lo_v.as_ref().is_none_or(|lo| *k >= lo)
-                    && hi_v.as_ref().is_none_or(|hi| *k < hi)
+                lo_v.as_ref().is_none_or(|lo| *k >= lo) && hi_v.as_ref().is_none_or(|hi| *k < hi)
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -294,11 +288,7 @@ impl Iterator for TxnIter {
             if use_overlay {
                 let (ok, ov) = self.overlay.pop_front().unwrap();
                 // overlay shadows an equal base key
-                if self
-                    .base_peek
-                    .as_ref()
-                    .is_some_and(|(bk, _)| *bk == ok)
-                {
+                if self.base_peek.as_ref().is_some_and(|(bk, _)| *bk == ok) {
                     self.base_peek = None;
                 }
                 match ov {

@@ -141,7 +141,10 @@ fn fork_under_concurrent_load() {
                     continue;
                 }
                 let val = got.unwrap_or_else(|| {
-                    panic!("fork {}: {k} missing (acked round {f} before cut)", info.name)
+                    panic!(
+                        "fork {}: {k} missing (acked round {f} before cut)",
+                        info.name
+                    )
                 });
                 let r = round_of(&val);
                 assert!(

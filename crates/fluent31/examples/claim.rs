@@ -30,7 +30,8 @@ fn main() {
         )
         .expect("open"),
     );
-    db.install_module("claim", &guest_wasm("claim")).expect("install");
+    db.install_module("claim", &guest_wasm("claim"))
+        .expect("install");
 
     println!("== {RACERS} racers claim username \"neo\" concurrently");
     let barrier = Arc::new(Barrier::new(RACERS));
@@ -68,7 +69,10 @@ fn main() {
     assert_eq!(losses, RACERS - 1);
     let holder = db.get(b"uname/neo").expect("get").expect("claimed");
     assert_eq!(holder, format!("racer-{winner}").into_bytes());
-    println!("== the store agrees: uname/neo -> {}", String::from_utf8_lossy(&holder));
+    println!(
+        "== the store agrees: uname/neo -> {}",
+        String::from_utf8_lossy(&holder)
+    );
 
     println!("== the winner re-claims: idempotent success, not an error");
     let again = format!(r#"{{"username":"neo","owner":"racer-{winner}"}}"#);
