@@ -145,11 +145,24 @@ Reads: overlay → fragments; values: inline → local value cache →
 `FETCH_VALUE`. The local value cache is an append-only file of verbatim
 records, reset wholesale when it exceeds its cap. The replica is read
 through `EdgeReplica::store()`: `get` and `scan`, clamped to the scope;
-an out-of-scope `get` answers `InvalidArgument`. The driver serves no
-network protocol of its own — the embedding process owns any onward
-surface. `fluent-server`'s edge role is that surface as a binary: the
-read-only edge GraphQL plane over the replica (each field reads the
-edge's current frontier — an edge has no MVCC snapshots to pin).
+an out-of-scope `get` answers `InvalidArgument`. The store's **frontier**
+is the master position its scoped view is complete through: a slice
+install raises it to the slice's `flushed_seqno`, an applied batch to the
+highest `commit_seqno` it carries — the commit's own seqno, even when
+the commit's later ops fell outside the scope and were never streamed.
+Progress is an event, never a poll: `EdgeStore::wait_frontier(seqno)`
+blocks until the frontier covers a seqno, and
+`EdgeReplica::wait_attached(&instance_id)` blocks until the replica is
+attached to that master instance and hands out that store — the handle a
+reader needs after a provenance re-attach, since the store is swapped
+wholesale and a handle from before the swap never follows the new
+master. Neither wait is bounded: a frontier the store never reaches, or
+an instance the replica never attaches to, never returns. The driver
+serves no network protocol of its own — the embedding process owns any
+onward surface. `fluent-server`'s edge role is that surface as a
+binary: the read-only edge GraphQL plane over the replica (each field
+reads the edge's current frontier — an edge has no MVCC snapshots to
+pin).
 The driver logs (`tracing`) its attach, each slice pull and each
 re-sync at `info`, and a `LAGGED` cut, a broken stream or a provenance
 mismatch at `warn`; the server logs each subscription and why it ended.

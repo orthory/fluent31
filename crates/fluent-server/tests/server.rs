@@ -7,7 +7,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fluent31::{journal, Db, Options, SyncMode};
+use fluent31::edge::EdgeStore;
+use fluent31::{journal, Db, Options, SeqNo, SyncMode};
 use fluent_replication::{EdgeReplica, EdgeReplicaConfig};
 use fluent_server::{EdgeServer, EdgeServerConfig, Server, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -63,6 +64,13 @@ async fn attach(cfg: EdgeReplicaConfig) -> Arc<EdgeReplica> {
     Arc::new(replica)
 }
 
+/// The store's blocking frontier wait, off the runtime's worker threads.
+async fn wait_frontier(store: Arc<EdgeStore>, seqno: SeqNo) {
+    tokio::task::spawn_blocking(move || store.wait_frontier(seqno))
+        .await
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_planes_over_one_store() {
     let dir = tempfile::tempdir().unwrap();
@@ -112,14 +120,11 @@ async fn all_planes_over_one_store() {
     )
     .await;
     assert!(resp.contains(r#""put":true"#), "{resp}");
-    wait_for("edge to stream user/2", || {
-        edge.store().get(b"user/2").unwrap() == Some(b"grace".to_vec())
-    })
-    .await;
-    wait_for("replica to stream user/2", || {
-        replica.store().get(b"user/2").unwrap() == Some(b"grace".to_vec())
-    })
-    .await;
+    let committed = server.db().seqno();
+    wait_frontier(edge.store(), committed).await;
+    assert_eq!(edge.store().get(b"user/2").unwrap(), Some(b"grace".to_vec()));
+    wait_frontier(replica.store(), committed).await;
+    assert_eq!(replica.store().get(b"user/2").unwrap(), Some(b"grace".to_vec()));
 
     server.shutdown().await;
 }

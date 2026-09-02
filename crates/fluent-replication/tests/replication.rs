@@ -75,17 +75,6 @@ impl Drop for MasterHarness {
     }
 }
 
-fn wait_until(what: &str, deadline: Duration, mut f: impl FnMut() -> bool) {
-    let end = Instant::now() + deadline;
-    while Instant::now() < end {
-        if f() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("timed out waiting for {what}");
-}
-
 /// Reopen a just-stopped master. The old server's subscription tasks hold
 /// the directory flock for up to a ping interval after shutdown — exactly
 /// like a real restart waiting for the old process to exit.
@@ -140,9 +129,9 @@ fn edge_replica_over_tcp() {
         master.put(k(i), v(i, "live")).unwrap();
     }
     master.delete(k(150)).unwrap();
-    wait_until("streamed writes to land", Duration::from_secs(10), || {
-        store.get(&k(139)).unwrap() == Some(v(139, "live")) && store.get(&k(150)).unwrap().is_none()
-    });
+    store.wait_frontier(master.seqno());
+    assert_eq!(store.get(&k(139)).unwrap(), Some(v(139, "live")));
+    assert_eq!(store.get(&k(150)).unwrap(), None);
     for i in 100..200u32 {
         assert_eq!(store.get(&k(i)).unwrap(), master.get(&k(i)).unwrap(), "post-stream {i}");
     }
@@ -182,11 +171,12 @@ fn master_restart_same_instance_resyncs() {
     }
     let _harness2 = MasterHarness::serve(master.clone(), Some(&addr));
 
-    wait_until("edge to resync after restart", Duration::from_secs(15), || {
-        replica.store().get(&k(5)).unwrap() == Some(v(5, "two"))
-    });
+    // same instance: the store from before the restart is the one that
+    // catches up, caches and all
+    store.wait_frontier(master.seqno());
     assert_eq!(replica.master().instance_id, instance_before);
-    let store = replica.store();
+    assert!(Arc::ptr_eq(&store, &replica.store()), "re-sync must keep the store");
+    assert_eq!(store.get(&k(5)).unwrap(), Some(v(5, "two")));
     for i in 0..200u32 {
         assert_eq!(store.get(&k(i)).unwrap(), master.get(&k(i)).unwrap(), "key {i}");
     }
@@ -213,9 +203,8 @@ fn replaced_master_forces_full_reattach() {
 
     let replica =
         Arc::new(EdgeReplica::start(edge_cfg(&addr, &edir.path().join("c"), 0, 100)).unwrap());
-    wait_until("initial sync", Duration::from_secs(10), || {
-        replica.store().get(&k(1)).unwrap() == Some(v(1, "post-cut"))
-    });
+    replica.store().wait_frontier(master.seqno());
+    assert_eq!(replica.store().get(&k(1)).unwrap(), Some(v(1, "post-cut")));
     let instance_before = replica.master().instance_id;
 
     // replace the master wholesale with a restored copy of the fork
@@ -231,15 +220,14 @@ fn replaced_master_forces_full_reattach() {
         },
     );
     let _harness2 = MasterHarness::serve(fork.clone(), Some(&addr));
+    let fork_instance = fork.identity().expect("a restored fork is named").instance_id;
+    assert_ne!(fork_instance, instance_before);
 
-    // the edge must converge onto the fork: pre-cut data only, new identity
-    wait_until("full re-attach onto the fork", Duration::from_secs(20), || {
-        let s = replica.store();
-        s.master().instance_id != instance_before
-            && s.get(&k(1)).ok() == Some(Some(v(1, "orig")))
-    });
-    let store = replica.store();
+    // the edge must converge onto the fork: new identity, pre-cut data only
+    let store = replica.wait_attached(&fork_instance);
+    store.wait_frontier(fork.seqno());
     assert_eq!(store.master().name, "prov-fork");
+    assert_eq!(store.get(&k(1)).unwrap(), Some(v(1, "orig")));
     for i in 0..100u32 {
         assert_eq!(store.get(&k(i)).unwrap(), fork.get(&k(i)).unwrap(), "key {i}");
     }

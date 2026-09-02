@@ -21,6 +21,7 @@ fluent-server ./data --store-name prod [--replication 127.0.0.1:8428]
 - **Ephemeral.** The edge directory is a cache, wiped on attach, and the master keeps no per-edge state beyond the subscription. A stale file reference answers `GONE` and the edge re-pulls. Only committed user-key data is readable: no modules, no triggers, no queries or executors.
 - **Lag.** A slow edge is cut off (`LAGGED`) rather than stalling the master. It re-syncs and keeps its caches.
 - **Scope.** An out-of-scope `get` is refused (`InvalidArgument`), scans clamp to the scope, and the reserved keyspace is never copied or streamed.
+- **Frontier.** The store's frontier is the master position its scoped view is complete through: the slice's flush watermark, then each applied batch's commit seqno. Waiting for a write to become visible is an event, not a poll: `wait_frontier(seqno)` on the store blocks until the frontier covers that seqno, and `wait_attached(&instance_id)` on the replica blocks until it is attached to that master instance and hands out that store, which is the handle to hold after the master was replaced. Neither wait is bounded.
 
 The limits are deliberate: one contiguous scope per replica, read-only, a library driver that serves no network protocol of its own (the server binary's edge role is the onward surface), a memory-only stream overlay (a restart re-attaches), and no WASM at the edge.
 
@@ -35,6 +36,8 @@ cfg.refresh_every = Some(Duration::from_secs(60));
 let replica = EdgeReplica::start(cfg)?;      // returns once a complete scoped view is available
 replica.store().get(b"user/1")?;
 replica.store().stats();                     // EdgeStats
+replica.store().wait_frontier(seqno);        // blocks until the view covers a master seqno
+replica.wait_attached(&instance_id);        // blocks until attached to that master instance; returns its store
 replica.master();                            // StoreIdentity
 ```
 

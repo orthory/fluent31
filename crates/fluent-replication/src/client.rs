@@ -10,13 +10,16 @@
 //! batches from a background thread, refreshes the slice periodically to
 //! prune the overlay, and re-syncs on `Lagged`/`Gone`/disconnect. Same
 //! instance ⇒ local caches stay valid across re-syncs; a re-minted master
-//! ⇒ full re-attach (wiped cache) behind an atomically swapped store.
+//! ⇒ full re-attach (wiped cache) behind an atomically swapped store. Both
+//! kinds of progress are waitable events: the store's frontier
+//! ([`EdgeStore::wait_frontier`]) and the attachment itself
+//! ([`EdgeReplica::wait_attached`]).
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use fluent31::edge::{EdgeConfig, EdgeStore, ValueFetcher};
@@ -327,13 +330,30 @@ struct ReplicaState {
 
 struct ReplicaInner {
     cfg: EdgeReplicaConfig,
-    state: RwLock<ReplicaState>,
+    /// The current attachment. A re-attach swaps it wholesale, and every
+    /// swap wakes the waiters blocked on [`ReplicaInner::wait_attached`].
+    state: Mutex<ReplicaState>,
+    attached: Condvar,
     shutdown: AtomicBool,
 }
 
 impl ReplicaInner {
     fn state(&self) -> ReplicaState {
-        self.state.read().expect("poisoned").clone()
+        self.state.lock().expect("poisoned").clone()
+    }
+
+    fn swap_attachment(&self, fresh: ReplicaState) {
+        *self.state.lock().expect("poisoned") = fresh;
+        self.attached.notify_all();
+    }
+
+    fn wait_attached(&self, instance: &InstanceId) -> Arc<EdgeStore> {
+        let state = self.state.lock().expect("poisoned");
+        let attached = self
+            .attached
+            .wait_while(state, |s| s.store.master().instance_id != *instance)
+            .expect("poisoned");
+        attached.store.clone()
     }
 }
 
@@ -373,7 +393,8 @@ impl EdgeReplica {
 
         let inner = Arc::new(ReplicaInner {
             cfg,
-            state: RwLock::new(ReplicaState { client, store }),
+            state: Mutex::new(ReplicaState { client, store }),
+            attached: Condvar::new(),
             shutdown: AtomicBool::new(false),
         });
         let run_inner = inner.clone();
@@ -389,6 +410,17 @@ impl EdgeReplica {
 
     pub fn store(&self) -> Arc<EdgeStore> {
         self.inner.state().store
+    }
+
+    /// The store attached to master `instance`, blocking until the replica
+    /// is attached to it: the event a reader waits on across a re-attach.
+    /// A replaced master re-mints its instance id and the store is swapped
+    /// wholesale, so a handle taken before the swap never sees the new
+    /// master; this one does. Returns at once when the current attachment
+    /// already matches, and never when the replica never attaches to that
+    /// instance.
+    pub fn wait_attached(&self, instance: &InstanceId) -> Arc<EdgeStore> {
+        self.inner.wait_attached(instance)
     }
 
     pub fn master(&self) -> StoreIdentity {
@@ -595,7 +627,7 @@ fn resync(inner: &ReplicaInner, stream: &mut StreamConn) -> bool {
                     )?;
                     let fresh = ReplicaState { client, store };
                     pull_slice_retrying(inner, &fresh)?;
-                    *inner.state.write().expect("poisoned") = fresh;
+                    inner.swap_attachment(fresh);
                     Ok(s)
                 }
                 Err(e) => Err(e),

@@ -2234,6 +2234,7 @@ fluent-server ./data <span class="w">--store-name</span> prod [<span class="w">-
           <li><strong>Ephemeral.</strong> The edge directory is a cache, wiped on attach, and the master keeps no per-edge state beyond the subscription. A stale file reference answers <code>GONE</code> and the edge re-pulls. Only committed user-key data is readable: no modules, no triggers, no queries or executors.</li>
           <li><strong>Lag.</strong> A slow edge is cut off (<code>LAGGED</code>) rather than stalling the master. It re-syncs and keeps its caches.</li>
           <li><strong>Scope.</strong> An out-of-scope <code>get</code> is refused (<code>InvalidArgument</code>), scans clamp to the scope, and the reserved keyspace is never copied or streamed.</li>
+          <li><strong>Frontier.</strong> The store's frontier is the master position its scoped view is complete through: the slice's flush watermark, then each applied batch's commit seqno. Waiting for a write to become visible is an event, not a poll: <code>wait_frontier(seqno)</code> on the store blocks until the frontier covers that seqno, and <code>wait_attached(&amp;instance_id)</code> on the replica blocks until it is attached to that master instance and hands out that store, which is the handle to hold after the master was replaced. Neither wait is bounded.</li>
         </ul>
         <p>The limits are deliberate: one contiguous scope per replica, read-only, a library driver that serves no network protocol of its own (the server binary's edge role is the onward surface), a memory-only stream overlay (a restart re-attaches), and no WASM at the edge.</p>
 
@@ -2246,6 +2247,8 @@ cfg.refresh_every = Some(Duration::from_secs(60));
 <span class="k">let</span> replica = EdgeReplica::start(cfg)?;      <span class="c">// returns once a complete scoped view is available</span>
 replica.store().get(<span class="s">b"user/1"</span>)?;
 replica.store().stats();                     <span class="c">// EdgeStats</span>
+replica.store().wait_frontier(seqno);        <span class="c">// blocks until the view covers a master seqno</span>
+replica.wait_attached(&amp;instance_id);        <span class="c">// blocks until attached to that master instance; returns its store</span>
 replica.master();                            <span class="c">// StoreIdentity</span></pre></div>
         <p>The library surface is <code>fluent_replication::{ReplServer, ReplServerConfig, ReplClient, EdgeReplica, EdgeReplicaConfig, MasterInfo}</code> and, on the engine side, <code>fluent31::edge::{EdgeStore, EdgeConfig, EdgeStats, ValueFetcher}</code>. Lower level: <code>ReplClient::connect(addr)</code> gives <code>(client, MasterInfo { name, instance_id, visible_seqno })</code>, with <code>snapshot</code>, <code>fetch_table_chunk</code> and <code>fetch_value</code>.</p>
 

@@ -1784,6 +1784,28 @@ fn edge_store_end_to_end() {
         );
     }
 
+    // the frontier is the commit seqno a batch published — the commit's own
+    // seqno even when its last op fell outside the scope and was never
+    // streamed — and a reader waits on it as an event: the waiter blocks
+    // until the batch lands, and its join is the proof
+    let mut mixed = WriteBatch::new();
+    mixed.put(k(120), v(120, "mixed"));
+    mixed.put(k(50), v(50, "outside-last")); // out of scope: not streamed
+    master.write(mixed).unwrap();
+    let committed = master.seqno();
+    assert!(edge.stats().frontier_seqno < committed);
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| edge.wait_frontier(committed));
+        let Some(StreamEvent::Batch(b)) = sub.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("expected the mixed batch on the stream")
+        };
+        assert_eq!(b.len(), 1, "only the in-scope op is streamed");
+        edge.apply_stream(&b).unwrap();
+        waiter.join().unwrap();
+    });
+    assert_eq!(edge.stats().frontier_seqno, committed);
+    assert_eq!(edge.get(&k(120)).unwrap(), Some(v(120, "mixed")));
+
     // scans match the master over the scope (both directions, paged)
     let (page, more) = edge.scan(None, None, false, 500).unwrap();
     assert!(!more);
