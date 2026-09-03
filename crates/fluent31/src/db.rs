@@ -261,7 +261,7 @@ pub(crate) struct DbInner {
     /// the process lifetime; also persisted inside the manifest data.
     pub identity: Option<StoreIdentity>,
     /// Diagnostic context every event this store emits is parented to
-    /// (`dir`, `store`, `instance`): one process may hold many stores
+    /// (`store`/`instance`, or the leaf `dir`): one process may hold many stores
     /// (forks), and a line must say which one it is about.
     pub span: Span,
     pub stall: Mutex<StallGauge>,
@@ -2616,15 +2616,17 @@ fn fmt_levels(levels: &[(usize, usize, u64)]) -> String {
 }
 
 /// The span every event of one store is parented to.
+///
+/// A named store is its `store`/`instance`; an unnamed one is its leaf
+/// directory. The full path pads every line and names nothing the leaf
+/// does not — the operator picked the parent.
 fn store_span(dir: &Path, identity: Option<&StoreIdentity>) -> Span {
     match identity {
-        Some(id) => tracing::info_span!(
-            "db",
-            dir = %dir.display(),
-            store = %id.name,
-            instance = %id.instance_hex()
-        ),
-        None => tracing::info_span!("db", dir = %dir.display()),
+        Some(id) => tracing::info_span!("db", store = %id.name, instance = %id.instance_hex()),
+        None => {
+            let leaf = dir.file_name().unwrap_or(dir.as_os_str());
+            tracing::info_span!("db", dir = %leaf.to_string_lossy())
+        }
     }
 }
 
