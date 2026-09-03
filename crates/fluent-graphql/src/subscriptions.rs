@@ -155,7 +155,9 @@ fn pump(
         value: None,
         snap: head.clone(),
     };
-    let Ok(()) = tx.blocking_send(Ok(attached)) else { return };
+    let Ok(()) = tx.blocking_send(Ok(attached)) else {
+        return;
+    };
 
     // Rolling GC hold: `hold` stays registered at-or-below every seqno the
     // next delivered batch can carry, so the per-commit `snapshot_at`
@@ -216,7 +218,9 @@ fn pump(
                 value: entry.value,
                 snap,
             };
-            let Ok(()) = tx.blocking_send(Ok(item)) else { return };
+            let Ok(()) = tx.blocking_send(Ok(item)) else {
+                return;
+            };
         }
 
         let next_hold = match commit {
@@ -283,9 +287,9 @@ fn item_object(obj: Object) -> Object {
              (e.g. a writeBatch or one on_apply drain) share it.",
         ),
     )
-    .field(item_field!("kind", TypeRef::named_nn("ChangeKind"), |it| Some(
-        FieldValue::value(Value::Enum(Name::new(it.kind.as_str())))
-    )))
+    .field(item_field!("kind", TypeRef::named_nn("ChangeKind"), |it| {
+        Some(FieldValue::value(Value::Enum(Name::new(it.kind.as_str()))))
+    }))
     .field(
         item_field!("key", TypeRef::named("Bytes"), |it| it
             .key
@@ -324,7 +328,9 @@ pub(crate) fn change_event_object() -> Object {
 // ---------------------------------------------------------------------------
 
 /// The built-in raw plane: `changes(lo:, hi:)`.
-pub(crate) fn register(subscription: async_graphql::dynamic::Subscription) -> async_graphql::dynamic::Subscription {
+pub(crate) fn register(
+    subscription: async_graphql::dynamic::Subscription,
+) -> async_graphql::dynamic::Subscription {
     subscription.field(
         SubscriptionField::new("changes", TypeRef::named_nn("ChangeEvent"), |ctx| {
             SubscriptionFieldFuture::new(async move {
@@ -364,32 +370,30 @@ pub(crate) fn feed_field(
             String::from_utf8_lossy(&feed.prefix)
         ))
         .field(
-            Field::new(
-                "event",
-                type_ref_nullable_outer(&feed.event),
-                move |ctx| {
-                    let schema = event_schema.clone();
-                    let ty = event_ty.clone();
-                    FieldFuture::new(async move {
-                        let it = ctx.parent_value.try_downcast_ref::<SubItem>()?;
-                        // feed streams are puts-only, so a missing value is
-                        // exactly the attach marker
-                        let Some(value) = &it.value else { return Ok(None) };
-                        let value = crate::descriptor::normalize_output(&schema, &ty, value)
-                            .map_err(|e| {
-                                Error::new(format!(
-                                    "module {} wrote a feed value violating its declared \
+            Field::new("event", type_ref_nullable_outer(&feed.event), move |ctx| {
+                let schema = event_schema.clone();
+                let ty = event_ty.clone();
+                FieldFuture::new(async move {
+                    let it = ctx.parent_value.try_downcast_ref::<SubItem>()?;
+                    // feed streams are puts-only, so a missing value is
+                    // exactly the attach marker
+                    let Some(value) = &it.value else {
+                        return Ok(None);
+                    };
+                    let value =
+                        crate::descriptor::normalize_output(&schema, &ty, value).map_err(|e| {
+                            Error::new(format!(
+                                "module {} wrote a feed value violating its declared \
                                      event type: {e}",
-                                    schema.module
-                                ))
-                            })?;
-                        if value == Value::Null {
-                            return Ok(None);
-                        }
-                        Ok(Some(FieldValue::value(value)))
-                    })
-                },
-            )
+                                schema.module
+                            ))
+                        })?;
+                    if value == Value::Null {
+                        return Ok(None);
+                    }
+                    Ok(Some(FieldValue::value(value)))
+                })
+            })
             .description("The typed event; null for ATTACHED."),
         );
 

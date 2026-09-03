@@ -135,7 +135,8 @@ fn failed_fsync_is_never_a_false_ack() {
         let db = open_faulted(dir.path(), ctl.clone());
         // durable baseline
         for i in 0..50u32 {
-            db.put(format!("k/{i:04}").into_bytes(), b"durable".to_vec()).unwrap();
+            db.put(format!("k/{i:04}").into_bytes(), b"durable".to_vec())
+                .unwrap();
         }
 
         // arm fsync failure: the next commit's WAL fsync fails
@@ -145,13 +146,23 @@ fn failed_fsync_is_never_a_false_ack() {
             r.is_err(),
             "a write whose fsync failed must return Err, not a false Ok"
         );
-        assert!(ctl.syncs.load(Ordering::Relaxed) > 0, "fsync was actually exercised");
+        assert!(
+            ctl.syncs.load(Ordering::Relaxed) > 0,
+            "fsync was actually exercised"
+        );
         drop(db);
     }
 
     // reopen with a healthy backend: the durable baseline is fully intact and
     // the store is not corrupt (the doomed write may be absent, never partial)
-    let db = Db::open(dir.path(), Options { sync: SyncMode::Never, ..opts() }).unwrap();
+    let db = Db::open(
+        dir.path(),
+        Options {
+            sync: SyncMode::Never,
+            ..opts()
+        },
+    )
+    .unwrap();
     for i in 0..50u32 {
         assert_eq!(
             db.get(&format!("k/{i:04}").into_bytes()).unwrap().unwrap(),
@@ -160,7 +171,11 @@ fn failed_fsync_is_never_a_false_ack() {
         );
     }
     // full scan parses cleanly — no corruption anywhere
-    let n = db.iter(None, None, false).unwrap().map(|r| r.unwrap()).count();
+    let n = db
+        .iter(None, None, false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .count();
     assert!(n >= 50);
 }
 
@@ -171,18 +186,32 @@ fn enospc_on_append_fails_the_write_cleanly() {
     {
         let db = open_faulted(dir.path(), ctl.clone());
         for i in 0..30u32 {
-            db.put(format!("k/{i:04}").into_bytes(), b"ok".to_vec()).unwrap();
+            db.put(format!("k/{i:04}").into_bytes(), b"ok".to_vec())
+                .unwrap();
         }
         // disk full: the next append (WAL or vlog) errors
         ctl.fail_append.store(true, Ordering::Release);
         let r = db.put(b"nospace".to_vec(), vec![b'z'; 400]);
-        assert!(r.is_err(), "append ENOSPC must fail the write, not fake success");
+        assert!(
+            r.is_err(),
+            "append ENOSPC must fail the write, not fake success"
+        );
         drop(db);
     }
     // reopen clean; the pre-fault writes survive
-    let db = Db::open(dir.path(), Options { sync: SyncMode::Never, ..opts() }).unwrap();
+    let db = Db::open(
+        dir.path(),
+        Options {
+            sync: SyncMode::Never,
+            ..opts()
+        },
+    )
+    .unwrap();
     for i in 0..30u32 {
-        assert_eq!(db.get(&format!("k/{i:04}").into_bytes()).unwrap().unwrap(), b"ok");
+        assert_eq!(
+            db.get(&format!("k/{i:04}").into_bytes()).unwrap().unwrap(),
+            b"ok"
+        );
     }
     assert!(db.get(b"nospace").unwrap().is_none());
 }
@@ -195,7 +224,8 @@ fn read_fault_surfaces_a_clean_error_not_a_panic() {
         // seed and flush so reads must hit disk (through the faulted backend)
         let db = open_faulted(dir.path(), ctl.clone());
         for i in 0..200u32 {
-            db.put(format!("k/{i:05}").into_bytes(), vec![b'v'; 200]).unwrap();
+            db.put(format!("k/{i:05}").into_bytes(), vec![b'v'; 200])
+                .unwrap();
         }
         db.flush().unwrap();
         drop(db);

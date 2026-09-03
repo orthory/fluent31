@@ -207,7 +207,7 @@ impl BytesSpec {
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    let well_formed = s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit());
+    let well_formed = s.len().is_multiple_of(2) && s.chars().all(|c| c.is_ascii_hexdigit());
     if !well_formed {
         return Err(format!(
             "invalid hex bytes {s:?} (even number of hex digits required)"
@@ -445,7 +445,11 @@ impl FileConfig {
         if self.replication.is_some() {
             out.push("[replication]");
         }
-        if self.listen.as_ref().is_some_and(|l| l.replication.is_some()) {
+        if self
+            .listen
+            .as_ref()
+            .is_some_and(|l| l.replication.is_some())
+        {
             out.push("listen.replication");
         }
         let fork_tuning_set = self
@@ -547,7 +551,11 @@ pub fn parse_sync(s: &str) -> Option<SyncMode> {
         "always" => Some(SyncMode::Always),
         "never" => Some(SyncMode::Never),
         _ => {
-            let ms = s.strip_prefix("periodic:")?.parse::<u64>().ok().filter(|ms| *ms > 0)?;
+            let ms = s
+                .strip_prefix("periodic:")?
+                .parse::<u64>()
+                .ok()
+                .filter(|ms| *ms > 0)?;
             Some(SyncMode::Periodic {
                 every: std::time::Duration::from_millis(ms),
             })
@@ -597,7 +605,10 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.log.as_ref().unwrap().stats_every_secs, Some(5));
         assert_eq!(cfg.dir.as_deref(), Some("./data"));
-        assert_eq!(cfg.listen.as_ref().unwrap().replication.as_deref(), Some("127.0.0.1:3"));
+        assert_eq!(
+            cfg.listen.as_ref().unwrap().replication.as_deref(),
+            Some("127.0.0.1:3")
+        );
         assert_eq!(cfg.graphql.as_ref().unwrap().fork_max_open, Some(2));
         assert_eq!(cfg.replication.as_ref().unwrap().ping_every_ms, Some(500));
         assert_eq!(cfg.journal.as_ref().unwrap().dir.as_deref(), Some("./jrn"));
@@ -652,7 +663,6 @@ mod tests {
             listen: Some(ListenSection {
                 graphql: Some("file:2".into()),
                 replication: Some("file:1".into()),
-                ..ListenSection::default()
             }),
             engine: Some(EngineSection {
                 tier_width: Some(2),
@@ -736,7 +746,12 @@ mod tests {
             "#,
         )
         .unwrap();
-        let r = cfg.edge.as_ref().unwrap().replica_config("./cache").unwrap();
+        let r = cfg
+            .edge
+            .as_ref()
+            .unwrap()
+            .replica_config("./cache")
+            .unwrap();
         assert_eq!(r.master_addr, "10.0.0.5:8428");
         assert_eq!(r.scope_lo, b"user/".to_vec());
         assert_eq!(r.scope_hi.as_deref(), Some(b"user0".as_slice()));
@@ -749,7 +764,12 @@ mod tests {
     #[test]
     fn edge_section_without_master_is_refused() {
         let cfg: FileConfig = toml::from_str("[edge]\nvalue-cache-bytes = 1").unwrap();
-        let err = cfg.edge.as_ref().unwrap().replica_config("./c").unwrap_err();
+        let err = cfg
+            .edge
+            .as_ref()
+            .unwrap()
+            .replica_config("./c")
+            .unwrap_err();
         assert!(err.contains("master-addr"), "{err}");
     }
 
@@ -791,13 +811,15 @@ mod tests {
             "listen.replication",
             "[graphql] fork tuning",
         ] {
-            assert!(conflicts.contains(&name), "{name} missing from {conflicts:?}");
+            assert!(
+                conflicts.contains(&name),
+                "{name} missing from {conflicts:?}"
+            );
         }
         // the settings the edge role does serve are not conflicts
-        assert!(!conflicts.iter().any(|c| *c == "[graphql]"));
+        assert!(!conflicts.contains(&"[graphql]"));
         let clean: FileConfig =
-            toml::from_str("[edge]\nmaster-addr = \"m:1\"\n[graphql]\nmax-body-bytes = 1")
-                .unwrap();
+            toml::from_str("[edge]\nmaster-addr = \"m:1\"\n[graphql]\nmax-body-bytes = 1").unwrap();
         assert!(clean.edge_conflicts().is_empty());
     }
 

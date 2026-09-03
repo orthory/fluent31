@@ -38,7 +38,11 @@ async fn run(schema: &SchemaManager, query: &str, vars: Value) -> Value {
     resp.data.into_json().unwrap()
 }
 
-async fn run_err(schema: &SchemaManager, query: &str, vars: Value) -> Vec<async_graphql::ServerError> {
+async fn run_err(
+    schema: &SchemaManager,
+    query: &str,
+    vars: Value,
+) -> Vec<async_graphql::ServerError> {
     let req = Request::new(query).variables(Variables::from_json(vars));
     let resp = schema.execute(req).await;
     assert!(!resp.errors.is_empty(), "expected errors for {query}");
@@ -77,7 +81,12 @@ async fn put_get_roundtrip_and_missing() {
     assert_eq!(d["get"]["hex"], json!("68656c6c6f"));
     assert_eq!(d["get"]["len"], json!(5));
 
-    let d = run(&schema, r#"{ get(key: {text: "nope"}) { text } }"#, json!({})).await;
+    let d = run(
+        &schema,
+        r#"{ get(key: {text: "nope"}) { text } }"#,
+        json!({}),
+    )
+    .await;
     assert_eq!(d["get"], Value::Null);
 }
 
@@ -135,7 +144,12 @@ async fn delete_removes_key() {
         json!({}),
     )
     .await;
-    let d = run(&schema, r#"mutation { delete(key: {text: "dk"}) }"#, json!({})).await;
+    let d = run(
+        &schema,
+        r#"mutation { delete(key: {text: "dk"}) }"#,
+        json!({}),
+    )
+    .await;
     assert_eq!(d["delete"], json!(true));
     let d = run(&schema, r#"{ get(key: {text: "dk"}) { text } }"#, json!({})).await;
     assert_eq!(d["get"], Value::Null);
@@ -193,7 +207,12 @@ async fn invalid_key_rejects_whole_batch() {
     )
     .await;
     assert_eq!(ext_code(&errs).as_deref(), Some("INVALID_ARGUMENT"));
-    let d = run(&schema, r#"{ get(key: {text: "good"}) { text } }"#, json!({})).await;
+    let d = run(
+        &schema,
+        r#"{ get(key: {text: "good"}) { text } }"#,
+        json!({}),
+    )
+    .await;
     assert_eq!(d["get"], Value::Null);
 }
 
@@ -450,12 +469,7 @@ async fn wasm_install_list_query_uninstall() {
         json!({}),
     )
     .await;
-    let errs = run_err(
-        &schema,
-        r#"{ wasm(module: "echo") { len } }"#,
-        json!({}),
-    )
-    .await;
+    let errs = run_err(&schema, r#"{ wasm(module: "echo") { len } }"#, json!({})).await;
     assert!(ext_code(&errs).is_some(), "engine error must carry a code");
 }
 
@@ -594,7 +608,10 @@ async fn stats_and_maintenance() {
     .await;
     assert!(u64_field(&d["stats"]["visibleSeqno"]) >= 1);
     assert!(d["stats"]["backend"].as_str().is_some());
-    assert!(u64_field(&d["stats"]["commitBatches"]) >= 1, "put went through the commit path");
+    assert!(
+        u64_field(&d["stats"]["commitBatches"]) >= 1,
+        "put went through the commit path"
+    );
     assert!(u64_field(&d["stats"]["commitGroups"]) >= 1);
     // SyncMode::Never in tests: no WAL fsyncs
     assert_eq!(u64_field(&d["stats"]["walSyncs"]), 0);
@@ -686,13 +703,23 @@ async fn failed_mutation_field_keeps_siblings_visible() {
         }"#,
     );
     let resp = schema.execute(req).await;
-    assert_eq!(resp.errors.len(), 1, "only field b fails: {:?}", resp.errors);
+    assert_eq!(
+        resp.errors.len(),
+        1,
+        "only field b fails: {:?}",
+        resp.errors
+    );
     let data = resp.data.into_json().unwrap();
     // nullable fields: the failed one is null, committed siblings visible
     assert_eq!(data["a"], json!(true));
     assert_eq!(data["b"], Value::Null);
     assert_eq!(data["c"], json!(true));
-    let d = run(&schema, r#"{ y: get(key: {text: "y"}) { text } }"#, json!({})).await;
+    let d = run(
+        &schema,
+        r#"{ y: get(key: {text: "y"}) { text } }"#,
+        json!({}),
+    )
+    .await;
     assert_eq!(d["y"]["text"], json!("v"));
 }
 
@@ -882,7 +909,12 @@ async fn pagination_under_mutation_uses_fresh_snapshot_and_exact_successor() {
         json!({"k": {"hex": format!("{cursor}00")}}),
     )
     .await;
-    run(&schema, r#"mutation { delete(key: {text: "scan/2"}) }"#, json!({})).await;
+    run(
+        &schema,
+        r#"mutation { delete(key: {text: "scan/2"}) }"#,
+        json!({}),
+    )
+    .await;
 
     // page 2 pins a fresh snapshot: sees the wedge, not the deleted key,
     // and never repeats the cursor
@@ -1053,7 +1085,12 @@ async fn typed_query_module_becomes_root_field() {
     assert!(sdl.contains("answer(input: BytesInput): Ans"), "{sdl}");
 
     // uninstall removes the root field (schema hot-swap)
-    run(&schema, r#"mutation { uninstallModule(name: "answer") }"#, json!({})).await;
+    run(
+        &schema,
+        r#"mutation { uninstallModule(name: "answer") }"#,
+        json!({}),
+    )
+    .await;
     let errs = run_err(&schema, r#"{ answer { n } }"#, json!({})).await;
     assert!(errs[0].message.contains("answer"), "{errs:?}");
 }
@@ -1079,7 +1116,12 @@ async fn typed_executor_gets_json_args_and_commits() {
     // omitted optional arg arrives as null; the write committed
     let d = run(&schema, r#"mutation { putArgs(key: "again") }"#, json!({})).await;
     assert_eq!(d["putArgs"], json!({"key": "again", "n": Value::Null}));
-    let d = run(&schema, r#"{ get(key: {text: "targs"}) { text } }"#, json!({})).await;
+    let d = run(
+        &schema,
+        r#"{ get(key: {text: "targs"}) { text } }"#,
+        json!({}),
+    )
+    .await;
     assert_eq!(d["get"]["text"], json!(r#"{"key":"again","n":null}"#));
 
     // declared non-null arg is enforced by the schema
@@ -1169,7 +1211,10 @@ async fn invalid_descriptor_rejects_install() {
         json!({"w": {"text": wat}}),
     )
     .await;
-    assert!(errs[0].message.contains("invalid module schema"), "{errs:?}");
+    assert!(
+        errs[0].message.contains("invalid module schema"),
+        "{errs:?}"
+    );
     // nothing installed
     let d = run(&schema, r#"{ modules { name } }"#, json!({})).await;
     assert_eq!(d["modules"].as_array().unwrap().len(), 0);
@@ -1197,7 +1242,7 @@ async fn descriptor_kind_must_match_role_entry() {
     let errs = run_err(
         &schema,
         r#"mutation I($w: BytesInput!) { installModule(name: "mismatch", wasm: $w) { name } }"#,
-        json!({"w": {"text": wat.clone()}}),
+        json!({"w": {"text": wat}}),
     )
     .await;
     assert!(
@@ -1205,12 +1250,24 @@ async fn descriptor_kind_must_match_role_entry() {
         "{errs:?}"
     );
     let d = run(&schema, r#"{ modules { name } }"#, json!({})).await;
-    assert_eq!(d["modules"].as_array().unwrap().len(), 0, "nothing installed");
+    assert_eq!(
+        d["modules"].as_array().unwrap().len(),
+        0,
+        "nothing installed"
+    );
 
     // out-of-band install degrades to schemaError instead of a typed field
-    schema.db_handle().install_module("mismatch", wat.as_bytes()).unwrap();
+    schema
+        .db_handle()
+        .install_module("mismatch", wat.as_bytes())
+        .unwrap();
     run(&schema, r#"mutation { reloadSchema }"#, json!({})).await;
-    let d = run(&schema, r#"{ modules { name typed schemaError } }"#, json!({})).await;
+    let d = run(
+        &schema,
+        r#"{ modules { name typed schemaError } }"#,
+        json!({}),
+    )
+    .await;
     assert_eq!(d["modules"][0]["typed"], json!(false));
     assert!(
         d["modules"][0]["schemaError"]
@@ -1220,7 +1277,12 @@ async fn descriptor_kind_must_match_role_entry() {
         "{d}"
     );
     // still callable through the generic surface its entries DO support
-    let d = run(&schema, r#"{ wasm(module: "mismatch") { len } }"#, json!({})).await;
+    let d = run(
+        &schema,
+        r#"{ wasm(module: "mismatch") { len } }"#,
+        json!({}),
+    )
+    .await;
     assert_eq!(d["wasm"]["len"], json!(0));
 }
 
@@ -1239,7 +1301,10 @@ async fn typed_output_violation_is_an_error_not_garbage() {
     )
     .await;
     let errs = run_err(&schema, r#"{ liar { n } }"#, json!({})).await;
-    assert!(errs[0].message.contains("expected 32-bit integer"), "{errs:?}");
+    assert!(
+        errs[0].message.contains("expected 32-bit integer"),
+        "{errs:?}"
+    );
     // the failure is per-field: siblings still resolve
     let req = async_graphql::Request::new(r#"{ liar { n } snapshotSeqno }"#);
     let resp = schema.execute(req).await;
@@ -1297,7 +1362,10 @@ async fn replacing_modules_reshapes_the_schema() {
         json!({"w": {"text": typed}}),
     )
     .await;
-    assert_eq!(run(&schema, r#"{ answer { n } }"#, json!({})).await["answer"]["n"], json!(7));
+    assert_eq!(
+        run(&schema, r#"{ answer { n } }"#, json!({})).await["answer"]["n"],
+        json!(7)
+    );
 
     // typed -> typed replacement re-declaring its OWN type names is allowed
     let typed_v2 = wat_typed(
@@ -1325,7 +1393,10 @@ async fn replacing_modules_reshapes_the_schema() {
     assert_eq!(d["installModule"]["typed"], json!(false));
     run_err(&schema, r#"{ answer { n } }"#, json!({})).await;
     let sdl = schema.schema().sdl();
-    assert!(!sdl.contains("type Ans"), "replaced type must leave the SDL");
+    assert!(
+        !sdl.contains("type Ans"),
+        "replaced type must leave the SDL"
+    );
     let d = run(
         &schema,
         r#"{ wasm(module: "answer", input: {text: "hi"}) { text } }"#,
@@ -1350,16 +1421,31 @@ async fn oversized_descriptor_rejected_and_degrades_out_of_band() {
     .await;
     assert!(errs[0].message.contains("exceeds"), "{errs:?}");
     let d = run(&schema, r#"{ modules { name } }"#, json!({})).await;
-    assert_eq!(d["modules"].as_array().unwrap().len(), 0, "nothing installed");
+    assert_eq!(
+        d["modules"].as_array().unwrap().len(),
+        0,
+        "nothing installed"
+    );
 
     // installed out-of-band (engine API, bypassing the GraphQL gate): the
     // next reloadSchema must degrade it to Invalid, not break the schema
-    schema.db_handle().install_module("fat", wat.as_bytes()).unwrap();
+    schema
+        .db_handle()
+        .install_module("fat", wat.as_bytes())
+        .unwrap();
     run(&schema, r#"mutation { reloadSchema }"#, json!({})).await;
-    let d = run(&schema, r#"{ modules { name typed schemaError } }"#, json!({})).await;
+    let d = run(
+        &schema,
+        r#"{ modules { name typed schemaError } }"#,
+        json!({}),
+    )
+    .await;
     assert_eq!(d["modules"][0]["typed"], json!(false));
     assert!(
-        d["modules"][0]["schemaError"].as_str().unwrap().contains("exceeds"),
+        d["modules"][0]["schemaError"]
+            .as_str()
+            .unwrap()
+            .contains("exceeds"),
         "{d}"
     );
 }
@@ -1413,7 +1499,12 @@ async fn typed_int_args_enforce_32bit_range_and_singleton_lists_coerce() {
     )
     .await;
     assert_eq!(d["writeBatch"], json!(1));
-    let d = run(&schema, r#"{ get(key: {text: "solo"}) { text } }"#, json!({})).await;
+    let d = run(
+        &schema,
+        r#"{ get(key: {text: "solo"}) { text } }"#,
+        json!({}),
+    )
+    .await;
     assert_eq!(d["get"]["text"], json!("v"));
 }
 
@@ -1498,7 +1589,12 @@ async fn trigger_lifecycle_and_async_fire() {
     // the trigger fires asynchronously behind the write: poll for its effect
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let d = run(&schema, r#"{ get(key: {text: "m/u/a"}) { text } }"#, json!({})).await;
+        let d = run(
+            &schema,
+            r#"{ get(key: {text: "m/u/a"}) { text } }"#,
+            json!({}),
+        )
+        .await;
         if !d["get"].is_null() {
             assert_eq!(d["get"]["text"], json!("u/a"));
             break;
@@ -1510,7 +1606,12 @@ async fn trigger_lifecycle_and_async_fire() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    run(&schema, r#"mutation { deleteTrigger(name: "t") }"#, json!({})).await;
+    run(
+        &schema,
+        r#"mutation { deleteTrigger(name: "t") }"#,
+        json!({}),
+    )
+    .await;
     let d = run(&schema, r#"{ triggers { name } }"#, json!({})).await;
     assert_eq!(d["triggers"], json!([]));
 }
@@ -1670,7 +1771,10 @@ async fn changes_subscription_pins_queries_at_commit_boundaries() {
     assert_eq!(a["kind"], "ATTACHED");
     assert_eq!(a["key"], Value::Null);
     assert_eq!(a["query"]["one"], Value::Null);
-    assert_eq!(u64_field(&a["seqno"]), u64_field(&a["query"]["snapshotSeqno"]));
+    assert_eq!(
+        u64_field(&a["seqno"]),
+        u64_field(&a["query"]["snapshotSeqno"])
+    );
 
     // three commits BEFORE consuming anything: two single-op puts of the
     // same key, then an atomic two-op batch

@@ -32,11 +32,15 @@ fn main() {
         )
         .expect("open"),
     );
-    db.install_module("live_stats", &guest_wasm("live_stats")).expect("install");
+    db.install_module("live_stats", &guest_wasm("live_stats"))
+        .expect("install");
     let mode = db
         .create_trigger("liveStats", "live_stats", Some(b"ord/"), Some(b"ord0"))
         .expect("trigger");
-    println!("== liveStats trigger over [ord/, ord0) mode={}\n", mode.as_str());
+    println!(
+        "== liveStats trigger over [ord/, ord0) mode={}\n",
+        mode.as_str()
+    );
 
     println!("== three orders arrive");
     put(&db, "ord/001", r#"{"customer":"acme","cents":500}"#);
@@ -70,8 +74,7 @@ fn main() {
                         m => {
                             let customer = ["acme", "bob", "zorg", "dyn"][m as usize % 4];
                             let cents = (j + 1) * 7 + t;
-                            let rec =
-                                format!(r#"{{"customer":"{customer}","cents":{cents}}}"#);
+                            let rec = format!(r#"{{"customer":"{customer}","cents":{cents}}}"#);
                             db.put(key.into_bytes(), rec.into_bytes()).expect("put");
                         }
                     }
@@ -104,7 +107,10 @@ fn main() {
         );
     }
     assert_eq!(folded, expected, "folded stats drifted from ground truth");
-    println!("   folded stats == full recount for {} groups ✓", folded.len());
+    println!(
+        "   folded stats == full recount for {} groups ✓",
+        folded.len()
+    );
     println!("done: exactly-once folding, no drift.");
 }
 

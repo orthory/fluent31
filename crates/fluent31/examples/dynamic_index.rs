@@ -29,20 +29,44 @@ fn main() {
     .expect("open");
 
     println!("== install the dynamic_index module and bind its two triggers");
-    db.install_module("dynamic_index", &guest_wasm("dynamic_index")).expect("install");
+    db.install_module("dynamic_index", &guest_wasm("dynamic_index"))
+        .expect("install");
     let data = db
         .create_trigger("dynIdxData", "dynamic_index", Some(b"rec/"), Some(b"rec0"))
         .expect("data trigger");
     let spec = db
-        .create_trigger("dynIdxSpec", "dynamic_index", Some(b"idxspec/"), Some(b"idxspec0"))
+        .create_trigger(
+            "dynIdxSpec",
+            "dynamic_index",
+            Some(b"idxspec/"),
+            Some(b"idxspec0"),
+        )
         .expect("spec trigger");
-    println!("   dynIdxData over [rec/, rec0)         mode={}", data.as_str());
-    println!("   dynIdxSpec over [idxspec/, idxspec0) mode={}\n", spec.as_str());
+    println!(
+        "   dynIdxData over [rec/, rec0)         mode={}",
+        data.as_str()
+    );
+    println!(
+        "   dynIdxSpec over [idxspec/, idxspec0) mode={}\n",
+        spec.as_str()
+    );
 
     println!("== seed records (no index exists yet)");
-    put(&db, "rec/001", r#"{"customer":"acme","status":"open","amountCents":500}"#);
-    put(&db, "rec/002", r#"{"customer":"bob","status":"open","amountCents":120}"#);
-    put(&db, "rec/003", r#"{"customer":"acme","status":"paid","amountCents":990}"#);
+    put(
+        &db,
+        "rec/001",
+        r#"{"customer":"acme","status":"open","amountCents":500}"#,
+    );
+    put(
+        &db,
+        "rec/002",
+        r#"{"customer":"bob","status":"open","amountCents":120}"#,
+    );
+    put(
+        &db,
+        "rec/003",
+        r#"{"customer":"acme","status":"paid","amountCents":990}"#,
+    );
     drain(&db);
     show(&db, "idx/");
 
@@ -52,8 +76,16 @@ fn main() {
     show(&db, "idx/byCustomer/");
 
     println!("== live maintenance: add rec/004, move rec/001 to a new customer, delete rec/002");
-    put(&db, "rec/004", r#"{"customer":"bob","status":"open","amountCents":75}"#);
-    put(&db, "rec/001", r#"{"customer":"zorg","status":"open","amountCents":500}"#);
+    put(
+        &db,
+        "rec/004",
+        r#"{"customer":"bob","status":"open","amountCents":75}"#,
+    );
+    put(
+        &db,
+        "rec/001",
+        r#"{"customer":"zorg","status":"open","amountCents":500}"#,
+    );
     db.delete(b"rec/002".to_vec()).expect("delete");
     drain(&db);
     show(&db, "idx/byCustomer/");
@@ -70,7 +102,8 @@ fn main() {
     println!();
 
     println!("== deleting the spec tears the index down");
-    db.delete(b"idxspec/byCustomer".to_vec()).expect("delete spec");
+    db.delete(b"idxspec/byCustomer".to_vec())
+        .expect("delete spec");
     drain(&db);
     show(&db, "idx/");
     println!("done: byStatus remains, byCustomer is gone.");

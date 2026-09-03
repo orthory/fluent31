@@ -790,8 +790,7 @@ fn sample_victim(db: &Arc<DbInner>) -> Result<Option<(u64, Arc<VlogFileHandle>)>
                 sampled
                     .get(id)
                     .map(|&(at_seq, at_head)| {
-                        visible.saturating_sub(at_seq) >= GC_RESAMPLE_SEQ_DELTA
-                            || at_head != head
+                        visible.saturating_sub(at_seq) >= GC_RESAMPLE_SEQ_DELTA || at_head != head
                     })
                     .unwrap_or(true)
             })
@@ -868,9 +867,7 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
             };
             let size = h.file.len()?.max(1);
             let ratio = dead as f64 / size as f64;
-            if ratio >= db.opts.vlog_gc_ratio
-                && best.map(|(_, r)| ratio > r).unwrap_or(true)
-            {
+            if ratio >= db.opts.vlog_gc_ratio && best.map(|(_, r)| ratio > r).unwrap_or(true) {
                 best = Some((id, ratio));
             }
         }
@@ -887,7 +884,11 @@ pub(crate) fn gc_vlog(db: &Arc<DbInner>) -> Result<Option<u64>> {
                     Some((id, h)) => (id, h, "sample"),
                 }
             }
-            Some((id, _)) => (id, s.version.vlogs.get(&id).unwrap().clone(), "discard-stats"),
+            Some((id, _)) => (
+                id,
+                s.version.vlogs.get(&id).unwrap().clone(),
+                "discard-stats",
+            ),
         }
     };
 
@@ -1313,7 +1314,7 @@ mod shape_tests {
     /// A newer bottom run disjoint from most of the base must splice: base
     /// tables outside the overlap survive by identity (no rewrite).
     #[test]
-    fn bottom_merge_keeps_untouched_base_tables()  {
+    fn bottom_merge_keeps_untouched_base_tables() {
         let dir = tempfile::tempdir().unwrap();
         let mut opts = tiny_opts();
         opts.max_levels = 2;
@@ -1419,7 +1420,10 @@ mod shape_tests {
         db.put("zz", vec![2u8; 16]).unwrap();
         db.flush().unwrap();
         let job = pick_rewrite(&inner, false).expect("tier L0->bottom (F)");
-        assert!(matches!(job.kind, JobKind::Tier), "L0 tier must win over splice");
+        assert!(
+            matches!(job.kind, JobKind::Tier),
+            "L0 tier must win over splice"
+        );
         run_job(&inner, job).unwrap();
         assert_eq!(bottom_len(&inner), 3, "bottom = [F(del k), M(put k), B]");
         assert_eq!(db.get(b"k").unwrap(), None, "delete visible pre-splice");

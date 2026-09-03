@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::cache::BlockCache;
 use crate::config::IoBackend;
@@ -89,7 +89,9 @@ impl EdgeConfig {
 pub struct EdgeStats {
     /// Slice watermark: everything at or below is in local fragments.
     pub flushed_seqno: SeqNo,
-    /// Highest seqno visible on this edge (slice or stream).
+    /// The master position this edge's scoped view is complete through:
+    /// every in-scope commit at or below it is visible. See
+    /// [`EdgeStore::wait_frontier`].
     pub frontier_seqno: SeqNo,
     pub fragments: usize,
     pub overlay_bytes: usize,
@@ -100,7 +102,47 @@ struct EdgeState {
     version: Arc<Version>,
     overlay: Arc<Memtable>,
     flushed: SeqNo,
-    frontier: SeqNo,
+}
+
+/// The master position this edge's scoped view is complete through, as a
+/// monotone seqno with waiters. A slice install raises it to the slice's
+/// flush watermark; an applied stream batch raises it to the commit seqno
+/// the batch published. Every advance wakes every waiter, so a reader
+/// blocks on "the frontier covers S" instead of polling for it.
+struct Frontier {
+    seqno: Mutex<SeqNo>,
+    advanced: Condvar,
+}
+
+impl Frontier {
+    fn new() -> Frontier {
+        Frontier {
+            seqno: Mutex::new(0),
+            advanced: Condvar::new(),
+        }
+    }
+
+    fn get(&self) -> SeqNo {
+        *self.seqno.lock()
+    }
+
+    /// Monotone: a seqno at or below the current frontier changes nothing.
+    fn advance_to(&self, seqno: SeqNo) {
+        let mut current = self.seqno.lock();
+        let frontier_moves_forward = seqno > *current;
+        if !frontier_moves_forward {
+            return;
+        }
+        *current = seqno;
+        self.advanced.notify_all();
+    }
+
+    fn wait_for(&self, seqno: SeqNo) {
+        let mut current = self.seqno.lock();
+        while *current < seqno {
+            self.advanced.wait(&mut current);
+        }
+    }
 }
 
 /// Local verbatim copies of fetched master vlog records, so every local
@@ -144,7 +186,8 @@ impl ValueCache {
         }
         let local_off = self.handle.append(record)?;
         self.written = local_off + record.len() as u64;
-        self.index.insert((file, offset), (local_off, record.len() as u32));
+        self.index
+            .insert((file, offset), (local_off, record.len() as u32));
         Ok(())
     }
 
@@ -157,6 +200,10 @@ impl ValueCache {
     }
 }
 
+/// One page of a scoped scan: up to `limit` visible `(key, value)` pairs,
+/// and whether more follow past the last one.
+pub type ScanPage = (Vec<(Vec<u8>, Vec<u8>)>, bool);
+
 /// A scoped, read-only replica cache. See the module docs for the model.
 pub struct EdgeStore {
     cfg: EdgeConfig,
@@ -164,6 +211,7 @@ pub struct EdgeStore {
     cache: Arc<BlockCache>,
     fetcher: Arc<dyn ValueFetcher>,
     state: RwLock<EdgeState>,
+    frontier: Frontier,
     vcache: Mutex<ValueCache>,
 }
 
@@ -210,8 +258,8 @@ impl EdgeStore {
                 version: Arc::new(Version::empty(1)),
                 overlay: Arc::new(Memtable::new(0)),
                 flushed: 0,
-                frontier: 0,
             }),
+            frontier: Frontier::new(),
             vcache: Mutex::new(vcache),
             cfg,
         })
@@ -294,8 +342,8 @@ impl EdgeStore {
             s.version = Arc::new(version);
             s.overlay = overlay;
             s.flushed = slice.flushed_seqno;
-            s.frontier = s.frontier.max(slice.flushed_seqno);
         }
+        self.frontier.advance_to(slice.flushed_seqno);
 
         // superseded local fragments: readers holding the old version keep
         // their open fds; the names can go now
@@ -318,24 +366,46 @@ impl EdgeStore {
     }
 
     /// Apply a batch from the master's replication stream. Values arrive
-    /// resolved, so overlay entries are always inline.
+    /// resolved, so overlay entries are always inline. A batch carries
+    /// whole commits, so once it is applied the view is complete through
+    /// the highest commit seqno in it — that is where the frontier lands,
+    /// even when a commit's later ops fell outside the scope and were never
+    /// streamed.
     pub fn apply_stream(&self, entries: &[StreamEntry]) -> Result<()> {
-        let mut s = self.state.write();
-        for e in entries {
-            if !self.in_scope(&e.key) {
-                continue;
-            }
-            let repr = match (e.kind, &e.value) {
-                (ValueKind::Put, Some(v)) => encode_inline(v),
-                (ValueKind::Delete, _) => Vec::new(),
-                (ValueKind::Put, None) => {
-                    return Err(corrupt("streamed Put without a resolved value"))
+        let Some(batch_commit) = entries.iter().map(|e| e.commit_seqno).max() else {
+            return Ok(());
+        };
+        {
+            let s = self.state.write();
+            for e in entries {
+                if !self.in_scope(&e.key) {
+                    continue;
                 }
-            };
-            s.overlay.insert(make_ikey(&e.key, e.seqno, e.kind), repr);
-            s.frontier = s.frontier.max(e.seqno);
+                let repr = match (e.kind, &e.value) {
+                    (ValueKind::Put, Some(v)) => encode_inline(v),
+                    (ValueKind::Delete, _) => Vec::new(),
+                    (ValueKind::Put, None) => {
+                        return Err(corrupt("streamed Put without a resolved value"))
+                    }
+                };
+                s.overlay.insert(make_ikey(&e.key, e.seqno, e.kind), repr);
+            }
         }
+        // the write lock is released first, so a waiter this wakes reads
+        // an overlay that already holds the batch
+        self.frontier.advance_to(batch_commit);
         Ok(())
+    }
+
+    /// Block until the frontier covers `seqno`: the event a reader who
+    /// needs a master write visible here waits on. Returns at once when it
+    /// already does, and never when the store never gets there (a stream
+    /// that stopped feeding it). The frontier moves only on an in-scope
+    /// commit or a slice refresh, so a scoped edge learns of an
+    /// out-of-scope commit's seqno from the next one of those; seqnos are
+    /// comparable only within the master instance this store is bound to.
+    pub fn wait_frontier(&self, seqno: SeqNo) {
+        self.frontier.wait_for(seqno);
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -369,7 +439,7 @@ impl EdgeStore {
         hi: Option<&[u8]>,
         reverse: bool,
         limit: usize,
-    ) -> Result<(Vec<(Vec<u8>, Vec<u8>)>, bool)> {
+    ) -> Result<ScanPage> {
         let lo: Vec<u8> = match lo {
             Some(l) if l > self.cfg.scope_lo.as_slice() => l.to_vec(),
             _ => self.cfg.scope_lo.clone(),
@@ -427,24 +497,15 @@ impl EdgeStore {
         let s = self.state.read();
         EdgeStats {
             flushed_seqno: s.flushed,
-            frontier_seqno: s.frontier,
-            fragments: s
-                .version
-                .runs_newest_first()
-                .map(|r| r.tables.len())
-                .sum(),
+            frontier_seqno: self.frontier.get(),
+            fragments: s.version.runs_newest_first().map(|r| r.tables.len()).sum(),
             overlay_bytes: s.overlay.approximate_bytes(),
             value_cache_bytes: self.vcache.lock().written,
         }
     }
 
     fn in_scope(&self, key: &[u8]) -> bool {
-        key >= self.cfg.scope_lo.as_slice()
-            && self
-                .cfg
-                .scope_hi
-                .as_deref()
-                .is_none_or(|h| key < h)
+        key >= self.cfg.scope_lo.as_slice() && self.cfg.scope_hi.as_deref().is_none_or(|h| key < h)
     }
 
     fn resolve(&self, key: &[u8], repr: &[u8]) -> Result<Vec<u8>> {

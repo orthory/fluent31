@@ -216,7 +216,11 @@ impl Journal {
     }
 
     /// [`Journal::attach`] with explicit tuning.
-    pub fn attach_with_config(db: Arc<Db>, dir: impl AsRef<Path>, cfg: JournalConfig) -> Result<Journal> {
+    pub fn attach_with_config(
+        db: Arc<Db>,
+        dir: impl AsRef<Path>,
+        cfg: JournalConfig,
+    ) -> Result<Journal> {
         Self::attach_observed(db, dir, cfg, Arc::new(Unobserved))
     }
 
@@ -230,7 +234,9 @@ impl Journal {
         observer: Arc<dyn JournalObserver>,
     ) -> Result<Journal> {
         if cfg.rotate_bytes == 0 {
-            return Err(Error::InvalidArgument("journal rotate_bytes must be > 0".into()));
+            return Err(Error::InvalidArgument(
+                "journal rotate_bytes must be > 0".into(),
+            ));
         }
         if let Some(r) = cfg.compact_when_deltas_exceed {
             if !r.is_finite() || r <= 0.0 {
@@ -242,7 +248,10 @@ impl Journal {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
 
-        let source = db.identity().map(|id| id.instance_id).unwrap_or([0u8; INSTANCE_ID_LEN]);
+        let source = db
+            .identity()
+            .map(|id| id.instance_id)
+            .unwrap_or([0u8; INSTANCE_ID_LEN]);
         let fresh = list_log_ids(&dir)?.is_empty();
         let writer = LogWriter::open(&dir, source, cfg.rotate_bytes, observer.clone())?;
         observer.attached(&dir, &list_log_files(&dir)?);
@@ -593,7 +602,8 @@ struct Drainer {
 impl Drainer {
     fn run(mut self) {
         while !self.shared.stop.load(Ordering::Acquire) {
-            if self.shared.force_checkpoint.swap(false, Ordering::AcqRel) || self.auto_compact_due() {
+            if self.shared.force_checkpoint.swap(false, Ordering::AcqRel) || self.auto_compact_due()
+            {
                 if let Err(e) = self.compact() {
                     self.record_error(e);
                     return;
@@ -638,7 +648,8 @@ impl Drainer {
         let Some(ratio) = self.cfg.compact_when_deltas_exceed else {
             return false;
         };
-        let threshold = (self.last_base_bytes as f64 * ratio).max(self.cfg.compact_min_bytes as f64);
+        let threshold =
+            (self.last_base_bytes as f64 * ratio).max(self.cfg.compact_min_bytes as f64);
         self.delta_bytes_since_base as f64 >= threshold
     }
 
@@ -646,7 +657,8 @@ impl Drainer {
         let before = self.writer.appended_bytes;
         let mut last = 0u64;
         for e in entries {
-            self.writer.append(&encode_delta(e.seqno, e.kind, &e.key, e.value.as_deref()))?;
+            self.writer
+                .append(&encode_delta(e.seqno, e.kind, &e.key, e.value.as_deref()))?;
             last = last.max(e.seqno);
         }
         self.writer.sync()?;
@@ -775,7 +787,11 @@ fn prune_files_below(dir: &Path, keep_from: u64) -> Result<u64> {
 /// `dest` must be absent or an empty directory: the rebuilt store is a new
 /// lineage and is never merged into whatever already lives there. Returns
 /// what was reconstructed.
-pub fn rebuild(journal_dir: impl AsRef<Path>, dest: impl AsRef<Path>, opts: Options) -> Result<RebuildReport> {
+pub fn rebuild(
+    journal_dir: impl AsRef<Path>,
+    dest: impl AsRef<Path>,
+    opts: Options,
+) -> Result<RebuildReport> {
     let journal_dir = journal_dir.as_ref();
     let dest = dest.as_ref();
     if !destination_is_fresh(dest)? {

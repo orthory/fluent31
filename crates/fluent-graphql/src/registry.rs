@@ -218,7 +218,11 @@ impl InstanceRegistry {
         for mgr in &forks {
             mgr.db.log_stats();
         }
-        info!(forks_open = forks.len(), max_open = self.shared.cfg.max_open, "fork registry");
+        info!(
+            forks_open = forks.len(),
+            max_open = self.shared.cfg.max_open,
+            "fork registry"
+        );
     }
 }
 

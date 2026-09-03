@@ -149,8 +149,7 @@ async fn demo_pair_end_to_end() {
         ])
     );
     assert_eq!(d["floor"], json!([{"customer": "zenith"}]));
-    let order: Value =
-        serde_json::from_str(d["order"]["text"].as_str().unwrap()).unwrap();
+    let order: Value = serde_json::from_str(d["order"]["text"].as_str().unwrap()).unwrap();
     assert_eq!(order["customer"], json!("acme"));
     assert_eq!(order["note"], json!("first!"));
 
@@ -162,7 +161,10 @@ async fn demo_pair_end_to_end() {
         .await;
     assert_eq!(resp.errors.len(), 1);
     let ext = resp.errors[0].extensions.as_ref().unwrap();
-    assert_eq!(format!("{}", ext.get("code").unwrap()).trim_matches('"'), "GUEST_FAILED");
+    assert_eq!(
+        format!("{}", ext.get("code").unwrap()).trim_matches('"'),
+        "GUEST_FAILED"
+    );
     assert!(
         format!("{}", ext.get("guestOutputText").unwrap()).contains("customer must be"),
         "{:?}",
@@ -250,7 +252,10 @@ async fn startup_over_existing_modules_restores_typed_fields_and_state() {
     // collect_outcomes at construction, and state must carry over
     let mgr = SchemaManager::new(Arc::new(Db::open(dir.path(), opts()).unwrap())).unwrap();
     let sdl = mgr.schema().sdl();
-    assert!(sdl.contains("placeOrder"), "typed field after restart: {sdl}");
+    assert!(
+        sdl.contains("placeOrder"),
+        "typed field after restart: {sdl}"
+    );
     assert!(sdl.contains("type CustomerStat"), "{sdl}");
     let d = run(
         &mgr,
@@ -260,6 +265,14 @@ async fn startup_over_existing_modules_restores_typed_fields_and_state() {
     .await;
     assert_eq!(d["placeOrder"]["id"], json!("2"), "id sequence continues");
     assert_eq!(d["placeOrder"]["customerTotalCents"], json!("150"));
-    let d = run(&mgr, r#"{ topCustomers(limit: 1) { customer orders } }"#, json!({})).await;
-    assert_eq!(d["topCustomers"][0], json!({"customer": "acme", "orders": "2"}));
+    let d = run(
+        &mgr,
+        r#"{ topCustomers(limit: 1) { customer orders } }"#,
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        d["topCustomers"][0],
+        json!({"customer": "acme", "orders": "2"})
+    );
 }

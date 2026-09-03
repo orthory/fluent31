@@ -272,9 +272,7 @@ fn parse_fields(raw: &Json, what: &str, max: usize) -> Result<Vec<FieldSpec>, St
 /// Parse and validate a descriptor emitted by `module`'s `describe` export.
 pub fn parse_descriptor(module: &str, bytes: &[u8]) -> Result<ModuleSchema, String> {
     if bytes.len() > MAX_DESCRIPTOR_BYTES {
-        return Err(format!(
-            "descriptor exceeds {MAX_DESCRIPTOR_BYTES} bytes"
-        ));
+        return Err(format!("descriptor exceeds {MAX_DESCRIPTOR_BYTES} bytes"));
     }
     if !is_graphql_name(module) {
         return Err(format!(
@@ -296,7 +294,9 @@ pub fn parse_descriptor(module: &str, bytes: &[u8]) -> Result<ModuleSchema, Stri
             Some("query") => Some(ModuleKind::Query),
             Some("execute") => Some(ModuleKind::Execute),
             other => {
-                return Err(format!("kind must be \"query\" or \"execute\", got {other:?}"))
+                return Err(format!(
+                    "kind must be \"query\" or \"execute\", got {other:?}"
+                ))
             }
         },
     };
@@ -409,7 +409,10 @@ pub fn parse_descriptor(module: &str, bytes: &[u8]) -> Result<ModuleSchema, Stri
                     .ok_or_else(|| "feed missing \"event\"".to_string())?,
             )?;
             if !known(&event.base) {
-                return Err(format!("feed event references unknown type {:?}", event.base));
+                return Err(format!(
+                    "feed event references unknown type {:?}",
+                    event.base
+                ));
             }
             // the generated payload wrapper claims a type name of its own
             let payload_type: String = module
@@ -571,8 +574,8 @@ pub fn normalize_output(
     ty: &TypeRefSpec,
     raw: &[u8],
 ) -> Result<Value, String> {
-    let json: Json = serde_json::from_slice(raw)
-        .map_err(|e| format!("module output is not valid JSON: {e}"))?;
+    let json: Json =
+        serde_json::from_slice(raw).map_err(|e| format!("module output is not valid JSON: {e}"))?;
     let objects: BTreeMap<&str, &ObjectSpec> =
         schema.types.iter().map(|t| (t.name.as_str(), t)).collect();
     coerce(ty, &json, &objects, "output")
@@ -612,10 +615,14 @@ mod tests {
     #[test]
     fn descriptor_rejects_reserved_and_unknown() {
         let d = br#"{"kind":"query","output":"Missing!"}"#;
-        assert!(parse_descriptor("m", d).unwrap_err().contains("unknown type"));
+        assert!(parse_descriptor("m", d)
+            .unwrap_err()
+            .contains("unknown type"));
         let d = br#"{"kind":"query","output":"Int!"}"#;
         assert!(parse_descriptor("scan", d).unwrap_err().contains("shadows"));
-        assert!(parse_descriptor("my-mod", d).unwrap_err().contains("GraphQL"));
+        assert!(parse_descriptor("my-mod", d)
+            .unwrap_err()
+            .contains("GraphQL"));
         let d = br#"{"kind":"query","types":[{"name":"Stats","fields":[{"name":"a","type":"Int"}]}],"output":"Stats"}"#;
         assert!(parse_descriptor("m", d).unwrap_err().contains("reserved"));
     }
@@ -641,7 +648,9 @@ mod tests {
         let Value::Object(m) = out else { panic!() };
         assert_eq!(m["n"], Value::Number(2.into()));
         assert!(m.get("junk").is_none(), "undeclared keys dropped");
-        let Value::List(top) = &m["top"] else { panic!() };
+        let Value::List(top) = &m["top"] else {
+            panic!()
+        };
         let Value::Object(t) = &top[0] else { panic!() };
         assert_eq!(t["cents"], Value::String("12345678901234567890".into()));
         assert_eq!(m["extra"], Value::Null);
@@ -681,12 +690,18 @@ mod tests {
         // rejections
         let cases: &[(&[u8], &str)] = &[
             (br#"{"output": "Int!"}"#, "requires \"kind\""),
-            (br#"{"feed": {"prefix": "f/", "event": "Int!"}, "args": []}"#, "args"),
+            (
+                br#"{"feed": {"prefix": "f/", "event": "Int!"}, "args": []}"#,
+                "args",
+            ),
             (br#"{}"#, "neither"),
             (br#"{"feed": {"prefix": "", "event": "Int!"}}"#, "non-empty"),
             (br#"{"feed": {"prefix": "f/"}}"#, "missing \"event\""),
             (br#"{"feed": {"event": "Int!"}}"#, "missing \"prefix\""),
-            (br#"{"feed": {"prefix": "f/", "event": "Nope!"}}"#, "unknown type"),
+            (
+                br#"{"feed": {"prefix": "f/", "event": "Nope!"}}"#,
+                "unknown type",
+            ),
             (br#"{"kind": "query"}"#, "missing \"output\""),
         ];
         for (d, needle) in cases {
@@ -703,6 +718,8 @@ mod tests {
             "feed": {"prefix": "f/", "event": "Json"},
             "types": [{"name": "MyModEvent", "fields": [{"name": "n", "type": "Int"}]}]
         }"#;
-        assert!(parse_descriptor("myMod", d).unwrap_err().contains("collides"));
+        assert!(parse_descriptor("myMod", d)
+            .unwrap_err()
+            .contains("collides"));
     }
 }

@@ -79,9 +79,7 @@ mod tests {
 
     #[test]
     fn false_positive_rate_reasonable() {
-        let hashes: Vec<u64> = (0..10_000u32)
-            .map(|i| hash64(&i.to_le_bytes()))
-            .collect();
+        let hashes: Vec<u64> = (0..10_000u32).map(|i| hash64(&i.to_le_bytes())).collect();
         let f = build(&hashes, 10);
         let fp = (10_000..30_000u32)
             .filter(|i| may_contain(&f, hash64(&i.to_le_bytes())))

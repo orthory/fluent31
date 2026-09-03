@@ -244,9 +244,11 @@ fn wat_get_echo_sees_snapshot() {
 fn module_versioning_time_travel() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts()).unwrap();
-    db.install_module("ver", version_module("v1").as_bytes()).unwrap();
+    db.install_module("ver", version_module("v1").as_bytes())
+        .unwrap();
     let snap = db.snapshot();
-    db.install_module("ver", version_module("v2").as_bytes()).unwrap();
+    db.install_module("ver", version_module("v2").as_bytes())
+        .unwrap();
     assert_eq!(db.query("ver", b"").unwrap(), b"v2");
     assert_eq!(db.query_at("ver", b"", &snap).unwrap(), b"v1");
 
@@ -256,7 +258,10 @@ fn module_versioning_time_travel() {
 
     db.uninstall_module("ver").unwrap();
     assert!(db.list_modules().unwrap().is_empty());
-    assert!(matches!(db.query("ver", b""), Err(Error::InvalidArgument(_))));
+    assert!(matches!(
+        db.query("ver", b""),
+        Err(Error::InvalidArgument(_))
+    ));
     // old snapshot still resolves the uninstalled module
     assert_eq!(db.query_at("ver", b"", &snap).unwrap(), b"v1");
 }
@@ -320,7 +325,10 @@ fn one_shot_query_reads_and_stays_read_only() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts()).unwrap();
     db.put(b"gk".to_vec(), b"one-shot-value".to_vec()).unwrap();
-    assert_eq!(db.query_wasm(GET_ECHO.as_bytes(), b"").unwrap(), b"one-shot-value");
+    assert_eq!(
+        db.query_wasm(GET_ECHO.as_bytes(), b"").unwrap(),
+        b"one-shot-value"
+    );
     // the EROFS wall holds on the one-shot query path too
     match db.query_wasm(PUT_ALWAYS.as_bytes(), b"") {
         Err(Error::GuestFailed { code, .. }) => assert_eq!(code, -2),
@@ -336,7 +344,10 @@ fn one_shot_query_at_time_travels_data() {
     let snap = db.snapshot();
     db.put(b"gk".to_vec(), b"new".to_vec()).unwrap();
     assert_eq!(db.query_wasm(GET_ECHO.as_bytes(), b"").unwrap(), b"new");
-    assert_eq!(db.query_wasm_at(GET_ECHO.as_bytes(), b"", &snap).unwrap(), b"old");
+    assert_eq!(
+        db.query_wasm_at(GET_ECHO.as_bytes(), b"", &snap).unwrap(),
+        b"old"
+    );
 }
 
 /// The export IS the role for one-shot bytes too, and errors name the
@@ -368,7 +379,10 @@ fn one_shot_rejects_garbage_bytes() {
         db.execute_wasm(b"not wasm at all", b""),
         Err(Error::Wasm(_))
     ));
-    assert!(matches!(db.query_wasm(b"not wasm at all", b""), Err(Error::Wasm(_))));
+    assert!(matches!(
+        db.query_wasm(b"not wasm at all", b""),
+        Err(Error::Wasm(_))
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -444,7 +458,8 @@ fn rust_guest_agg_end_to_end() {
         .unwrap();
     }
     // unrelated keys must not be counted
-    db.put(b"other/1".to_vec(), 999u64.to_le_bytes().to_vec()).unwrap();
+    db.put(b"other/1".to_vec(), 999u64.to_le_bytes().to_vec())
+        .unwrap();
     // spread across memtable + tables
     db.flush().unwrap();
     for i in 500..600u64 {
@@ -473,7 +488,8 @@ fn rust_guest_transfer_concurrent_occ() {
     let mut o = opts();
     o.execute_retries = 50; // hot conflicts expected — let OCC grind through
     let db = std::sync::Arc::new(Db::open(dir.path(), o).unwrap());
-    db.install_module("transfer", &guest_wasm("transfer")).unwrap();
+    db.install_module("transfer", &guest_wasm("transfer"))
+        .unwrap();
 
     let accounts: Vec<Vec<u8>> = (0..4).map(|i| format!("acct/{i}").into_bytes()).collect();
     for a in &accounts {
@@ -515,9 +531,7 @@ fn rust_guest_transfer_concurrent_occ() {
     // conservation law: total balance unchanged whatever interleaving happened
     let total: u64 = accounts
         .iter()
-        .map(|a| {
-            u64::from_le_bytes(db.get(a).unwrap().unwrap()[..8].try_into().unwrap())
-        })
+        .map(|a| u64::from_le_bytes(db.get(a).unwrap().unwrap()[..8].try_into().unwrap()))
         .sum();
     assert_eq!(total, 4_000);
 }
@@ -526,7 +540,8 @@ fn rust_guest_transfer_concurrent_occ() {
 fn rust_guest_transfer_insufficient_funds() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts()).unwrap();
-    db.install_module("transfer", &guest_wasm("transfer")).unwrap();
+    db.install_module("transfer", &guest_wasm("transfer"))
+        .unwrap();
     db.put(b"a".to_vec(), 10u64.to_le_bytes().to_vec()).unwrap();
     db.put(b"b".to_vec(), 0u64.to_le_bytes().to_vec()).unwrap();
 

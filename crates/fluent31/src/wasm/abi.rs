@@ -204,9 +204,11 @@ fn do_get(
 }
 
 pub(crate) fn register(linker: &mut Linker<HostCtx>) -> WResult<()> {
-    linker.func_wrap("fluent", "input_len", |caller: Caller<'_, HostCtx>| -> i32 {
-        caller.data().input.len() as i32
-    })?;
+    linker.func_wrap(
+        "fluent",
+        "input_len",
+        |caller: Caller<'_, HostCtx>| -> i32 { caller.data().input.len() as i32 },
+    )?;
 
     linker.func_wrap(
         "fluent",

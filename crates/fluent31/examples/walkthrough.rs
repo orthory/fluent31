@@ -44,7 +44,10 @@ fn drain(db: &Db, names: &[&str]) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let all = db.list_triggers().expect("list_triggers");
-        let mine: Vec<_> = all.iter().filter(|t| names.contains(&t.name.as_str())).collect();
+        let mine: Vec<_> = all
+            .iter()
+            .filter(|t| names.contains(&t.name.as_str()))
+            .collect();
         assert_eq!(mine.len(), names.len(), "every named trigger is registered");
         if let Some(t) = mine.iter().find(|t| t.last_error.is_some()) {
             panic!("trigger {} is stuck: {:?}", t.name, t.last_error);
@@ -52,7 +55,10 @@ fn drain(db: &Db, names: &[&str]) {
         if mine.iter().all(|t| t.pending == 0) {
             return;
         }
-        assert!(Instant::now() < deadline, "triggers did not drain in 30s: {mine:?}");
+        assert!(
+            Instant::now() < deadline,
+            "triggers did not drain in 30s: {mine:?}"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -108,16 +114,25 @@ fn main() {
     let db = Arc::new(Db::open(dir.path(), Options::default()).expect("open"));
 
     println!("== install the modules");
-    db.install_module("place_order", &guest_wasm("place_order")).expect("install executor");
-    db.install_module("customer_index", &guest_wasm("customer_index")).expect("install trigger");
-    let installed: Vec<_> =
-        db.list_modules().expect("list_modules").into_iter().map(|m| m.name).collect();
+    db.install_module("place_order", &guest_wasm("place_order"))
+        .expect("install executor");
+    db.install_module("customer_index", &guest_wasm("customer_index"))
+        .expect("install trigger");
+    let installed: Vec<_> = db
+        .list_modules()
+        .expect("list_modules")
+        .into_iter()
+        .map(|m| m.name)
+        .collect();
     println!("   modules: {}", installed.join(", "));
 
     // A module that exports `describe` carries its own typed surface, which
     // is what lets the GraphQL plane mint a root field for it. Read it back
     // without a server in sight.
-    let descriptor = db.describe_module("place_order").expect("describe").expect("has describe");
+    let descriptor = db
+        .describe_module("place_order")
+        .expect("describe")
+        .expect("has describe");
     let descriptor: Value = serde_json::from_slice(&descriptor).expect("descriptor JSON");
     println!(
         "   place_order describes itself as kind={} output={}",
@@ -129,9 +144,17 @@ fn main() {
     // engine registers it in keys mode and hands it touched keys to
     // reconcile; a module exporting on_apply would get changes mode instead.
     let mode = db
-        .create_trigger("customerIndex", "customer_index", Some(b"orders/"), Some(b"orders0"))
+        .create_trigger(
+            "customerIndex",
+            "customer_index",
+            Some(b"orders/"),
+            Some(b"orders0"),
+        )
         .expect("create_trigger");
-    println!("   mode detected from the module's exports: {}", mode.as_str());
+    println!(
+        "   mode detected from the module's exports: {}",
+        mode.as_str()
+    );
 
     println!("\n== one order, through the executor");
     let first = place_order(&db, "acme", 1_250);
@@ -162,12 +185,18 @@ fn main() {
             })
         })
         .collect();
-    let placed: Vec<Value> = handles.into_iter().flat_map(|h| h.join().expect("thread")).collect();
+    let placed: Vec<Value> = handles
+        .into_iter()
+        .flat_map(|h| h.join().expect("thread"))
+        .collect();
 
     // Every order got its own id even though the counter is one hot key:
     // the executor allocates it inside the transaction, so a conflicting
     // attempt is discarded whole rather than leaving a gap or a duplicate.
-    let ids: BTreeSet<u64> = placed.iter().map(|o| o["id"].as_u64().expect("id")).collect();
+    let ids: BTreeSet<u64> = placed
+        .iter()
+        .map(|o| o["id"].as_u64().expect("id"))
+        .collect();
     assert_eq!(ids.len(), placed.len(), "every order id is distinct");
     println!(
         "   {} orders placed, {} distinct ids, {} reached the caller as Conflict",
@@ -180,7 +209,11 @@ fn main() {
     drain(&db, &["customerIndex"]);
     let orders = scan_prefix(&db, "orders/");
     let records = orders.iter().filter(|(k, _)| k != "orders/next").count();
-    assert_eq!(records, placed.len() + 1, "one record per order, plus the first");
+    assert_eq!(
+        records,
+        placed.len() + 1,
+        "one record per order, plus the first"
+    );
 
     for customer in CUSTOMERS {
         let indexed = scan_prefix(&db, &format!("idx/customer/{customer}/")).len();
@@ -190,7 +223,10 @@ fn main() {
             indexed as u64,
             "{customer}: the executor's own count and the trigger's index agree"
         );
-        println!("   {customer}: {indexed} orders, {} cents", stats["totalCents"]);
+        println!(
+            "   {customer}: {indexed} orders, {} cents",
+            stats["totalCents"]
+        );
     }
 
     println!("\n== rehearse a destructive change on a fork");
@@ -198,12 +234,18 @@ fn main() {
     // what is already immutable. Opening it gives a writable copy whose
     // divergence costs only what actually diverges.
     let fork = db.fork("rehearsal").expect("fork");
-    println!("   forked at seqno {} -> {}", fork.last_seqno, fork.path.display());
+    println!(
+        "   forked at seqno {} -> {}",
+        fork.last_seqno,
+        fork.path.display()
+    );
 
     let rehearsal = Db::open(&fork.path, Options::default()).expect("open fork");
     for (key, _) in scan_prefix(&rehearsal, "orders/") {
         if key != "orders/next" {
-            rehearsal.delete(key.into_bytes()).expect("delete on the fork");
+            rehearsal
+                .delete(key.into_bytes())
+                .expect("delete on the fork");
         }
     }
     let left_on_fork = scan_prefix(&rehearsal, "orders/").len();
@@ -211,7 +253,11 @@ fn main() {
 
     let left_on_parent = scan_prefix(&db, "orders/").len();
     assert_eq!(left_on_fork, 1, "the fork keeps only the counter");
-    assert_eq!(left_on_parent, records + 1, "the parent never saw the deletes");
+    assert_eq!(
+        left_on_parent,
+        records + 1,
+        "the parent never saw the deletes"
+    );
     println!("   fork: {left_on_fork} keys left, parent: {left_on_parent} — untouched");
 
     println!("\ndone: installed, bound, drained, contended and rehearsed.");

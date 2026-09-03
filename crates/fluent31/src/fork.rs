@@ -169,9 +169,7 @@ pub(crate) fn create(db: &Db, name: &str, at: Option<SeqNo>) -> Result<ForkInfo>
     let tmp_dir = root.join(format!(".tmp-{name}"));
     std::fs::create_dir(&tmp_dir).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::InvalidArgument(format!(
-                "fork {name:?} is already being created"
-            ))
+            Error::InvalidArgument(format!("fork {name:?} is already being created"))
         } else {
             Error::Io(e)
         }
@@ -386,7 +384,10 @@ fn write_snapshot_run(
     Ok(if table_ids.is_empty() {
         Vec::new()
     } else {
-        vec![vec![RunMeta { id: run_id, table_ids }]]
+        vec![vec![RunMeta {
+            id: run_id,
+            table_ids,
+        }]]
     })
 }
 
@@ -425,7 +426,9 @@ pub(crate) fn list(paths: &DbPaths) -> Result<Vec<ForkInfo>> {
             created_unix_ms: field("created_unix_ms")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
-            last_seqno: field("last_seqno").and_then(|v| v.parse().ok()).unwrap_or(0),
+            last_seqno: field("last_seqno")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             path: dir,
         });
     }
@@ -437,9 +440,7 @@ pub(crate) fn delete(paths: &DbPaths, name: &str) -> Result<()> {
     validate_name("fork", name)?;
     let dir = paths.archive(name);
     if !dir.exists() {
-        return Err(Error::InvalidArgument(format!(
-            "no fork named {name:?}"
-        )));
+        return Err(Error::InvalidArgument(format!("no fork named {name:?}")));
     }
     // refuse to delete a fork that is open as a live database
     let lock_path = dir.join("LOCK");

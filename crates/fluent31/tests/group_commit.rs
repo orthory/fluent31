@@ -87,12 +87,16 @@ fn sequential_writes_are_groups_of_one() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts(SyncMode::Never)).unwrap();
     for i in 0..50u32 {
-        db.put(format!("seq/{i}"), i.to_le_bytes().to_vec()).unwrap();
+        db.put(format!("seq/{i}"), i.to_le_bytes().to_vec())
+            .unwrap();
     }
     let stats = db.stats();
     assert_eq!(stats.commit_batches, 50);
     assert_eq!(stats.commit_groups, 50, "no concurrency, no grouping");
-    assert_eq!(db.get(b"seq/49").unwrap().as_deref(), Some(&49u32.to_le_bytes()[..]));
+    assert_eq!(
+        db.get(b"seq/49").unwrap().as_deref(),
+        Some(&49u32.to_le_bytes()[..])
+    );
 }
 
 /// A batch that fails validation must not poison concurrent valid batches.
@@ -161,14 +165,19 @@ fn grouped_wal_records_recover() {
             }
         });
         let stats = db.stats();
-        assert!(stats.commit_groups < stats.commit_batches, "grouping happened");
+        assert!(
+            stats.commit_groups < stats.commit_batches,
+            "grouping happened"
+        );
         // no flush: everything recovers from the WAL alone
     }
     let db = Db::open(dir.path(), opts(SyncMode::Always)).unwrap();
     for t in 0..THREADS {
         for i in 0..PER_THREAD {
             assert_eq!(
-                db.get(format!("rec/{t}/{i}").as_bytes()).unwrap().as_deref(),
+                db.get(format!("rec/{t}/{i}").as_bytes())
+                    .unwrap()
+                    .as_deref(),
                 Some(format!("r{t}-{i}").as_bytes()),
                 "rec/{t}/{i} lost across recovery"
             );
@@ -259,7 +268,9 @@ fn vlog_values_survive_grouping() {
             s.spawn(move || {
                 barrier.wait();
                 for i in 0..8u32 {
-                    let val: Vec<u8> = (0..4096u32).map(|j| ((j + i + t as u32) % 251) as u8).collect();
+                    let val: Vec<u8> = (0..4096u32)
+                        .map(|j| ((j + i + t as u32) % 251) as u8)
+                        .collect();
                     db.put(format!("big/{t}/{i}"), val).unwrap();
                 }
             });
@@ -267,9 +278,13 @@ fn vlog_values_survive_grouping() {
     });
     for t in 0..THREADS {
         for i in 0..8u32 {
-            let expect: Vec<u8> = (0..4096u32).map(|j| ((j + i + t as u32) % 251) as u8).collect();
+            let expect: Vec<u8> = (0..4096u32)
+                .map(|j| ((j + i + t as u32) % 251) as u8)
+                .collect();
             assert_eq!(
-                db.get(format!("big/{t}/{i}").as_bytes()).unwrap().as_deref(),
+                db.get(format!("big/{t}/{i}").as_bytes())
+                    .unwrap()
+                    .as_deref(),
                 Some(&expect[..]),
                 "big/{t}/{i} corrupted"
             );

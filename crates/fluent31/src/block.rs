@@ -58,8 +58,7 @@ impl Block {
         if data.len() < 4 {
             return Err(corrupt("block too small"));
         }
-        let count =
-            u32::from_le_bytes(data[data.len() - 4..].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes(data[data.len() - 4..].try_into().unwrap()) as usize;
         let array_len = count
             .checked_mul(4)
             .and_then(|n| n.checked_add(4))

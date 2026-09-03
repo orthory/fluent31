@@ -67,7 +67,10 @@ const TRAP_WAT: &str = r#"
 fn wait_until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while !f() {
-        assert!(Instant::now() < deadline, "not reached within {secs}s: {what}");
+        assert!(
+            Instant::now() < deadline,
+            "not reached within {secs}s: {what}"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -103,18 +106,24 @@ fn trigger_writing_into_its_own_range_does_not_loop() {
     let db = Db::open(dir.path(), opts()).unwrap();
     db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
     // range [m/, n) — the very space the module mirrors into
-    db.create_trigger("self", "mirror", Some(b"m/"), Some(b"n")).unwrap();
+    db.create_trigger("self", "mirror", Some(b"m/"), Some(b"n"))
+        .unwrap();
 
     db.put(b"m/seed".to_vec(), b"1".to_vec()).unwrap();
 
     // the mirror of the user write lands...
-    wait_until("mirror of m/seed", 10, || db.get(b"m/m/seed").unwrap().is_some());
+    wait_until("mirror of m/seed", 10, || {
+        db.get(b"m/m/seed").unwrap().is_some()
+    });
     // ...and the queue settles instead of cascading
     wait_until("queue drains, no cascade", 10, || pending(&db, "self") == 0);
 
     assert_eq!(db.get(b"m/m/seed").unwrap().unwrap(), b"m/seed");
     // the mirror write (a system write) never re-fired: no second-order mirror
-    assert!(db.get(b"m/m/m/seed").unwrap().is_none(), "self-recursion cascaded");
+    assert!(
+        db.get(b"m/m/m/seed").unwrap().is_none(),
+        "self-recursion cascaded"
+    );
     assert_eq!(last_error(&db, "self"), None);
 
     // stays quiet: pending is genuinely zero, not momentarily
@@ -136,10 +145,12 @@ fn trapping_trigger_module_surfaces_error_then_recovers() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts()).unwrap();
     db.install_module("idx", TRAP_WAT.as_bytes()).unwrap();
-    db.create_trigger("t", "idx", Some(b"u/"), Some(b"v")).unwrap();
+    db.create_trigger("t", "idx", Some(b"u/"), Some(b"v"))
+        .unwrap();
 
     for i in 0..5u32 {
-        db.put(format!("u/{i}").into_bytes(), b"1".to_vec()).unwrap();
+        db.put(format!("u/{i}").into_bytes(), b"1".to_vec())
+            .unwrap();
     }
 
     // the trap surfaces as last_error and the backlog is retained, not dropped
@@ -147,7 +158,10 @@ fn trapping_trigger_module_surfaces_error_then_recovers() {
         last_error(&db, "t").is_some() && pending(&db, "t") == 5
     });
     let err = last_error(&db, "t").unwrap();
-    assert!(err.contains("trap") || err.contains("wasm"), "unexpected: {err}");
+    assert!(
+        err.contains("trap") || err.contains("wasm"),
+        "unexpected: {err}"
+    );
 
     // repair: overwrite the module name with a working one; the runner picks
     // up the new bytes on its next attempt and drains the retained backlog
@@ -157,7 +171,11 @@ fn trapping_trigger_module_surfaces_error_then_recovers() {
         let mk = format!("m/u/{i}").into_bytes();
         assert_eq!(db.get(&mk).unwrap().unwrap(), format!("u/{i}").into_bytes());
     }
-    assert_eq!(last_error(&db, "t"), None, "error clears after a clean drain");
+    assert_eq!(
+        last_error(&db, "t"),
+        None,
+        "error clears after a clean drain"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +198,8 @@ fn trigger_storm_coalesces_and_converges() {
     };
     let db = Arc::new(Db::open(dir.path(), o).unwrap());
     db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
-    db.create_trigger("s", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+    db.create_trigger("s", "mirror", Some(b"u/"), Some(b"v"))
+        .unwrap();
 
     let barrier = Arc::new(Barrier::new(THREADS));
     let mut handles = Vec::new();
@@ -191,7 +210,8 @@ fn trigger_storm_coalesces_and_converges() {
             barrier.wait();
             for _ in 0..PASSES {
                 for i in 0..KEYS {
-                    db.put(format!("u/{i:04}").into_bytes(), b"v".to_vec()).unwrap();
+                    db.put(format!("u/{i:04}").into_bytes(), b"v".to_vec())
+                        .unwrap();
                 }
             }
         }));
@@ -233,9 +253,11 @@ fn backlog_drains_completely_across_reopen_mid_drain() {
         };
         let db = Db::open(dir.path(), o).unwrap();
         db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
-        db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+        db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v"))
+            .unwrap();
         for i in 0..KEYS {
-            db.put(format!("u/{i:04}").into_bytes(), b"v".to_vec()).unwrap();
+            db.put(format!("u/{i:04}").into_bytes(), b"v".to_vec())
+                .unwrap();
         }
         // drop immediately — the runner has almost certainly not finished
         drop(db);
@@ -243,7 +265,9 @@ fn backlog_drains_completely_across_reopen_mid_drain() {
 
     // reopen: the retained backlog resumes and completes
     let db = Db::open(dir.path(), opts()).unwrap();
-    wait_until("recovered backlog fully drains", 30, || pending(&db, "t") == 0);
+    wait_until("recovered backlog fully drains", 30, || {
+        pending(&db, "t") == 0
+    });
     for i in 0..KEYS {
         let uk = format!("u/{i:04}").into_bytes();
         let mk = format!("m/u/{i:04}").into_bytes();
@@ -275,7 +299,8 @@ fn trigger_admin_churn_races_writes_safely() {
         std::thread::spawn(move || {
             let mut i = 0u32;
             while !stop.load(Ordering::Acquire) {
-                db.put(format!("u/{i:05}").into_bytes(), b"v".to_vec()).unwrap();
+                db.put(format!("u/{i:05}").into_bytes(), b"v".to_vec())
+                    .unwrap();
                 writes.fetch_add(1, Ordering::Relaxed);
                 i += 1;
             }
@@ -284,7 +309,8 @@ fn trigger_admin_churn_races_writes_safely() {
 
     // churn create/delete of a trigger over the range writes are landing in
     for _ in 0..20 {
-        db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+        db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v"))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(5));
         db.delete_trigger("t").unwrap();
         std::thread::sleep(Duration::from_millis(5));
@@ -295,7 +321,8 @@ fn trigger_admin_churn_races_writes_safely() {
 
     // final steady state: create once, let it drain, verify it works and the
     // runner is quiet (no wedge from all the churn)
-    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v")).unwrap();
+    db.create_trigger("t", "mirror", Some(b"u/"), Some(b"v"))
+        .unwrap();
     db.put(b"u/final".to_vec(), b"v".to_vec()).unwrap();
     wait_until("final trigger fires and drains", 15, || {
         db.get(b"m/u/final").unwrap().is_some() && pending(&db, "t") == 0
@@ -317,7 +344,8 @@ fn disabled_wasm_layer_is_inert_and_skips_the_window() {
     {
         let db = Db::open(dir.path(), opts()).unwrap();
         db.install_module("mirror", MIRROR_WAT.as_bytes()).unwrap();
-        db.create_trigger("t", "mirror", Some(b"k/"), Some(b"k0")).unwrap();
+        db.create_trigger("t", "mirror", Some(b"k/"), Some(b"k0"))
+            .unwrap();
         db.put("k/1", "a").unwrap();
         wait_until("k/1 mirrored", 10, || db.get(b"m/k/1").unwrap().is_some());
     }

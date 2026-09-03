@@ -25,11 +25,15 @@ fn main() {
         },
     )
     .expect("open");
-    db.install_module("cascade_delete", &guest_wasm("cascade_delete")).expect("install");
+    db.install_module("cascade_delete", &guest_wasm("cascade_delete"))
+        .expect("install");
     let mode = db
         .create_trigger("cascade", "cascade_delete", Some(b"doc/"), Some(b"doc0"))
         .expect("trigger");
-    println!("== cascade trigger over [doc/, doc0) mode={}\n", mode.as_str());
+    println!(
+        "== cascade trigger over [doc/, doc0) mode={}\n",
+        mode.as_str()
+    );
 
     println!("== two documents, each with attachments and comments");
     put(&db, "doc/a", r#"{"title":"specs"}"#);

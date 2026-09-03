@@ -24,8 +24,7 @@
 use std::sync::Arc;
 
 use async_graphql::dynamic::{
-    Field, FieldFuture, FieldValue, InputValue, Object, ResolverContext, SubscriptionField,
-    TypeRef,
+    Field, FieldFuture, FieldValue, InputValue, Object, ResolverContext, SubscriptionField, TypeRef,
 };
 use async_graphql::{Error, Value};
 use serde_json::{Map as JsonMap, Value as Json};
@@ -68,7 +67,10 @@ fn map_scalar(base: &str) -> String {
 }
 
 /// GraphQL argument value → JSON handed to the guest.
-fn arg_to_json(spec: &FieldSpec, v: Option<async_graphql::dynamic::ValueAccessor<'_>>) -> Result<Json, Error> {
+fn arg_to_json(
+    spec: &FieldSpec,
+    v: Option<async_graphql::dynamic::ValueAccessor<'_>>,
+) -> Result<Json, Error> {
     let Some(v) = v else { return Ok(Json::Null) };
     if v.is_null() {
         return Ok(Json::Null);
@@ -102,10 +104,7 @@ fn arg_to_json(spec: &FieldSpec, v: Option<async_graphql::dynamic::ValueAccessor
         "Int" => {
             let n = v.i64()?;
             i32::try_from(n).map_err(|_| {
-                Error::new(format!(
-                    "arg {}: Int out of 32-bit range: {n}",
-                    spec.name
-                ))
+                Error::new(format!("arg {}: Int out of 32-bit range: {n}", spec.name))
             })?;
             Json::Number(n.into())
         }
@@ -121,7 +120,12 @@ fn arg_to_json(spec: &FieldSpec, v: Option<async_graphql::dynamic::ValueAccessor
             _ => v.u64()?.into(),
         }),
         "Json" => gql_to_json(v.as_value()),
-        other => return Err(Error::new(format!("arg {}: unsupported type {other}", spec.name))),
+        other => {
+            return Err(Error::new(format!(
+                "arg {}: unsupported type {other}",
+                spec.name
+            )))
+        }
     })
 }
 
@@ -228,30 +232,32 @@ fn root_field(
                             .await?
                     }
                     ModuleKind::Execute => {
-                        mgr.blocking_write(move || db.execute(&module, &input)).await?
+                        mgr.blocking_write(move || db.execute(&module, &input))
+                            .await?
                     }
                 };
 
-                let value = crate::descriptor::normalize_output(&schema, &output, &raw).map_err(|e| {
-                    use async_graphql::ErrorExtensions;
-                    // for executors the transaction has ALREADY committed:
-                    // say so loudly, or a client will retry a write that
-                    // durably landed
-                    let committed = matches!(kind, ModuleKind::Execute);
-                    let msg = if committed {
-                        format!(
-                            "module {} COMMITTED its transaction but returned output \
+                let value =
+                    crate::descriptor::normalize_output(&schema, &output, &raw).map_err(|e| {
+                        use async_graphql::ErrorExtensions;
+                        // for executors the transaction has ALREADY committed:
+                        // say so loudly, or a client will retry a write that
+                        // durably landed
+                        let committed = matches!(kind, ModuleKind::Execute);
+                        let msg = if committed {
+                            format!(
+                                "module {} COMMITTED its transaction but returned output \
                              violating its declared schema: {e}",
-                            schema.module
-                        )
-                    } else {
-                        format!("module {}: {e}", schema.module)
-                    };
-                    Error::new(msg).extend_with(|_, x| {
-                        x.set("code", "OUTPUT_SCHEMA_VIOLATION");
-                        x.set("committed", committed);
-                    })
-                })?;
+                                schema.module
+                            )
+                        } else {
+                            format!("module {}: {e}", schema.module)
+                        };
+                        Error::new(msg).extend_with(|_, x| {
+                            x.set("code", "OUTPUT_SCHEMA_VIOLATION");
+                            x.set("committed", committed);
+                        })
+                    })?;
                 if value == Value::Null {
                     return Ok(None);
                 }

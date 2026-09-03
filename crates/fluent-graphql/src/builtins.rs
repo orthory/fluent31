@@ -47,7 +47,10 @@ pub(crate) fn arg_bytes(ctx: &ResolverContext<'_>, name: &str) -> Result<Vec<u8>
     decode_bytes_input(&ctx.args.try_get(name)?.object()?)
 }
 
-pub(crate) fn opt_arg_bytes(ctx: &ResolverContext<'_>, name: &str) -> Result<Option<Vec<u8>>, Error> {
+pub(crate) fn opt_arg_bytes(
+    ctx: &ResolverContext<'_>,
+    name: &str,
+) -> Result<Option<Vec<u8>>, Error> {
     match ctx.args.get(name) {
         None => Ok(None),
         Some(v) if v.is_null() => Ok(None),
@@ -87,7 +90,10 @@ fn fork_value(c: fluent31::ForkInfo) -> Value {
     obj(vec![
         ("name", Value::String(c.name)),
         ("instanceId", Value::String(c.instance_id)),
-        ("createdUnixMs", Value::String(c.created_unix_ms.to_string())),
+        (
+            "createdUnixMs",
+            Value::String(c.created_unix_ms.to_string()),
+        ),
         ("lastSeqno", Value::String(c.last_seqno.to_string())),
         ("path", Value::String(c.path.display().to_string())),
     ])
@@ -97,7 +103,10 @@ fn pin_value(p: fluent31::PinInfo) -> Value {
     obj(vec![
         ("name", Value::String(p.name)),
         ("seqno", Value::String(p.seqno.to_string())),
-        ("createdUnixMs", Value::String(p.created_unix_ms.to_string())),
+        (
+            "createdUnixMs",
+            Value::String(p.created_unix_ms.to_string()),
+        ),
     ])
 }
 
@@ -480,7 +489,10 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
                     Ok(Some(FieldValue::owned_any(BytesVal(out))))
                 })
             })
-            .argument(InputValue::new("module", TypeRef::named_nn(TypeRef::STRING)))
+            .argument(InputValue::new(
+                "module",
+                TypeRef::named_nn(TypeRef::STRING),
+            ))
             .argument(InputValue::new("input", TypeRef::named("BytesInput")))
             .description(
                 "Run any installed WASM executor inside a transaction: raw bytes in/out, \
@@ -569,7 +581,10 @@ pub(crate) fn register(query: Object, mutation: Object) -> (Object, Object) {
                 })
             })
             .argument(InputValue::new("name", TypeRef::named_nn(TypeRef::STRING)))
-            .argument(InputValue::new("module", TypeRef::named_nn(TypeRef::STRING)))
+            .argument(InputValue::new(
+                "module",
+                TypeRef::named_nn(TypeRef::STRING),
+            ))
             .argument(InputValue::new("lo", TypeRef::named("BytesInput")))
             .argument(InputValue::new("hi", TypeRef::named("BytesInput")))
             .description(
@@ -836,7 +851,8 @@ async fn uninstall_task(
 ) -> Result<(), Error> {
     let _guard = mgr.rebuild_lock.lock().await;
     let db = mgr.db.clone();
-    mgr.blocking_write(move || db.uninstall_module(&name)).await?;
+    mgr.blocking_write(move || db.uninstall_module(&name))
+        .await?;
     let mgr2 = mgr.clone();
     tokio::task::spawn_blocking(move || mgr2.rebuild())
         .await

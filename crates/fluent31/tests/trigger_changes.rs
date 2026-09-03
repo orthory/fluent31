@@ -101,7 +101,10 @@ const NO_ENTRY: &str = r#"
 fn wait_until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while !f() {
-        assert!(Instant::now() < deadline, "not reached within {secs}s: {what}");
+        assert!(
+            Instant::now() < deadline,
+            "not reached within {secs}s: {what}"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -133,11 +136,16 @@ fn feed(db: &Db) -> Vec<serde_json::Value> {
 
 fn order_feed_db(dir: &std::path::Path, opts: Options) -> Db {
     let db = Db::open(dir, opts).unwrap();
-    db.install_module("order_feed", &guest_wasm("order_feed")).unwrap();
+    db.install_module("order_feed", &guest_wasm("order_feed"))
+        .unwrap();
     let mode = db
         .create_trigger("feed", "order_feed", Some(b"orders/"), Some(b"orders0"))
         .unwrap();
-    assert_eq!(mode, TriggerMode::Changes, "on_apply export selects changes mode");
+    assert_eq!(
+        mode,
+        TriggerMode::Changes,
+        "on_apply export selects changes mode"
+    );
     db
 }
 
@@ -183,7 +191,10 @@ fn feed_shows_every_op_in_order_with_kinds_and_values() {
     assert_eq!(entries[0]["record"]["v"], 1);
     assert_eq!(entries[1]["record"]["v"], 2);
     assert_eq!(entries[2]["record"]["v"], 3);
-    let seqnos: Vec<u64> = entries.iter().map(|e| e["seqno"].as_u64().unwrap()).collect();
+    let seqnos: Vec<u64> = entries
+        .iter()
+        .map(|e| e["seqno"].as_u64().unwrap())
+        .collect();
     assert!(
         seqnos.windows(2).all(|w| w[0] < w[1]),
         "seqnos strictly increase: {seqnos:?}"
@@ -206,13 +217,7 @@ fn feed_matches_commit_order(sync: SyncMode) {
     const THREADS: usize = 4;
     const WRITES: usize = 50;
     let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(order_feed_db(
-        dir.path(),
-        Options {
-            sync,
-            ..opts()
-        },
-    ));
+    let db = Arc::new(order_feed_db(dir.path(), Options { sync, ..opts() }));
     // ground truth: subscribe BEFORE any write so the stream is gap-free
     let mut sub = db.subscribe(b"orders/", Some(b"orders0")).unwrap();
 
@@ -241,9 +246,19 @@ fn feed_matches_commit_order(sync: SyncMode) {
     wait_until("queue drained", 60, || pending(&db, "feed") == 0);
 
     let entries = feed(&db);
-    assert_eq!(entries.len(), THREADS * WRITES, "no loss, no dup, no coalescing");
-    let seqnos: Vec<u64> = entries.iter().map(|e| e["seqno"].as_u64().unwrap()).collect();
-    assert!(seqnos.windows(2).all(|w| w[0] < w[1]), "feed is seqno-ordered");
+    assert_eq!(
+        entries.len(),
+        THREADS * WRITES,
+        "no loss, no dup, no coalescing"
+    );
+    let seqnos: Vec<u64> = entries
+        .iter()
+        .map(|e| e["seqno"].as_u64().unwrap())
+        .collect();
+    assert!(
+        seqnos.windows(2).all(|w| w[0] < w[1]),
+        "feed is seqno-ordered"
+    );
 
     // each writer's own commits are sequential, so its j values must appear
     // in order within the feed
@@ -254,7 +269,10 @@ fn feed_matches_commit_order(sync: SyncMode) {
             .map(|e| e["record"]["j"].as_u64().unwrap())
             .collect();
         assert_eq!(js.len(), WRITES, "thread {t} fully represented");
-        assert!(js.windows(2).all(|w| w[0] < w[1]), "thread {t} in commit order");
+        assert!(
+            js.windows(2).all(|w| w[0] < w[1]),
+            "thread {t} in commit order"
+        );
     }
 
     // THE assertion: the feed equals the replication stream — the writes
@@ -289,7 +307,8 @@ fn feed_matches_commit_order(sync: SyncMode) {
     let final_record: serde_json::Value =
         serde_json::from_slice(&db.get(b"orders/00000042").unwrap().unwrap()).unwrap();
     assert_eq!(
-        entries.last().unwrap()["record"], final_record,
+        entries.last().unwrap()["record"],
+        final_record,
         "the feed's last change must be the value the store ends with"
     );
 }
@@ -322,8 +341,10 @@ fn oversized_values_are_elided_not_dropped() {
     );
 
     let big = format!(r#"{{"pad":"{}"}}"#, "x".repeat(64));
-    db.put(b"orders/00000001".to_vec(), big.into_bytes()).unwrap();
-    db.put(b"orders/00000002".to_vec(), br#"{"v":2}"#.to_vec()).unwrap();
+    db.put(b"orders/00000001".to_vec(), big.into_bytes())
+        .unwrap();
+    db.put(b"orders/00000002".to_vec(), br#"{"v":2}"#.to_vec())
+        .unwrap();
 
     wait_until("feed materialized", 30, || feed(&db).len() == 2);
     let entries = feed(&db);
@@ -340,7 +361,8 @@ fn install_validation_and_mode_detection() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts()).unwrap();
 
-    db.install_module("feedmod", &guest_wasm("order_feed")).unwrap();
+    db.install_module("feedmod", &guest_wasm("order_feed"))
+        .unwrap();
     match db.execute("feedmod", b"") {
         Err(fluent31::Error::InvalidArgument(msg)) => {
             assert!(msg.contains("`execute`"), "names the missing entry: {msg}")
@@ -355,7 +377,8 @@ fn install_validation_and_mode_detection() {
         other => panic!("querying an on_apply-only module: {other:?}"),
     }
 
-    db.install_module("keysmod", ON_TOUCH_ONLY.as_bytes()).unwrap();
+    db.install_module("keysmod", ON_TOUCH_ONLY.as_bytes())
+        .unwrap();
     assert_eq!(
         db.create_trigger("k", "keysmod", None, None).unwrap(),
         TriggerMode::Keys
@@ -375,7 +398,10 @@ fn install_validation_and_mode_detection() {
 
     match db.install_module("broken", NO_ENTRY.as_bytes()) {
         Err(fluent31::Error::Wasm(msg)) => {
-            assert!(msg.contains("on_apply"), "rejection names both entries: {msg}")
+            assert!(
+                msg.contains("on_apply"),
+                "rejection names both entries: {msg}"
+            )
         }
         other => panic!("module with no entry point installed: {other:?}"),
     }
@@ -390,15 +416,20 @@ fn mode_survives_module_replacement_and_recovers() {
     let dir = tempfile::tempdir().unwrap();
     let db = order_feed_db(dir.path(), opts());
 
-    db.install_module("order_feed", ON_TOUCH_ONLY.as_bytes()).unwrap();
-    db.put(b"orders/00000001".to_vec(), br#"{"v":1}"#.to_vec()).unwrap();
+    db.install_module("order_feed", ON_TOUCH_ONLY.as_bytes())
+        .unwrap();
+    db.put(b"orders/00000001".to_vec(), br#"{"v":1}"#.to_vec())
+        .unwrap();
     wait_until("drain failure surfaces", 30, || {
         last_error(&db, "feed").is_some_and(|e| e.contains("on_apply"))
     });
     assert!(pending(&db, "feed") >= 1, "events are retained, not lost");
 
-    db.install_module("order_feed", &guest_wasm("order_feed")).unwrap();
-    wait_until("backlog drains after repair", 30, || pending(&db, "feed") == 0);
+    db.install_module("order_feed", &guest_wasm("order_feed"))
+        .unwrap();
+    wait_until("backlog drains after repair", 30, || {
+        pending(&db, "feed") == 0
+    });
     assert_eq!(feed(&db).len(), 1);
 }
 
@@ -413,9 +444,17 @@ fn mode_survives_module_replacement_and_recovers() {
 fn dynamic_index_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path(), opts()).unwrap();
-    db.install_module("dynamic_index", &guest_wasm("dynamic_index")).unwrap();
-    db.create_trigger("data", "dynamic_index", Some(b"rec/"), Some(b"rec0")).unwrap();
-    db.create_trigger("spec", "dynamic_index", Some(b"idxspec/"), Some(b"idxspec0")).unwrap();
+    db.install_module("dynamic_index", &guest_wasm("dynamic_index"))
+        .unwrap();
+    db.create_trigger("data", "dynamic_index", Some(b"rec/"), Some(b"rec0"))
+        .unwrap();
+    db.create_trigger(
+        "spec",
+        "dynamic_index",
+        Some(b"idxspec/"),
+        Some(b"idxspec0"),
+    )
+    .unwrap();
     let idle = |what| {
         wait_until(what, 30, || {
             db.list_triggers().unwrap().iter().all(|t| t.pending == 0)
@@ -430,18 +469,29 @@ fn dynamic_index_lifecycle() {
             .collect()
     };
 
-    db.put(b"rec/1".to_vec(), br#"{"customer":"acme"}"#.to_vec()).unwrap();
-    db.put(b"rec/2".to_vec(), br#"{"customer":"bob"}"#.to_vec()).unwrap();
-    db.put(b"idxspec/byc".to_vec(), br#"{"field":"customer"}"#.to_vec()).unwrap();
+    db.put(b"rec/1".to_vec(), br#"{"customer":"acme"}"#.to_vec())
+        .unwrap();
+    db.put(b"rec/2".to_vec(), br#"{"customer":"bob"}"#.to_vec())
+        .unwrap();
+    db.put(b"idxspec/byc".to_vec(), br#"{"field":"customer"}"#.to_vec())
+        .unwrap();
     idle("backfill");
-    assert_eq!(index_keys("idx/byc/"), vec!["idx/byc/acme/1", "idx/byc/bob/2"]);
+    assert_eq!(
+        index_keys("idx/byc/"),
+        vec!["idx/byc/acme/1", "idx/byc/bob/2"]
+    );
 
     // live maintenance: move rec/1, delete rec/2, add rec/3
-    db.put(b"rec/1".to_vec(), br#"{"customer":"zorg"}"#.to_vec()).unwrap();
+    db.put(b"rec/1".to_vec(), br#"{"customer":"zorg"}"#.to_vec())
+        .unwrap();
     db.delete(b"rec/2".to_vec()).unwrap();
-    db.put(b"rec/3".to_vec(), br#"{"customer":"acme"}"#.to_vec()).unwrap();
+    db.put(b"rec/3".to_vec(), br#"{"customer":"acme"}"#.to_vec())
+        .unwrap();
     idle("live maintenance");
-    assert_eq!(index_keys("idx/byc/"), vec!["idx/byc/acme/3", "idx/byc/zorg/1"]);
+    assert_eq!(
+        index_keys("idx/byc/"),
+        vec!["idx/byc/acme/3", "idx/byc/zorg/1"]
+    );
 
     // teardown removes the index AND its bookkeeping
     db.delete(b"idxspec/byc".to_vec()).unwrap();
@@ -457,8 +507,10 @@ fn dynamic_index_lifecycle() {
 fn live_stats_fold_is_exact_under_storm() {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Db::open(dir.path(), opts()).unwrap());
-    db.install_module("live_stats", &guest_wasm("live_stats")).unwrap();
-    db.create_trigger("stats", "live_stats", Some(b"ord/"), Some(b"ord0")).unwrap();
+    db.install_module("live_stats", &guest_wasm("live_stats"))
+        .unwrap();
+    db.create_trigger("stats", "live_stats", Some(b"ord/"), Some(b"ord0"))
+        .unwrap();
 
     let barrier = Arc::new(Barrier::new(2));
     let handles: Vec<_> = (0..2u64)
@@ -521,8 +573,16 @@ fn live_stats_fold_is_exact_under_storm() {
 fn undrained_changes_survive_reopen() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let db = Db::open(dir.path(), Options { sync: SyncMode::Always, ..opts() }).unwrap();
-        db.install_module("order_feed", TRAP_ON_APPLY.as_bytes()).unwrap();
+        let db = Db::open(
+            dir.path(),
+            Options {
+                sync: SyncMode::Always,
+                ..opts()
+            },
+        )
+        .unwrap();
+        db.install_module("order_feed", TRAP_ON_APPLY.as_bytes())
+            .unwrap();
         let mode = db
             .create_trigger("feed", "order_feed", Some(b"orders/"), Some(b"orders0"))
             .unwrap();
@@ -536,13 +596,25 @@ fn undrained_changes_survive_reopen() {
         wait_until("events queued", 30, || pending(&db, "feed") == 3);
     }
 
-    let db = Db::open(dir.path(), Options { sync: SyncMode::Always, ..opts() }).unwrap();
+    let db = Db::open(
+        dir.path(),
+        Options {
+            sync: SyncMode::Always,
+            ..opts()
+        },
+    )
+    .unwrap();
     assert_eq!(pending(&db, "feed"), 3, "backlog recovered");
     let listed = db.list_triggers().unwrap();
-    assert_eq!(listed[0].mode, TriggerMode::Changes, "mode recovered from disk");
+    assert_eq!(
+        listed[0].mode,
+        TriggerMode::Changes,
+        "mode recovered from disk"
+    );
 
     // repair with the real guest: the recovered backlog drains in order
-    db.install_module("order_feed", &guest_wasm("order_feed")).unwrap();
+    db.install_module("order_feed", &guest_wasm("order_feed"))
+        .unwrap();
     wait_until("recovered backlog drains", 30, || pending(&db, "feed") == 0);
     let entries = feed(&db);
     let ops: Vec<&str> = entries.iter().map(|e| e["op"].as_str().unwrap()).collect();

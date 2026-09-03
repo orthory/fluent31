@@ -11,9 +11,7 @@ use crate::coding::Reader;
 use crate::error::{corrupt, Result};
 use crate::io::DbFile;
 use crate::iter::InternalIterator;
-use crate::types::{
-    cmp_ikey, ikey_kind, ikey_seqno, ikey_ukey, make_seek_ikey, SeqNo, ValueKind,
-};
+use crate::types::{cmp_ikey, ikey_kind, ikey_seqno, ikey_ukey, make_seek_ikey, SeqNo, ValueKind};
 
 /// The pinned block index, flat: one keys arena, one ends vector and one
 /// block-ref vector instead of a heap `Vec<u8>` per entry. It lives for the
@@ -130,7 +128,9 @@ impl Table {
     pub fn read_chunk(&self, off: u64, len: usize) -> Result<Vec<u8>> {
         let flen = self.file.len()?;
         if off >= flen {
-            return Err(corrupt(format!("chunk offset {off} beyond table end {flen}")));
+            return Err(corrupt(format!(
+                "chunk offset {off} beyond table end {flen}"
+            )));
         }
         let n = (len as u64).min(flen - off) as usize;
         let mut buf = vec![0u8; n];
@@ -454,14 +454,14 @@ mod tests {
         // seek beyond the end / before the start
         it.seek(&make_seek_ikey(b"zzz", MAX_SEQNO)).unwrap();
         assert!(!it.valid());
-        it.seek_for_prev(&make_seek_ikey(b"aaa", MAX_SEQNO)).unwrap();
+        it.seek_for_prev(&make_seek_ikey(b"aaa", MAX_SEQNO))
+            .unwrap();
         assert!(!it.valid());
     }
 
     #[test]
     fn bloom_filters_absent_keys() {
-        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> =
-            vec![(b"only", 1, ValueKind::Put, b"v")];
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = vec![(b"only", 1, ValueKind::Put, b"v")];
         let (_dir, t) = build_table(&refs, 4096);
         assert!(t.may_contain_ukey(b"only").unwrap());
         assert!(!t.may_contain_ukey(b"absent").unwrap()); // outside key range
@@ -539,8 +539,7 @@ mod tests {
     /// stays format 1 — readable by binaries that predate compression.
     #[test]
     fn incompressible_lz4_table_stays_format_1() {
-        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> =
-            vec![(b"only", 1, ValueKind::Put, b"v")];
+        let refs: Vec<(&[u8], u64, ValueKind, &[u8])> = vec![(b"only", 1, ValueKind::Put, b"v")];
         let (_dir, t, _) = build_table_sized(&refs, 4096, Compression::Lz4);
         assert_eq!(footer_format(&t), FORMAT);
         let got = t.get(b"only", MAX_SEQNO).unwrap().unwrap();

@@ -329,8 +329,7 @@ fn generation(name: &str) -> Option<u64> {
 
 /// Read CURRENT and the manifest it names. Returns (gen, data).
 pub(crate) fn load(paths: &DbPaths) -> Result<(u64, ManifestData)> {
-    let cur = std::fs::read_to_string(paths.current())
-        .map_err(Error::Io)?;
+    let cur = std::fs::read_to_string(paths.current()).map_err(Error::Io)?;
     let name = cur.trim();
     let gen: u64 = name
         .strip_prefix("MANIFEST-")
@@ -402,12 +401,14 @@ mod tests {
 
         // fork lineage + pending fork together (a forked store forking again)
         let parent = StoreIdentity::root("main");
-        d.identity = Some(PendingFork {
-            parent_instance_id: parent.instance_id,
-            cut_seqno: 7,
-            name: "fork1".into(),
-        }
-        .mint());
+        d.identity = Some(
+            PendingFork {
+                parent_instance_id: parent.instance_id,
+                cut_seqno: 7,
+                name: "fork1".into(),
+            }
+            .mint(),
+        );
         d.pending_fork = Some(PendingFork {
             parent_instance_id: d.identity.as_ref().unwrap().instance_id,
             cut_seqno: 900,

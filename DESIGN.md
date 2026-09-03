@@ -592,7 +592,12 @@ inline → local record cache → `ValueFetcher` reach-back; every record
 re-verifies CRC + embedded key before serving or caching. Reads reuse
 the engine's merge/MVCC iterator stack at `MAX_SEQNO` over
 overlay + scoped runs. Slice refreshes prune the overlay to the new
-flush watermark. The replica is read in-process through
+flush watermark. The frontier — the master position the scoped view is
+complete through: the slice watermark, then each applied batch's commit
+seqno — is a condvar-backed watermark (`wait_frontier(seqno)` blocks on
+it), and the driver's attachment is waitable by instance id the same way
+(`EdgeReplica::wait_attached`), so no consumer polls for stream
+visibility. The replica is read in-process through
 `EdgeReplica::store()` (`get`/`scan`, clamped to the scope; it is
 read-only and serves no network protocol of its own). Re-sync after
 lag/disconnect keeps all local caches (same instance id); a provenance

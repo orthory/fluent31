@@ -117,5 +117,6 @@ pub fn show(db: &Db, prefix: &str) {
 }
 
 pub fn put(db: &Db, k: &str, v: &str) {
-    db.put(k.as_bytes().to_vec(), v.as_bytes().to_vec()).expect("put");
+    db.put(k.as_bytes().to_vec(), v.as_bytes().to_vec())
+        .expect("put");
 }

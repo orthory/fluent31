@@ -58,7 +58,10 @@ fn change_list_roundtrip() {
 #[test]
 fn malformed_change_lists_are_none_not_garbage() {
     let good = encode(&[(7, 0, b"k", b"v")]);
-    assert!(parse_changes(&good[..good.len() - 1]).is_none(), "truncated");
+    assert!(
+        parse_changes(&good[..good.len() - 1]).is_none(),
+        "truncated"
+    );
     let mut trailing = good.clone();
     trailing.push(0);
     assert!(parse_changes(&trailing).is_none(), "trailing bytes");

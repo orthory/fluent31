@@ -58,7 +58,11 @@ fn build_pristine(dir: &Path) {
     db.compact_all().unwrap();
     // more writes left only in the WAL (unflushed)
     for i in 600..680u32 {
-        db.put(format!("key/{i:05}").into_bytes(), format!("w{i}").into_bytes()).unwrap();
+        db.put(
+            format!("key/{i:05}").into_bytes(),
+            format!("w{i}").into_bytes(),
+        )
+        .unwrap();
     }
     drop(db);
 }
@@ -141,7 +145,10 @@ fn random_on_disk_corruption_never_panics() {
     let pristine = tempfile::tempdir().unwrap();
     build_pristine(pristine.path());
     let file_count = files_in(pristine.path()).len();
-    assert!(file_count >= 3, "expected SST + vlog + WAL + manifest, got {file_count}");
+    assert!(
+        file_count >= 3,
+        "expected SST + vlog + WAL + manifest, got {file_count}"
+    );
 
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let iterations = 500;
@@ -175,7 +182,9 @@ fn pristine_store_reads_back_fully() {
     let db = Db::open(dir.path(), opts()).unwrap();
     for i in 0..680u32 {
         assert!(
-            db.get(&format!("key/{i:05}").into_bytes()).unwrap().is_some(),
+            db.get(&format!("key/{i:05}").into_bytes())
+                .unwrap()
+                .is_some(),
             "key {i} missing from pristine store"
         );
     }

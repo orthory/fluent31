@@ -54,7 +54,10 @@ fn sync_wal_is_an_explicit_barrier() {
         assert!(db.stats().wal_syncs > before);
     } // drop also syncs once (clean-close barrier)
     let db = Db::open(dir.path(), periodic(60_000)).unwrap();
-    assert_eq!(db.get(b"k").unwrap().as_deref(), Some(b"must-survive".as_ref()));
+    assert_eq!(
+        db.get(b"k").unwrap().as_deref(),
+        Some(b"must-survive".as_ref())
+    );
 }
 
 /// Concurrent periodic writers: correctness identical to the other modes.
@@ -89,7 +92,14 @@ fn periodic_concurrent_writers_lose_nothing() {
 fn sync_wal_available_in_all_modes() {
     for sync in [SyncMode::Always, SyncMode::Never] {
         let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(dir.path(), Options { sync, ..Options::default() }).unwrap();
+        let db = Db::open(
+            dir.path(),
+            Options {
+                sync,
+                ..Options::default()
+            },
+        )
+        .unwrap();
         db.put("x", "y").unwrap();
         db.sync_wal().unwrap();
         assert_eq!(db.get(b"x").unwrap().as_deref(), Some(b"y".as_ref()));
